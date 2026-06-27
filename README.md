@@ -17,7 +17,9 @@ La primera ejecución crea `.venv`, instala dependencias y compila el frontend. 
 
 ## Datos
 
-- Catálogo: `..\EA_track\Track_v1.xlsx`; nunca se modifica.
+- Fuente operativa: MT5. Cada combinación observada de terminal, cuenta, símbolo, magic y comentario crea o actualiza automáticamente su estrategia.
+- Catálogo adicional: `..\EA_track\Track_v1.xlsx`; aporta nombres y KPIs históricos, pero nunca se modifica ni bloquea bots nuevos.
+- Exportación: `GET /api/catalog/export` crea una copia actualizada en `data\exports` con una hoja `Dashboard MT5`.
 - SQLite: `data\dashboard.db`.
 - Cola MT5: `<DataDir>\MQL5\Files\Dashboardv1`.
 - SQX: sincronización read-only cuando SQX está abierto; los snapshots quedan persistidos.
@@ -28,9 +30,9 @@ La primera ejecución crea `.venv`, instala dependencias y compila el frontend. 
 - `GET /api/dashboard`, `GET /api/strategies/{id}`
 - `GET|POST /api/terminals`, `POST /api/terminals/{id}/sync`
 - `GET /api/chart/{strategy_id}`
+- `POST /api/catalog/import`, `GET /api/catalog/export`
 - `GET /api/mappings/suggestions`, `POST /api/mappings/confirm`
 - `GET /api/sqx/status`, `POST /api/sqx/sync`
 - `GET|PUT /api/alerts`
 
 La aplicación escucha únicamente en `127.0.0.1`.
-

@@ -32,7 +32,7 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
 def register_terminal(name: str, data_dir: str) -> dict[str, Any]:
     path = Path(data_dir).expanduser().resolve()
     if not (path / "origin.txt").is_file() or not (path / "MQL5").is_dir():
-        raise ValueError("DataDir inválido: debe contener origin.txt y MQL5")
+        raise ValueError("Invalid DataDir: it must contain origin.txt and MQL5")
     with session() as conn:
         conn.execute(
             """INSERT INTO terminals(name,data_dir,status,created_at) VALUES(?,?,?,?)
@@ -47,7 +47,7 @@ def request_sync(terminal_id: int) -> dict[str, Any]:
     with session() as conn:
         terminal = conn.execute("SELECT * FROM terminals WHERE id=?", (terminal_id,)).fetchone()
         if not terminal:
-            raise KeyError("Terminal no encontrada")
+            raise KeyError("Terminal not found")
         root = Path(terminal["data_dir"]) / BRIDGE_RELATIVE
         payload = {
             "schema_version": 1,
@@ -64,13 +64,13 @@ def request_sync(terminal_id: int) -> dict[str, Any]:
 def request_chart(terminal_id: int, symbol: str, timeframe: str, start: int, end: int) -> dict[str, Any]:
     allowed = {"M1", "M5", "M15", "M30", "H1", "H4", "D1"}
     if timeframe not in allowed:
-        raise ValueError(f"Timeframe inválido: {timeframe}")
+        raise ValueError(f"Invalid timeframe: {timeframe}")
     if not symbol or len(symbol) > 32:
-        raise ValueError("Símbolo inválido")
+        raise ValueError("Invalid symbol")
     with session() as conn:
         terminal = conn.execute("SELECT * FROM terminals WHERE id=?", (terminal_id,)).fetchone()
         if not terminal:
-            raise KeyError("Terminal no encontrada")
+            raise KeyError("Terminal not found")
         payload = {
             "schema_version": 1,
             "request_id": f"chart-{terminal_id}-{int(time.time() * 1000)}",
@@ -199,7 +199,7 @@ def ingest_responses() -> dict[str, int]:
                 try:
                     payload = json.loads(path.read_text(encoding="utf-8-sig"))
                     if payload.get("status", "ok") != "ok":
-                        raise ValueError(str(payload.get("message", "Respuesta MT5 con error")))
+                        raise ValueError(str(payload.get("message", "MT5 response returned an error")))
                     if kind == "sync":
                         _upsert_sync_response(conn, terminal, payload)
                         sync_count += 1
@@ -226,7 +226,16 @@ def ingest_responses() -> dict[str, int]:
                     pass
             if stale:
                 conn.execute("UPDATE terminals SET status='disconnected' WHERE id=?", (terminal["id"],))
-    return {"sync": sync_count, "charts": chart_count, "errors": errors}
+    from .mapping import ensure_mt5_strategies
+
+    discovery = ensure_mt5_strategies()
+    return {
+        "sync": sync_count,
+        "charts": chart_count,
+        "errors": errors,
+        "strategies_created": discovery["created"],
+        "strategies_linked": discovery["linked"] + discovery["safe_matches"],
+    }
 
 
 def sync_all() -> dict[str, Any]:

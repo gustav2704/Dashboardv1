@@ -25,6 +25,60 @@ def test_sync_response_is_ingested_and_deduplicated(tmp_path, monkeypatch):
     with db.session() as conn:
         assert conn.execute("SELECT COUNT(*) FROM deals").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM positions").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM strategies").fetchone()[0] == 1
+        strategy = conn.execute(
+            "SELECT origin,mql5_name FROM strategies"
+        ).fetchone()
+        assert tuple(strategy) == ("mt5", "XAU bot")
+        assert conn.execute("SELECT COUNT(*) FROM mappings").fetchone()[0] == 1
         row = conn.execute("SELECT status,account_login,cursor_msc FROM terminals WHERE id=?", (terminal["id"],)).fetchone()
         assert tuple(row) == ("disconnected", "123", 1000)
 
+    assert ingest_responses()["strategies_created"] == 0
+    with db.session() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM strategies").fetchone()[0] == 1
+
+
+def test_open_position_discovers_mt5_strategy_without_deals(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "position.db")
+    db.init_db()
+    data_dir = tmp_path / "terminal"
+    (data_dir / "MQL5").mkdir(parents=True)
+    (data_dir / "origin.txt").write_text("C:\\MT5", encoding="utf-8")
+    register_terminal("Fixture", str(data_dir))
+    response_dir = data_dir / BRIDGE_RELATIVE / "Responses"
+    response_dir.mkdir(parents=True)
+    payload = {
+        "status": "ok",
+        "generated_at": "2026-06-26T12:00:00Z",
+        "account_login": "456",
+        "server": "Demo",
+        "account": {"balance": 10000, "equity": 10000},
+        "deals": [],
+        "positions": [
+            {
+                "ticket": 10,
+                "position_id": 10,
+                "symbol": "US100.cash",
+                "direction": "Long",
+                "time_msc": 1000,
+                "volume": 0.1,
+                "open_price": 20000,
+                "current_price": 20010,
+                "profit": 1,
+                "swap": 0,
+                "magic": 90210,
+                "comment": "New MT5 bot",
+            }
+        ],
+    }
+    (response_dir / "sync.response.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    result = ingest_responses()
+
+    assert result["strategies_created"] == 1
+    with db.session() as conn:
+        strategy = conn.execute(
+            "SELECT symbol,sqx_name,origin,account_login FROM strategies"
+        ).fetchone()
+        assert tuple(strategy) == ("US100.cash", "New MT5 bot", "mt5", "456")

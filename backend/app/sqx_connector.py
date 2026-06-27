@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
-from pathlib import Path
+from difflib import SequenceMatcher
 from typing import Any
 
 from .config import SQX_DIR, SQX_EXTRACTOR
 from .db import session, utcnow
-from .mapping import normalize
+from .mapping import normalize, symbol_family, version_signature
 
 
 class SQXUnavailable(RuntimeError):
@@ -17,7 +18,7 @@ class SQXUnavailable(RuntimeError):
 
 def _run(*args: str, timeout: int = 60) -> Any:
     if not SQX_EXTRACTOR.is_file():
-        raise SQXUnavailable(f"No se encontró el extractor SQX: {SQX_EXTRACTOR}")
+        raise SQXUnavailable(f"Could not find the SQX extractor: {SQX_EXTRACTOR}")
     command = [
         sys.executable,
         str(SQX_EXTRACTOR),
@@ -27,22 +28,32 @@ def _run(*args: str, timeout: int = 60) -> Any:
         "json",
         *args,
     ]
-    completed = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise SQXUnavailable(f"SQX did not respond within {timeout} seconds") from exc
     if completed.returncode:
-        message = (completed.stderr or completed.stdout or "SQX no disponible").strip()
+        message = (completed.stderr or completed.stdout or "SQX unavailable").strip()
         raise SQXUnavailable(message[:1000])
     try:
         return json.loads(completed.stdout)
     except json.JSONDecodeError as exc:
-        raise SQXUnavailable("El extractor SQX devolvió una respuesta no JSON") from exc
+        raise SQXUnavailable("The SQX extractor returned a non-JSON response") from exc
 
 
 def status() -> dict[str, Any]:
     try:
         result = _run("status", timeout=15)
         return {"available": True, "details": result}
-    except (SQXUnavailable, subprocess.TimeoutExpired) as exc:
+    except SQXUnavailable as exc:
         return {"available": False, "message": str(exc)}
+
+
+def databanks() -> dict[str, Any]:
+    payload = _run("databanks", timeout=30)
+    if not isinstance(payload, dict):
+        raise SQXUnavailable("SQX returned an invalid databank list")
+    return payload
 
 
 def _items(payload: Any) -> list[dict[str, Any]]:
@@ -58,43 +69,273 @@ def _items(payload: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _identity_name(item: dict[str, Any]) -> str:
+    identity = item.get("identity", item)
+    return str(
+        identity.get("strategy_name")
+        or identity.get("name")
+        or item.get("strategy_name")
+        or item.get("name")
+        or item.get("strategy")
+        or ""
+    ).strip()
+
+
+def _canonical_symbol(value: str) -> str:
+    family = symbol_family(value)
+    return {"naq": "NAQ", "xau": "XAU", "dax": "DAX"}.get(family, value)
+
+
+def _has_wf_matrix(value: str) -> bool:
+    return "wfmatrix" in normalize(value)
+
+
+def _variant_score(name: str, symbol: str, strategy: Any) -> float:
+    if symbol and strategy["symbol"] and symbol_family(symbol) != symbol_family(strategy["symbol"]):
+        return 0.0
+    signature = version_signature(name)
+    if not signature:
+        return 0.0
+    aliases = [strategy["sqx_name"] or "", strategy["mql5_name"] or ""]
+    if signature not in [version_signature(alias) for alias in aliases]:
+        return 0.0
+    ratio = max(
+        SequenceMatcher(None, normalize(name), normalize(alias)).ratio()
+        for alias in aliases
+        if alias
+    )
+    wf_match = any(_has_wf_matrix(alias) == _has_wf_matrix(name) for alias in aliases if alias)
+    return 0.45 * ratio + 0.35 + (0.15 if wf_match else 0.0) + 0.05
+
+
+def _origin_with_sqx(origin: str) -> str:
+    sources = set(filter(None, re.split(r"[+]", origin or "")))
+    sources.add("sqx")
+    return "+".join(source for source in ("mt5", "sqx", "excel") if source in sources)
+
+
+def _find_strategy(
+    strategies: list[Any],
+    claimed: set[int],
+    name: str,
+    symbol: str,
+) -> tuple[Any | None, str]:
+    available = [row for row in strategies if int(row["id"]) not in claimed]
+    exact = [
+        row
+        for row in available
+        if normalize(name) in {normalize(row["sqx_name"]), normalize(row["mql5_name"] or "")}
+    ]
+    if len(exact) == 1:
+        return exact[0], "exact"
+
+    ranked = sorted(
+        (
+            (_variant_score(name, symbol, row), row)
+            for row in available
+        ),
+        key=lambda item: item[0],
+        reverse=True,
+    )
+    if not ranked or ranked[0][0] < 0.78:
+        return None, "new"
+    runner_up = ranked[1][0] if len(ranked) > 1 else 0.0
+    if ranked[0][0] - runner_up < 0.05:
+        return None, "new"
+    return ranked[0][1], "variant"
+
+
+def _upsert_baseline(
+    conn: Any,
+    strategy_id: int,
+    project: str,
+    databank: str,
+    sample: str,
+    metrics: dict[str, Any],
+    synced_at: str,
+) -> None:
+    existing = conn.execute(
+        """SELECT id FROM baseline_snapshots
+           WHERE strategy_id=? AND source='sqx' AND project=? AND databank=? AND sample_type=?
+           ORDER BY id DESC""",
+        (strategy_id, project, databank, sample),
+    ).fetchall()
+    metrics_json = json.dumps(metrics, ensure_ascii=False)
+    if existing:
+        conn.execute(
+            "UPDATE baseline_snapshots SET metrics_json=?,orders_json=NULL,synced_at=? WHERE id=?",
+            (metrics_json, synced_at, existing[0]["id"]),
+        )
+        if len(existing) > 1:
+            conn.executemany(
+                "DELETE FROM baseline_snapshots WHERE id=?",
+                [(row["id"],) for row in existing[1:]],
+            )
+        return
+    conn.execute(
+        """INSERT INTO baseline_snapshots(
+             strategy_id,source,project,databank,sample_type,metrics_json,orders_json,synced_at
+           ) VALUES(?,?,?,?,?,?,NULL,?)""",
+        (strategy_id, "sqx", project, databank, sample, metrics_json, synced_at),
+    )
+
+
 def sync(project: str, databank: str) -> dict[str, Any]:
     if not project or not databank:
-        raise ValueError("project y databank son obligatorios")
+        raise ValueError("project and databank are required")
     payload = _run("bulk", "--project", project, "--databank", databank, timeout=180)
     incoming = _items(payload)
-    imported = unmatched = 0
+    imported = matched = variant_matched = created = unmatched = baselines = passed = 0
+    synced_at = utcnow()
     with session() as conn:
-        strategies = conn.execute("SELECT * FROM strategies").fetchall()
-        by_name = {normalize(row["sqx_name"]): row for row in strategies}
-        by_alt = {normalize(row["mql5_name"] or ""): row for row in strategies if row["mql5_name"]}
+        strategies = list(conn.execute("SELECT * FROM strategies WHERE retired=0").fetchall())
+        existing_links = {
+            (
+                row["project"].casefold(),
+                row["databank"].casefold(),
+                row["strategy_name"].casefold(),
+            ): row
+            for row in conn.execute("SELECT * FROM sqx_strategy_links").fetchall()
+        }
+        claimed = {int(row["strategy_id"]) for row in existing_links.values()}
+        reserved: dict[tuple[str, str, str], Any] = {}
+        reserved_ids: set[int] = set()
+        for item in incoming:
+            name = _identity_name(item)
+            if not name:
+                continue
+            key = (project.casefold(), databank.casefold(), name.casefold())
+            if key in existing_links:
+                continue
+            literal = [
+                row
+                for row in strategies
+                if int(row["id"]) not in claimed | reserved_ids
+                and name.casefold()
+                in {
+                    str(row["sqx_name"] or "").strip().casefold(),
+                    str(row["mql5_name"] or "").strip().casefold(),
+                }
+            ]
+            if len(literal) == 1:
+                reserved[key] = literal[0]
+                reserved_ids.add(int(literal[0]["id"]))
+
         for item in incoming:
             identity = item.get("identity", item)
-            name = str(identity.get("name") or item.get("name") or item.get("strategy") or "")
-            strategy = by_name.get(normalize(name)) or by_alt.get(normalize(name))
-            if not strategy:
+            name = _identity_name(item)
+            if not name:
                 unmatched += 1
                 continue
+            symbol = str(identity.get("symbol") or "")
+            key = (project.casefold(), databank.casefold(), name.casefold())
+            link = existing_links.get(key)
+            strategy = None
+            match_type = "linked"
+            if link:
+                strategy = conn.execute(
+                    "SELECT * FROM strategies WHERE id=?", (link["strategy_id"],)
+                ).fetchone()
+            if not strategy:
+                strategy = reserved.get(key)
+                if strategy:
+                    match_type = "exact"
+                else:
+                    strategy, match_type = _find_strategy(
+                        strategies,
+                        claimed | reserved_ids,
+                        name,
+                        symbol,
+                    )
+                if strategy:
+                    matched += 1
+                    if match_type == "variant":
+                        variant_matched += 1
+                else:
+                    strategy_id = conn.execute(
+                        """INSERT INTO strategies(
+                             symbol,sqx_name,mql5_name,account_login,origin,created_at
+                           ) VALUES(?,?,NULL,NULL,'sqx',?)""",
+                        (_canonical_symbol(symbol), name, synced_at),
+                    ).lastrowid
+                    strategy = conn.execute(
+                        "SELECT * FROM strategies WHERE id=?", (strategy_id,)
+                    ).fetchone()
+                    strategies.append(strategy)
+                    created += 1
+                claimed.add(int(strategy["id"]))
+                conn.execute(
+                    """INSERT INTO sqx_strategy_links(
+                         strategy_id,project,databank,strategy_name,symbol,timeframe,
+                         filter_result,last_synced_at
+                       ) VALUES(?,?,?,?,?,?,?,?)""",
+                    (
+                        strategy["id"],
+                        project,
+                        databank,
+                        name,
+                        symbol,
+                        str(identity.get("timeframe") or ""),
+                        str(identity.get("filter_result") or ""),
+                        synced_at,
+                    ),
+                )
+                existing_links[key] = conn.execute(
+                    "SELECT * FROM sqx_strategy_links WHERE strategy_id=?",
+                    (strategy["id"],),
+                ).fetchone()
+            else:
+                conn.execute(
+                    """UPDATE sqx_strategy_links SET symbol=?,timeframe=?,filter_result=?,
+                       last_synced_at=? WHERE id=?""",
+                    (
+                        symbol,
+                        str(identity.get("timeframe") or ""),
+                        str(identity.get("filter_result") or ""),
+                        synced_at,
+                        link["id"],
+                    ),
+                )
+
+            conn.execute(
+                """UPDATE strategies SET
+                   symbol=COALESCE(NULLIF(symbol,''),?),
+                   origin=?
+                   WHERE id=?""",
+                (
+                    _canonical_symbol(symbol),
+                    _origin_with_sqx(str(strategy["origin"] or "")),
+                    strategy["id"],
+                ),
+            )
             stats = item.get("stats", {})
             for sample in ("full", "is", "oos"):
                 metrics = stats.get(sample)
                 if not isinstance(metrics, dict) or not metrics:
                     continue
-                conn.execute(
-                    """INSERT INTO baseline_snapshots(
-                         strategy_id,source,project,databank,sample_type,metrics_json,orders_json,synced_at
-                       ) VALUES(?,?,?,?,?,?,?,?)""",
-                    (
-                        strategy["id"],
-                        "sqx",
-                        project,
-                        databank,
-                        sample,
-                        json.dumps(metrics, ensure_ascii=False),
-                        json.dumps(item.get("orders"), ensure_ascii=False) if item.get("orders") else None,
-                        utcnow(),
-                    ),
+                _upsert_baseline(
+                    conn,
+                    int(strategy["id"]),
+                    project,
+                    databank,
+                    sample,
+                    metrics,
+                    synced_at,
                 )
+                baselines += 1
+            if str(identity.get("filter_result") or "").upper() == "PASSED":
+                passed += 1
             imported += 1
-    return {"project": project, "databank": databank, "received": len(incoming), "imported": imported, "unmatched": unmatched}
-
+    return {
+        "project": project,
+        "databank": databank,
+        "received": len(incoming),
+        "imported": imported,
+        "matched": matched,
+        "variant_matched": variant_matched,
+        "created": created,
+        "unmatched": unmatched,
+        "passed": passed,
+        "baselines": baselines,
+        "synced_at": synced_at,
+    }

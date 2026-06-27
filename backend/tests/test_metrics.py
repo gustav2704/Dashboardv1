@@ -1,3 +1,5 @@
+from datetime import date, datetime
+
 from app.metrics import compute_metrics, health_status, pick_baseline, reconstruct_trades
 
 
@@ -27,10 +29,28 @@ def test_metrics_streak_drawdown_and_sqn():
     trades = [{"net_profit": value, "open_time_msc": i * 1000, "close_time_msc": (i + 1) * 1000, "commission": 0, "swap": 0} for i, value in enumerate([10, -4, -3, 8, 2])]
     metrics = compute_metrics(trades)
     assert metrics["trades"] == 5
+    assert metrics["winning_trades"] == 3
+    assert metrics["losing_trades"] == 2
+    assert metrics["breakeven_trades"] == 0
     assert metrics["max_consecutive_losses"] == 2
     assert metrics["max_drawdown"] == 7
     assert metrics["net_profit"] == 13
+    assert metrics["best_trade"] == 10
+    assert metrics["worst_trade"] == -4
     assert metrics["sqn"] is not None
+
+
+def test_metrics_tracks_today_profit_from_local_close_date():
+    today_msc = int(datetime(2026, 6, 24, 12, 0).timestamp() * 1000)
+    prior_msc = int(datetime(2026, 6, 23, 12, 0).timestamp() * 1000)
+    trades = [
+        {"net_profit": 25, "open_time_msc": today_msc - 3_600_000, "close_time_msc": today_msc, "commission": 0, "swap": 0},
+        {"net_profit": -5, "open_time_msc": today_msc - 1_800_000, "close_time_msc": today_msc + 1000, "commission": 0, "swap": 0},
+        {"net_profit": 100, "open_time_msc": prior_msc - 3_600_000, "close_time_msc": prior_msc, "commission": 0, "swap": 0},
+    ]
+    metrics = compute_metrics(trades, today=date(2026, 6, 24))
+    assert metrics["today_profit"] == 20
+    assert metrics["today_trades"] == 2
 
 
 def test_oos_baseline_is_preferred_and_health_is_gray_for_small_sample():

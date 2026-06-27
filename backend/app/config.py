@@ -6,6 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT / "data"
+EXPORT_DIR = DATA_DIR / "exports"
 DB_PATH = Path(os.environ.get("DASHBOARDV1_DB", DATA_DIR / "dashboard.db"))
 FRONTEND_DIST = ROOT / "frontend" / "dist"
 DEFAULT_CATALOG = ROOT.parent / "EA_track" / "Track_v1.xlsx"
@@ -25,4 +26,3 @@ DEFAULT_TERMINAL = Path(
 
 REFRESH_SECONDS = int(os.environ.get("DASHBOARDV1_REFRESH_SECONDS", "300"))
 STALE_SECONDS = int(os.environ.get("DASHBOARDV1_STALE_SECONDS", "600"))
-

@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import statistics
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Iterable
 
 
@@ -107,15 +107,24 @@ def _max_streak(values: list[float], winning: bool) -> int:
     return best
 
 
-def compute_metrics(trades: list[dict[str, Any]], open_positions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def compute_metrics(
+    trades: list[dict[str, Any]],
+    open_positions: list[dict[str, Any]] | None = None,
+    today: date | None = None,
+) -> dict[str, Any]:
     open_positions = open_positions or []
-    profits = [float(t.get("net_profit", 0)) for t in trades]
+    today = today or datetime.now().astimezone().date()
+    ordered_trades = sorted(trades, key=lambda t: (int(t.get("close_time_msc", 0)), int(t.get("deal_ticket", 0))))
+    profits = [float(t.get("net_profit", 0)) for t in ordered_trades]
     count = len(profits)
+    winning_trades = sum(1 for p in profits if p > 0)
+    losing_trades = sum(1 for p in profits if p < 0)
+    breakeven_trades = count - winning_trades - losing_trades
     gross_profit = sum(p for p in profits if p > 0)
     gross_loss = abs(sum(p for p in profits if p < 0))
     durations = [
         max(0, int(t["close_time_msc"]) - int(t["open_time_msc"])) / 1000
-        for t in trades
+        for t in ordered_trades
         if t.get("close_time_msc") and t.get("open_time_msc")
     ]
     equity = peak = drawdown = 0.0
@@ -124,26 +133,39 @@ def compute_metrics(trades: list[dict[str, Any]], open_positions: list[dict[str,
         peak = max(peak, equity)
         drawdown = max(drawdown, peak - equity)
     months = 0.0
-    if trades:
-        first = min(int(t["open_time_msc"]) for t in trades)
-        last = max(int(t["close_time_msc"]) for t in trades)
+    if ordered_trades:
+        first = min(int(t["open_time_msc"]) for t in ordered_trades)
+        last = max(int(t["close_time_msc"]) for t in ordered_trades)
         months = max((last - first) / (1000 * 86400 * 30.4375), 1 / 30.4375)
     mean = statistics.fmean(profits) if profits else 0.0
     stdev = statistics.stdev(profits) if len(profits) > 1 else 0.0
+    today_profits = [
+        float(t.get("net_profit", 0))
+        for t in ordered_trades
+        if t.get("close_time_msc")
+        and datetime.fromtimestamp(int(t["close_time_msc"]) / 1000).date() == today
+    ]
     return {
         "net_profit": sum(profits),
         "floating_profit": sum(float(p.get("profit", 0)) for p in open_positions),
         "gross_profit": gross_profit,
         "gross_loss": gross_loss,
         "trades": count,
+        "winning_trades": winning_trades,
+        "losing_trades": losing_trades,
+        "breakeven_trades": breakeven_trades,
         "open_positions": len(open_positions),
-        "win_rate": sum(1 for p in profits if p > 0) / count if count else 0.0,
+        "win_rate": winning_trades / count if count else 0.0,
         "profit_factor": gross_profit / gross_loss if gross_loss else (None if not gross_profit else 999.0),
         "expectancy": mean,
         "avg_duration_seconds": statistics.fmean(durations) if durations else 0.0,
         "median_duration_seconds": statistics.median(durations) if durations else 0.0,
         "avg_win": statistics.fmean([p for p in profits if p > 0]) if any(p > 0 for p in profits) else 0.0,
         "avg_loss": statistics.fmean([p for p in profits if p < 0]) if any(p < 0 for p in profits) else 0.0,
+        "best_trade": max(profits) if profits else None,
+        "worst_trade": min(profits) if profits else None,
+        "today_profit": sum(today_profits),
+        "today_trades": len(today_profits),
         "max_consecutive_wins": _max_streak(profits, True),
         "max_consecutive_losses": _max_streak(profits, False),
         "trades_per_month": count / months if months else 0.0,
@@ -178,9 +200,9 @@ def _number(source: dict[str, Any], *keys: str) -> float | None:
 
 def health_status(current: dict[str, Any], baseline: dict[str, Any] | None, rules: dict[str, float]) -> dict[str, Any]:
     if current["trades"] < rules["min_trades"]:
-        return {"status": "gray", "reasons": ["Muestra insuficiente"], "baseline_sample": baseline and baseline.get("sample_type")}
+        return {"status": "gray", "reasons": ["Insufficient sample"], "baseline_sample": baseline and baseline.get("sample_type")}
     if not baseline:
-        return {"status": "gray", "reasons": ["Sin baseline SQX"], "baseline_sample": None}
+        return {"status": "gray", "reasons": ["No SQX baseline"], "baseline_sample": None}
     metrics = baseline.get("metrics", baseline)
     red: list[str] = []
     yellow: list[str] = []
@@ -191,9 +213,9 @@ def health_status(current: dict[str, Any], baseline: dict[str, Any] | None, rule
     max_losses = _number(metrics, "MaxConsecLoss", "MaxConsecutiveLosses")
     if max_losses:
         if current["max_consecutive_losses"] > max_losses:
-            red.append("Racha de pérdidas")
+            red.append("Loss streak")
         elif current["max_consecutive_losses"] >= max_losses:
-            yellow.append("Racha de pérdidas")
+            yellow.append("Loss streak")
     comparisons = [
         ("profit_factor", ("ProfitFactor",)),
         ("expectancy", ("Expectancy",)),
@@ -214,9 +236,9 @@ def health_status(current: dict[str, Any], baseline: dict[str, Any] | None, rule
     if expected_frequency and expected_frequency > 0:
         ratio = current["trades_per_month"] / expected_frequency
         if ratio < rules["frequency_red_low"] or ratio > rules["frequency_red_high"]:
-            red.append("Frecuencia")
+            red.append("Frequency")
         elif ratio < rules["frequency_yellow_low"] or ratio > rules["frequency_yellow_high"]:
-            yellow.append("Frecuencia")
+            yellow.append("Frequency")
     return {
         "status": "red" if red else "yellow" if yellow else "green",
         "reasons": red + yellow,

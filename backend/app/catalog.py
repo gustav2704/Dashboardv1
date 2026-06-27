@@ -72,6 +72,10 @@ def read_first_sheet(path: Path) -> list[list[object]]:
         return result
 
 
+def _normalize(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
 def import_catalog(path: Path) -> dict[str, int]:
     rows = read_first_sheet(path)
     header_index = next(
@@ -94,21 +98,57 @@ def import_catalog(path: Path) -> dict[str, int]:
             account = str(record.get("demo account number") or "").strip()
             catalog_json = json.dumps(record, ensure_ascii=False)
             existing = conn.execute(
-                "SELECT id FROM strategies WHERE sqx_name=? AND account_login=?",
+                "SELECT id,origin FROM strategies WHERE sqx_name=? AND account_login=?",
                 (sqx_name, account),
             ).fetchone()
+            if not existing and mql_name:
+                candidates = conn.execute(
+                    """SELECT id,origin,sqx_name,mql5_name FROM strategies
+                       WHERE account_login=? AND origin IN ('mt5','mt5+excel')""",
+                    (account,),
+                ).fetchall()
+                matching = [
+                    candidate
+                    for candidate in candidates
+                    if _normalize(mql_name)
+                    in {
+                        _normalize(candidate["sqx_name"]),
+                        _normalize(candidate["mql5_name"]),
+                    }
+                ]
+                if len(matching) == 1:
+                    existing = matching[0]
             if existing:
                 conn.execute(
-                    "UPDATE strategies SET symbol=?,mql5_name=?,catalog_row=?,catalog_json=? WHERE id=?",
-                    (last_symbol, mql_name, source_row, catalog_json, existing["id"]),
+                    """UPDATE strategies SET symbol=?,sqx_name=?,mql5_name=?,catalog_row=?,
+                       catalog_json=?,origin=? WHERE id=?""",
+                    (
+                        last_symbol,
+                        sqx_name,
+                        mql_name,
+                        source_row,
+                        catalog_json,
+                        "mt5+excel" if existing["origin"] in ("mt5", "mt5+excel") else "excel",
+                        existing["id"],
+                    ),
                 )
                 updated += 1
                 strategy_id = existing["id"]
             else:
                 cursor = conn.execute(
-                    """INSERT INTO strategies(symbol,sqx_name,mql5_name,account_login,catalog_row,catalog_json,created_at)
-                       VALUES(?,?,?,?,?,?,?)""",
-                    (last_symbol, sqx_name, mql_name, account, source_row, catalog_json, utcnow()),
+                    """INSERT INTO strategies(
+                         symbol,sqx_name,mql5_name,account_login,origin,catalog_row,catalog_json,created_at
+                       ) VALUES(?,?,?,?,?,?,?,?)""",
+                    (
+                        last_symbol,
+                        sqx_name,
+                        mql_name,
+                        account,
+                        "excel",
+                        source_row,
+                        catalog_json,
+                        utcnow(),
+                    ),
                 )
                 inserted += 1
                 strategy_id = cursor.lastrowid
@@ -122,17 +162,16 @@ def import_catalog(path: Path) -> dict[str, int]:
                 "MaxDD": record.get("MaxDD"),
             }
             if any(value not in (None, "") for value in baseline_common.values()) or losses:
-                exists = conn.execute(
-                    "SELECT 1 FROM baseline_snapshots WHERE strategy_id=? AND source='excel'",
+                conn.execute(
+                    "DELETE FROM baseline_snapshots WHERE strategy_id=? AND source='excel'",
                     (strategy_id,),
-                ).fetchone()
-                if not exists:
-                    full_metrics = {**baseline_common, "MaxConsecLoss": losses[0] if losses else None}
-                    oos_metrics = {**baseline_common, "MaxConsecLoss": losses[1] if len(losses) > 1 else losses[0] if losses else None}
-                    for sample_type, metrics in (("full", full_metrics), ("oos", oos_metrics)):
-                        conn.execute(
-                            """INSERT INTO baseline_snapshots(strategy_id,source,sample_type,metrics_json,synced_at)
-                               VALUES(?,?,?,?,?)""",
-                            (strategy_id, "excel", sample_type, json.dumps(metrics, ensure_ascii=False), utcnow()),
-                        )
+                )
+                full_metrics = {**baseline_common, "MaxConsecLoss": losses[0] if losses else None}
+                oos_metrics = {**baseline_common, "MaxConsecLoss": losses[1] if len(losses) > 1 else losses[0] if losses else None}
+                for sample_type, metrics in (("full", full_metrics), ("oos", oos_metrics)):
+                    conn.execute(
+                        """INSERT INTO baseline_snapshots(strategy_id,source,sample_type,metrics_json,synced_at)
+                           VALUES(?,?,?,?,?)""",
+                        (strategy_id, "excel", sample_type, json.dumps(metrics, ensure_ascii=False), utcnow()),
+                    )
     return {"inserted": inserted, "updated": updated, "total": inserted + updated}

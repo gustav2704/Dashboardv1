@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS strategies (
   sqx_name TEXT NOT NULL,
   mql5_name TEXT,
   account_login TEXT,
+  origin TEXT NOT NULL DEFAULT 'excel',
+  last_observed_at TEXT,
   retired INTEGER NOT NULL DEFAULT 0,
   catalog_row INTEGER,
   catalog_json TEXT NOT NULL DEFAULT '{}',
@@ -116,9 +118,23 @@ CREATE TABLE IF NOT EXISTS baseline_snapshots (
   synced_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS sqx_strategy_links (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  strategy_id INTEGER NOT NULL UNIQUE REFERENCES strategies(id) ON DELETE CASCADE,
+  project TEXT NOT NULL,
+  databank TEXT NOT NULL,
+  strategy_name TEXT NOT NULL COLLATE NOCASE,
+  symbol TEXT,
+  timeframe TEXT,
+  filter_result TEXT,
+  last_synced_at TEXT NOT NULL,
+  UNIQUE(project, databank, strategy_name)
+);
+
 CREATE INDEX IF NOT EXISTS idx_baseline_strategy ON baseline_snapshots(strategy_id, sample_type, synced_at DESC);
 CREATE INDEX IF NOT EXISTS idx_deals_position ON deals(terminal_id, position_id, time_msc);
 CREATE INDEX IF NOT EXISTS idx_deals_magic ON deals(terminal_id, magic, symbol);
+CREATE INDEX IF NOT EXISTS idx_sqx_links_source ON sqx_strategy_links(project, databank, strategy_name);
 
 CREATE TABLE IF NOT EXISTS candles (
   terminal_id INTEGER NOT NULL REFERENCES terminals(id) ON DELETE CASCADE,
@@ -183,6 +199,15 @@ def init_db(path: Path | None = None) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with session(path) as conn:
         conn.executescript(SCHEMA)
+        strategy_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(strategies)").fetchall()
+        }
+        if "origin" not in strategy_columns:
+            conn.execute(
+                "ALTER TABLE strategies ADD COLUMN origin TEXT NOT NULL DEFAULT 'excel'"
+            )
+        if "last_observed_at" not in strategy_columns:
+            conn.execute("ALTER TABLE strategies ADD COLUMN last_observed_at TEXT")
         conn.execute(
             "INSERT OR IGNORE INTO settings(key,value_json,updated_at) VALUES(?,?,?)",
             ("alert_defaults", json.dumps(DEFAULT_ALERTS), utcnow()),
@@ -191,4 +216,3 @@ def init_db(path: Path | None = None) -> None:
 
 def rows(rows_: Any) -> list[dict[str, Any]]:
     return [dict(row) for row in rows_]
-

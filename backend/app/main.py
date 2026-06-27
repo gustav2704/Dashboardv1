@@ -14,7 +14,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .catalog import import_catalog
-from .config import DEFAULT_CATALOG, DEFAULT_TERMINAL, FRONTEND_DIST, REFRESH_SECONDS
+from .catalog_export import export_catalog
+from .config import DEFAULT_CATALOG, DEFAULT_TERMINAL, EXPORT_DIR, FRONTEND_DIST, REFRESH_SECONDS
 from .db import DEFAULT_ALERTS, init_db, rows, session, utcnow
 from .mapping import auto_confirm_suggestions, confirm_mapping, suggestions
 from .metrics import compute_metrics, health_status, pick_baseline, reconstruct_trades
@@ -86,6 +87,18 @@ def _window_start(window: str, start: str | None) -> int:
     return 0
 
 
+def _window_bounds(window: str, start: str | None = None, end: str | None = None) -> tuple[int, int]:
+    start_msc = _window_start(window, start)
+    if end:
+        end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
+        if len(end) == 10:
+            end_dt += timedelta(days=1)
+        end_msc = int(end_dt.timestamp() * 1000) - 1
+    else:
+        end_msc = 2**63 - 1
+    return start_msc, end_msc
+
+
 def _latest_baselines(conn: Any, strategy_id: int) -> list[dict[str, Any]]:
     snapshots = conn.execute(
         """SELECT * FROM baseline_snapshots WHERE strategy_id=?
@@ -107,14 +120,15 @@ def _latest_baselines(conn: Any, strategy_id: int) -> list[dict[str, Any]]:
 
 
 def dashboard_data(window: str = "all", start: str | None = None, end: str | None = None) -> dict[str, Any]:
-    start_msc = _window_start(window, start)
-    if end:
-        end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
-        if len(end) == 10:
-            end_dt += timedelta(days=1)
-        end_msc = int(end_dt.timestamp() * 1000) - 1
-    else:
-        end_msc = 2**63 - 1
+    start_msc, end_msc = _window_bounds(window, start, end)
+    try:
+        pending_candidates = {
+            int(candidate["strategy_id"])
+            for item in suggestions()
+            for candidate in item.get("candidates", [])
+        }
+    except Exception:
+        pending_candidates = set()
     with session() as conn:
         terminal_rows = rows(conn.execute("SELECT * FROM terminals ORDER BY name"))
         strategies = conn.execute("SELECT * FROM strategies ORDER BY symbol,sqx_name").fetchall()
@@ -124,8 +138,16 @@ def dashboard_data(window: str = "all", start: str | None = None, end: str | Non
         output = []
         for strategy in strategies:
             mappings = conn.execute("SELECT * FROM mappings WHERE strategy_id=? AND confirmed=1", (strategy["id"],)).fetchall()
+            sqx_link = conn.execute(
+                """SELECT project,databank,strategy_name,symbol,timeframe,filter_result,last_synced_at
+                   FROM sqx_strategy_links WHERE strategy_id=? ORDER BY last_synced_at DESC LIMIT 1""",
+                (strategy["id"],),
+            ).fetchone()
             magic_numbers = sorted({int(mapping["magic"]) for mapping in mappings if mapping["magic"] is not None})
-            trades = [t for t in trades_all if start_msc <= int(t["close_time_msc"]) <= end_msc and any(_matches(m, t) for m in mappings)]
+            trades = sorted(
+                [t for t in trades_all if start_msc <= int(t["close_time_msc"]) <= end_msc and any(_matches(m, t) for m in mappings)],
+                key=lambda t: (int(t.get("close_time_msc", 0)), int(t.get("deal_ticket", 0))),
+            )
             positions = [p for p in positions_all if any(_matches(m, p) for m in mappings)]
             current = compute_metrics(trades, positions)
             baselines = _latest_baselines(conn, strategy["id"])
@@ -144,6 +166,16 @@ def dashboard_data(window: str = "all", start: str | None = None, end: str | Non
                 state = "active"
             else:
                 state = "no_recent_trades"
+            if sqx_link and mappings:
+                link_state = "linked"
+            elif sqx_link and strategy["id"] in pending_candidates:
+                link_state = "candidate"
+            elif sqx_link:
+                link_state = "sqx_only"
+            elif mappings or "mt5" in str(strategy["origin"] or "").split("+"):
+                link_state = "mt5_only"
+            else:
+                link_state = "catalog_only"
             output.append(
                 {
                     "id": strategy["id"],
@@ -151,7 +183,11 @@ def dashboard_data(window: str = "all", start: str | None = None, end: str | Non
                     "sqx_name": strategy["sqx_name"],
                     "mql5_name": strategy["mql5_name"],
                     "account_login": strategy["account_login"],
+                    "origin": strategy["origin"],
+                    "last_observed_at": strategy["last_observed_at"],
                     "state": state,
+                    "link_state": link_state,
+                    "sqx": dict(sqx_link) if sqx_link else None,
                     "metrics": current,
                     "health": health,
                     "baseline": baseline,
@@ -169,7 +205,11 @@ def dashboard_data(window: str = "all", start: str | None = None, end: str | Non
         "trades": sum(item["metrics"]["trades"] for item in output),
         "red": sum(1 for item in output if item["health"]["status"] == "red"),
     }
-    return {"generated_at": utcnow(), "window": window, "totals": totals, "account": dict(account) if account else None, "terminals": terminal_rows, "strategies": output}
+    integration = {
+        state: sum(1 for item in output if item["link_state"] == state)
+        for state in ("linked", "candidate", "sqx_only", "mt5_only", "catalog_only")
+    }
+    return {"generated_at": utcnow(), "window": window, "totals": totals, "integration": integration, "account": dict(account) if account else None, "terminals": terminal_rows, "strategies": output}
 
 
 def _worker(stop_event: threading.Event) -> None:
@@ -211,16 +251,37 @@ def get_dashboard(window: str = Query("all", pattern="^(30d|90d|all|custom)$"), 
 
 
 @app.get("/api/strategies/{strategy_id}")
-def get_strategy(strategy_id: int, window: str = "all") -> dict[str, Any]:
-    data = dashboard_data(window)
+def get_strategy(strategy_id: int, window: str = "all", start: str | None = None, end: str | None = None) -> dict[str, Any]:
+    data = dashboard_data(window, start, end)
+    start_msc, end_msc = _window_bounds(window, start, end)
     for strategy in data["strategies"]:
         if strategy["id"] == strategy_id:
             with session() as conn:
                 mappings = rows(conn.execute("SELECT * FROM mappings WHERE strategy_id=?", (strategy_id,)))
+                confirmed_mappings = [mapping for mapping in mappings if int(mapping.get("confirmed", 1)) == 1]
                 all_trades = reconstruct_trades(rows(conn.execute("SELECT * FROM deals ORDER BY time_msc,ticket")))
-                trades = [trade for trade in all_trades if any(_matches(mapping, trade) for mapping in mappings)]
-            return {**strategy, "mappings": mappings, "trades": trades[-500:]}
-    raise HTTPException(404, "Estrategia no encontrada")
+                trades = sorted(
+                    [
+                        trade
+                        for trade in all_trades
+                        if start_msc <= int(trade["close_time_msc"]) <= end_msc
+                        and any(_matches(mapping, trade) for mapping in confirmed_mappings)
+                    ],
+                    key=lambda trade: (int(trade.get("close_time_msc", 0)), int(trade.get("deal_ticket", 0))),
+                )
+            equity = 0.0
+            equity_curve = []
+            for trade in trades:
+                equity += float(trade.get("net_profit", 0))
+                equity_curve.append(
+                    {
+                        "time_msc": int(trade["close_time_msc"]),
+                        "equity": equity,
+                        "net_profit": float(trade.get("net_profit", 0)),
+                    }
+                )
+            return {**strategy, "mappings": mappings, "trades": trades[-500:], "equity_curve": equity_curve}
+    raise HTTPException(404, "Strategy not found")
 
 
 @app.get("/api/terminals")
@@ -251,8 +312,31 @@ def sync_terminal(terminal_id: int) -> dict[str, Any]:
 @app.post("/api/catalog/import")
 def reload_catalog() -> dict[str, int]:
     if not DEFAULT_CATALOG.is_file():
-        raise HTTPException(404, f"No se encontró {DEFAULT_CATALOG}")
+        raise HTTPException(404, f"Could not find {DEFAULT_CATALOG}")
     return import_catalog(DEFAULT_CATALOG)
+
+
+@app.get("/api/catalog/export")
+def download_catalog() -> FileResponse:
+    ingest_responses()
+    data = dashboard_data()
+    with session() as conn:
+        catalog_json = {
+            row["id"]: row["catalog_json"]
+            for row in conn.execute("SELECT id,catalog_json FROM strategies")
+        }
+    export_rows = [
+        {**strategy, "catalog_json": catalog_json.get(strategy["id"], "{}")}
+        for strategy in data["strategies"]
+    ]
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    destination = EXPORT_DIR / f"Track_v1_actualizado_{timestamp}.xlsx"
+    export_catalog(DEFAULT_CATALOG, destination, export_rows)
+    return FileResponse(
+        destination,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=destination.name,
+    )
 
 
 @app.get("/api/mappings/suggestions")
@@ -275,10 +359,20 @@ def sqx_status() -> dict[str, Any]:
     return sqx_connector.status()
 
 
+@app.get("/api/sqx/databanks")
+def sqx_databanks() -> dict[str, Any]:
+    try:
+        return sqx_connector.databanks()
+    except sqx_connector.SQXUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
 @app.post("/api/sqx/sync")
 def sqx_sync(payload: SQXSync) -> dict[str, Any]:
     try:
         return sqx_connector.sync(payload.project, payload.databank)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     except sqx_connector.SQXUnavailable as exc:
         raise HTTPException(503, str(exc)) from exc
 
@@ -313,13 +407,13 @@ def get_chart(
         strategy = conn.execute("SELECT * FROM strategies WHERE id=?", (strategy_id,)).fetchone()
         mapping = conn.execute("SELECT * FROM mappings WHERE strategy_id=? AND confirmed=1 ORDER BY id LIMIT 1", (strategy_id,)).fetchone()
         if not strategy:
-            raise HTTPException(404, "Estrategia no encontrada")
+            raise HTTPException(404, "Strategy not found")
         chart_symbol = (mapping["symbol"] if mapping else None) or strategy["symbol"]
         if refresh and mapping:
             request_chart(mapping["terminal_id"], chart_symbol, timeframe, start, end)
         ingest_responses()
         if not mapping:
-            return {"candles": [], "markers": [], "message": "La estrategia aún no tiene un vínculo MT5 confirmado"}
+            return {"candles": [], "markers": [], "message": "This strategy does not have a confirmed MT5 link yet"}
         candle_rows = rows(conn.execute(
             """SELECT time,open,high,low,close,tick_volume FROM candles
                WHERE terminal_id=? AND symbol=? AND timeframe=? AND time BETWEEN ? AND ? ORDER BY time""",

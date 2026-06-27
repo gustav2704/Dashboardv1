@@ -13,7 +13,7 @@ export default function ChartPanel({ strategyId }: { strategyId: number }) {
   const chart = useRef<IChartApi | null>(null)
   const [timeframe, setTimeframe] = useState('H1')
   const [data, setData] = useState<ChartPayload | null>(null)
-  const [message, setMessage] = useState('Cargando gráfico…')
+  const [message, setMessage] = useState('Loading chart…')
 
   async function load(refresh = false) {
     const end = Math.floor(Date.now() / 1000)
@@ -21,8 +21,8 @@ export default function ChartPanel({ strategyId }: { strategyId: number }) {
     try {
       const payload = await api<ChartPayload>(`/api/chart/${strategyId}?timeframe=${timeframe}&start=${start}&end=${end}&refresh=${refresh}`)
       setData(payload)
-      setMessage(payload.message || (payload.candles.length ? '' : refresh ? 'Solicitud enviada a MT5. Vuelve a actualizar en unos segundos.' : 'Aún no hay velas en caché.'))
-    } catch (error) { setMessage(error instanceof Error ? error.message : 'No se pudo cargar el gráfico') }
+      setMessage(payload.message || (payload.candles.length ? '' : refresh ? 'Request sent to MT5. Refresh again in a few seconds.' : 'No candles in cache yet.'))
+    } catch (error) { setMessage(error instanceof Error ? error.message : 'Could not load the chart') }
   }
 
   useEffect(() => { load(false) }, [strategyId, timeframe])
@@ -49,15 +49,14 @@ export default function ChartPanel({ strategyId }: { strategyId: number }) {
 
   return <section className="panel chart-panel">
     <div className="panel-heading">
-      <div><span className="eyebrow">PRECIO DEL BROKER</span><h2>{data?.symbol || 'Gráfico de estrategia'}</h2></div>
+      <div><span className="eyebrow">BROKER PRICE</span><h2>{data?.symbol || 'Strategy chart'}</h2></div>
       <div className="actions">
         <select value={timeframe} onChange={event => setTimeframe(event.target.value)}>{['M1','M5','M15','M30','H1','H4','D1'].map(tf => <option key={tf}>{tf}</option>)}</select>
-        <button className="button" onClick={() => load(true)}>Solicitar a MT5</button>
+        <button className="button" onClick={() => load(true)}>Request from MT5</button>
       </div>
     </div>
     {message && <div className="empty-state">{message}</div>}
     <div ref={host} className="chart-host" />
-    <div className="legend"><span><i className="dot long" /> Entrada long</span><span><i className="dot short" /> Entrada short</span><span><i className="dot exit" /> Salida / P&amp;L</span></div>
+    <div className="legend"><span><i className="dot long" /> Long entry</span><span><i className="dot short" /> Short entry</span><span><i className="dot exit" /> Exit / P&amp;L</span></div>
   </section>
 }
-
