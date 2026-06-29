@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -10,6 +11,7 @@ from typing import Any
 from .config import SQX_DIR, SQX_EXTRACTOR
 from .db import session, utcnow
 from .mapping import normalize, symbol_family, version_signature
+from .strategy_identity import add_alias, canonicalize_linked_name
 
 
 class SQXUnavailable(RuntimeError):
@@ -28,8 +30,18 @@ def _run(*args: str, timeout: int = 60) -> Any:
         "json",
         *args,
     ]
+    environment = os.environ.copy()
+    environment["PYTHONIOENCODING"] = "utf-8"
     try:
-        completed = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=environment,
+            timeout=timeout,
+        )
     except subprocess.TimeoutExpired as exc:
         raise SQXUnavailable(f"SQX did not respond within {timeout} seconds") from exc
     if completed.returncode:
@@ -53,6 +65,29 @@ def databanks() -> dict[str, Any]:
     payload = _run("databanks", timeout=30)
     if not isinstance(payload, dict):
         raise SQXUnavailable("SQX returned an invalid databank list")
+    return payload
+
+
+def inspect_strategy(
+    project: str,
+    databank: str,
+    strategy_name: str,
+    source_format: str | None = None,
+) -> dict[str, Any]:
+    args = [
+        "inspect",
+        "--project",
+        project,
+        "--databank",
+        databank,
+        "--strategy",
+        strategy_name,
+    ]
+    if source_format:
+        args.extend(["--source-format", source_format])
+    payload = _run(*args, timeout=90)
+    if not isinstance(payload, dict):
+        raise SQXUnavailable("SQX returned an invalid strategy inspection")
     return payload
 
 
@@ -90,13 +125,22 @@ def _has_wf_matrix(value: str) -> bool:
     return "wfmatrix" in normalize(value)
 
 
-def _variant_score(name: str, symbol: str, strategy: Any) -> float:
+def _variant_score(
+    name: str,
+    symbol: str,
+    strategy: Any,
+    extra_aliases: set[str] | None = None,
+) -> float:
     if symbol and strategy["symbol"] and symbol_family(symbol) != symbol_family(strategy["symbol"]):
         return 0.0
     signature = version_signature(name)
     if not signature:
         return 0.0
-    aliases = [strategy["sqx_name"] or "", strategy["mql5_name"] or ""]
+    aliases = [
+        strategy["sqx_name"] or "",
+        strategy["mql5_name"] or "",
+        *(extra_aliases or set()),
+    ]
     if signature not in [version_signature(alias) for alias in aliases]:
         return 0.0
     ratio = max(
@@ -119,19 +163,34 @@ def _find_strategy(
     claimed: set[int],
     name: str,
     symbol: str,
+    aliases: dict[int, set[str]] | None = None,
 ) -> tuple[Any | None, str]:
+    aliases = aliases or {}
     available = [row for row in strategies if int(row["id"]) not in claimed]
     exact = [
         row
         for row in available
-        if normalize(name) in {normalize(row["sqx_name"]), normalize(row["mql5_name"] or "")}
+        if normalize(name)
+        in {
+            normalize(row["sqx_name"]),
+            normalize(row["mql5_name"] or ""),
+            *(normalize(alias) for alias in aliases.get(int(row["id"]), set())),
+        }
     ]
     if len(exact) == 1:
         return exact[0], "exact"
 
     ranked = sorted(
         (
-            (_variant_score(name, symbol, row), row)
+            (
+                _variant_score(
+                    name,
+                    symbol,
+                    row,
+                    aliases.get(int(row["id"]), set()),
+                ),
+                row,
+            )
             for row in available
         ),
         key=lambda item: item[0],
@@ -180,15 +239,54 @@ def _upsert_baseline(
     )
 
 
+def _upsert_analytics(
+    conn: Any,
+    strategy_id: int,
+    project: str,
+    databank: str,
+    analytics: dict[str, Any],
+    synced_at: str,
+) -> None:
+    conn.execute(
+        """INSERT INTO sqx_analytics_snapshots(
+             strategy_id,project,databank,analytics_json,synced_at
+           ) VALUES(?,?,?,?,?)
+           ON CONFLICT(strategy_id,project,databank) DO UPDATE SET
+             analytics_json=excluded.analytics_json,
+             synced_at=excluded.synced_at""",
+        (
+            strategy_id,
+            project,
+            databank,
+            json.dumps(analytics, ensure_ascii=False),
+            synced_at,
+        ),
+    )
+
+
 def sync(project: str, databank: str) -> dict[str, Any]:
     if not project or not databank:
         raise ValueError("project and databank are required")
-    payload = _run("bulk", "--project", project, "--databank", databank, timeout=180)
+    payload = _run("bulk", "--project", project, "--databank", databank, timeout=360)
     incoming = _items(payload)
     imported = matched = variant_matched = created = unmatched = baselines = passed = 0
+    edge_available = egt_available = analytics_unavailable = 0
+    marked_missing = restored = 0
     synced_at = utcnow()
+    incoming_names = {
+        name.casefold()
+        for item in incoming
+        if (name := _identity_name(item))
+    }
     with session() as conn:
         strategies = list(conn.execute("SELECT * FROM strategies WHERE retired=0").fetchall())
+        strategy_aliases: dict[int, set[str]] = {}
+        for row in conn.execute(
+            "SELECT strategy_id,alias FROM strategy_aliases"
+        ).fetchall():
+            strategy_aliases.setdefault(int(row["strategy_id"]), set()).add(
+                str(row["alias"])
+            )
         existing_links = {
             (
                 row["project"].casefold(),
@@ -215,6 +313,10 @@ def sync(project: str, databank: str) -> dict[str, Any]:
                 in {
                     str(row["sqx_name"] or "").strip().casefold(),
                     str(row["mql5_name"] or "").strip().casefold(),
+                    *(
+                        alias.strip().casefold()
+                        for alias in strategy_aliases.get(int(row["id"]), set())
+                    ),
                 }
             ]
             if len(literal) == 1:
@@ -246,6 +348,7 @@ def sync(project: str, databank: str) -> dict[str, Any]:
                         claimed | reserved_ids,
                         name,
                         symbol,
+                        strategy_aliases,
                     )
                 if strategy:
                     matched += 1
@@ -285,9 +388,10 @@ def sync(project: str, databank: str) -> dict[str, Any]:
                     (strategy["id"],),
                 ).fetchone()
             else:
+                was_missing = bool(link["missing_from_sqx_at"])
                 conn.execute(
                     """UPDATE sqx_strategy_links SET symbol=?,timeframe=?,filter_result=?,
-                       last_synced_at=? WHERE id=?""",
+                       last_synced_at=?,missing_from_sqx_at=NULL WHERE id=?""",
                     (
                         symbol,
                         str(identity.get("timeframe") or ""),
@@ -296,6 +400,8 @@ def sync(project: str, databank: str) -> dict[str, Any]:
                         link["id"],
                     ),
                 )
+                if was_missing:
+                    restored += 1
 
             conn.execute(
                 """UPDATE strategies SET
@@ -308,6 +414,8 @@ def sync(project: str, databank: str) -> dict[str, Any]:
                     strategy["id"],
                 ),
             )
+            add_alias(conn, int(strategy["id"]), name, "sqx")
+            canonicalize_linked_name(conn, int(strategy["id"]))
             stats = item.get("stats", {})
             for sample in ("full", "is", "oos"):
                 metrics = stats.get(sample)
@@ -323,9 +431,41 @@ def sync(project: str, databank: str) -> dict[str, Any]:
                     synced_at,
                 )
                 baselines += 1
+            analytics = item.get("analytics")
+            if isinstance(analytics, dict):
+                _upsert_analytics(
+                    conn,
+                    int(strategy["id"]),
+                    project,
+                    databank,
+                    analytics,
+                    synced_at,
+                )
+                edge_ok = bool(analytics.get("edge", {}).get("available"))
+                egt_ok = bool(analytics.get("egt", {}).get("available"))
+                edge_available += int(edge_ok)
+                egt_available += int(egt_ok)
+                analytics_unavailable += int(not edge_ok or not egt_ok)
+            else:
+                analytics_unavailable += 1
             if str(identity.get("filter_result") or "").upper() == "PASSED":
                 passed += 1
             imported += 1
+        scoped_links = conn.execute(
+            """SELECT id,strategy_name,missing_from_sqx_at
+               FROM sqx_strategy_links
+               WHERE project=? COLLATE NOCASE AND databank=? COLLATE NOCASE""",
+            (project, databank),
+        ).fetchall()
+        for link in scoped_links:
+            if str(link["strategy_name"]).casefold() in incoming_names:
+                continue
+            if not link["missing_from_sqx_at"]:
+                conn.execute(
+                    "UPDATE sqx_strategy_links SET missing_from_sqx_at=? WHERE id=?",
+                    (synced_at, link["id"]),
+                )
+                marked_missing += 1
     return {
         "project": project,
         "databank": databank,
@@ -337,5 +477,10 @@ def sync(project: str, databank: str) -> dict[str, Any]:
         "unmatched": unmatched,
         "passed": passed,
         "baselines": baselines,
+        "edge_available": edge_available,
+        "egt_available": egt_available,
+        "analytics_unavailable": analytics_unavailable,
+        "marked_missing": marked_missing,
+        "restored": restored,
         "synced_at": synced_at,
     }

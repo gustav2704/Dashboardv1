@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -42,6 +43,19 @@ CREATE TABLE IF NOT EXISTS strategies (
   created_at TEXT NOT NULL,
   UNIQUE(sqx_name, account_login)
 );
+
+CREATE TABLE IF NOT EXISTS strategy_aliases (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  strategy_id INTEGER NOT NULL REFERENCES strategies(id) ON DELETE CASCADE,
+  alias TEXT NOT NULL,
+  normalized_alias TEXT NOT NULL,
+  source TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(strategy_id, normalized_alias, source)
+);
+
+CREATE INDEX IF NOT EXISTS idx_strategy_alias_lookup
+ON strategy_aliases(normalized_alias);
 
 CREATE TABLE IF NOT EXISTS mappings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -95,6 +109,20 @@ CREATE TABLE IF NOT EXISTS positions (
   PRIMARY KEY(terminal_id, ticket)
 );
 
+CREATE TABLE IF NOT EXISTS pending_orders (
+  terminal_id INTEGER NOT NULL REFERENCES terminals(id) ON DELETE CASCADE,
+  ticket INTEGER NOT NULL,
+  symbol TEXT NOT NULL,
+  order_type TEXT NOT NULL,
+  time_msc INTEGER NOT NULL,
+  volume REAL NOT NULL,
+  price REAL NOT NULL,
+  magic INTEGER NOT NULL DEFAULT 0,
+  comment TEXT NOT NULL DEFAULT '',
+  raw_json TEXT NOT NULL,
+  PRIMARY KEY(terminal_id, ticket)
+);
+
 CREATE TABLE IF NOT EXISTS account_snapshots (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   terminal_id INTEGER NOT NULL REFERENCES terminals(id) ON DELETE CASCADE,
@@ -128,13 +156,25 @@ CREATE TABLE IF NOT EXISTS sqx_strategy_links (
   timeframe TEXT,
   filter_result TEXT,
   last_synced_at TEXT NOT NULL,
+  missing_from_sqx_at TEXT,
   UNIQUE(project, databank, strategy_name)
+);
+
+CREATE TABLE IF NOT EXISTS sqx_analytics_snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  strategy_id INTEGER NOT NULL REFERENCES strategies(id) ON DELETE CASCADE,
+  project TEXT NOT NULL,
+  databank TEXT NOT NULL,
+  analytics_json TEXT NOT NULL,
+  synced_at TEXT NOT NULL,
+  UNIQUE(strategy_id, project, databank)
 );
 
 CREATE INDEX IF NOT EXISTS idx_baseline_strategy ON baseline_snapshots(strategy_id, sample_type, synced_at DESC);
 CREATE INDEX IF NOT EXISTS idx_deals_position ON deals(terminal_id, position_id, time_msc);
 CREATE INDEX IF NOT EXISTS idx_deals_magic ON deals(terminal_id, magic, symbol);
 CREATE INDEX IF NOT EXISTS idx_sqx_links_source ON sqx_strategy_links(project, databank, strategy_name);
+CREATE INDEX IF NOT EXISTS idx_sqx_analytics_strategy ON sqx_analytics_snapshots(strategy_id, synced_at DESC);
 
 CREATE TABLE IF NOT EXISTS candles (
   terminal_id INTEGER NOT NULL REFERENCES terminals(id) ON DELETE CASCADE,
@@ -154,6 +194,99 @@ CREATE TABLE IF NOT EXISTS settings (
   value_json TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS symbol_mappings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  broker TEXT NOT NULL COLLATE NOCASE,
+  source_symbol TEXT NOT NULL COLLATE NOCASE,
+  target_symbol TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(broker, source_symbol)
+);
+
+CREATE TABLE IF NOT EXISTS backtest_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  strategy_id INTEGER NOT NULL REFERENCES strategies(id) ON DELETE CASCADE,
+  terminal_id INTEGER REFERENCES terminals(id) ON DELETE SET NULL,
+  broker TEXT NOT NULL,
+  expert_path TEXT NOT NULL,
+  expert_hash TEXT NOT NULL,
+  sqx_symbol TEXT,
+  symbol TEXT NOT NULL,
+  timeframe TEXT NOT NULL,
+  from_date TEXT NOT NULL,
+  to_date TEXT NOT NULL,
+  deposit REAL NOT NULL,
+  currency TEXT NOT NULL,
+  leverage TEXT NOT NULL,
+  model INTEGER NOT NULL,
+  spread REAL,
+  inputs_json TEXT NOT NULL DEFAULT '{}',
+  config_source TEXT NOT NULL,
+  config_snapshot_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL,
+  requested_at TEXT NOT NULL,
+  started_at TEXT,
+  finished_at TEXT,
+  run_dir TEXT,
+  report_path TEXT,
+  log_path TEXT,
+  error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS backtest_metrics (
+  run_id INTEGER PRIMARY KEY REFERENCES backtest_runs(id) ON DELETE CASCADE,
+  metrics_json TEXT NOT NULL,
+  raw_metrics_json TEXT NOT NULL,
+  parsed_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS backtest_batches (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  status TEXT NOT NULL,
+  model INTEGER NOT NULL DEFAULT 1,
+  policy TEXT NOT NULL DEFAULT 'strict',
+  only_missing INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  started_at TEXT,
+  finished_at TEXT,
+  current_strategy_id INTEGER REFERENCES strategies(id) ON DELETE SET NULL,
+  error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS strategy_expert_links (
+  strategy_id INTEGER PRIMARY KEY REFERENCES strategies(id) ON DELETE CASCADE,
+  expert_path TEXT NOT NULL,
+  expert_hash TEXT NOT NULL,
+  resolution_method TEXT NOT NULL,
+  confidence REAL NOT NULL,
+  parameters_match REAL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS backtest_batch_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch_id INTEGER NOT NULL REFERENCES backtest_batches(id) ON DELETE CASCADE,
+  strategy_id INTEGER NOT NULL REFERENCES strategies(id) ON DELETE CASCADE,
+  status TEXT NOT NULL,
+  resolution_method TEXT,
+  confidence REAL NOT NULL DEFAULT 0,
+  expert_path TEXT,
+  expert_hash TEXT,
+  config_json TEXT,
+  run_id INTEGER REFERENCES backtest_runs(id) ON DELETE SET NULL,
+  error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(batch_id,strategy_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_backtest_strategy
+ON backtest_runs(strategy_id, requested_at DESC);
+CREATE INDEX IF NOT EXISTS idx_backtest_status
+ON backtest_runs(status, requested_at);
+CREATE INDEX IF NOT EXISTS idx_batch_items_status
+ON backtest_batch_items(batch_id,status,id);
 """
 
 DEFAULT_ALERTS = {
@@ -208,9 +341,69 @@ def init_db(path: Path | None = None) -> None:
             )
         if "last_observed_at" not in strategy_columns:
             conn.execute("ALTER TABLE strategies ADD COLUMN last_observed_at TEXT")
+        sqx_link_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(sqx_strategy_links)").fetchall()
+        }
+        if "missing_from_sqx_at" not in sqx_link_columns:
+            conn.execute("ALTER TABLE sqx_strategy_links ADD COLUMN missing_from_sqx_at TEXT")
+        run_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(backtest_runs)").fetchall()
+        }
+        if "batch_id" not in run_columns:
+            conn.execute(
+                "ALTER TABLE backtest_runs ADD COLUMN batch_id INTEGER REFERENCES backtest_batches(id)"
+            )
+        for strategy in conn.execute(
+            "SELECT id,sqx_name,mql5_name,created_at FROM strategies"
+        ).fetchall():
+            for alias, source in (
+                (strategy["sqx_name"], "legacy"),
+                (strategy["mql5_name"], "mql5"),
+            ):
+                normalized = re.sub(r"[^a-z0-9]+", "", str(alias or "").lower())
+                if normalized:
+                    conn.execute(
+                        """INSERT OR IGNORE INTO strategy_aliases(
+                             strategy_id,alias,normalized_alias,source,created_at
+                           ) VALUES(?,?,?,?,?)""",
+                        (
+                            strategy["id"],
+                            str(alias).strip(),
+                            normalized,
+                            source,
+                            strategy["created_at"],
+                        ),
+                    )
         conn.execute(
             "INSERT OR IGNORE INTO settings(key,value_json,updated_at) VALUES(?,?,?)",
             ("alert_defaults", json.dumps(DEFAULT_ALERTS), utcnow()),
+        )
+        conn.execute(
+            """INSERT OR IGNORE INTO symbol_mappings(
+                 broker,source_symbol,target_symbol,created_at
+               ) VALUES(?,?,?,?)""",
+            ("FPM", "XAUUSD_DWNXClone", "XAUUSD.cyr", utcnow()),
+        )
+        for source_symbol, target_symbol in (
+            ("USATECHIDXUSD_clonedwnx", "US100"),
+            ("DEUIDXEUR_clonedwnx", "GER40"),
+            ("USA30IDXUSD_clonedwnx", "US30"),
+            ("DAX", "GER40"),
+            ("US30", "US30"),
+        ):
+            conn.execute(
+                """INSERT OR IGNORE INTO symbol_mappings(
+                     broker,source_symbol,target_symbol,created_at
+                   ) VALUES(?,?,?,?)""",
+                ("FPM", source_symbol, target_symbol, utcnow()),
+            )
+        conn.execute(
+            "INSERT OR IGNORE INTO settings(key,value_json,updated_at) VALUES(?,?,?)",
+            ("auto_validate_missing", "true", utcnow()),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO settings(key,value_json,updated_at) VALUES(?,?,?)",
+            ("dedicated_backtest_terminal", "false", utcnow()),
         )
 
 

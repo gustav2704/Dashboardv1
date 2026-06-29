@@ -141,8 +141,32 @@ string PositionJson(const ulong ticket)
    );
 }
 
+string OrderTypeName(const ENUM_ORDER_TYPE type)
+{
+   if(type==ORDER_TYPE_BUY_LIMIT) return "BUY_LIMIT";
+   if(type==ORDER_TYPE_SELL_LIMIT) return "SELL_LIMIT";
+   if(type==ORDER_TYPE_BUY_STOP) return "BUY_STOP";
+   if(type==ORDER_TYPE_SELL_STOP) return "SELL_STOP";
+   if(type==ORDER_TYPE_BUY_STOP_LIMIT) return "BUY_STOP_LIMIT";
+   if(type==ORDER_TYPE_SELL_STOP_LIMIT) return "SELL_STOP_LIMIT";
+   return EnumToString(type);
+}
+
+string OrderJson(const ulong ticket)
+{
+   if(!OrderSelect(ticket)) return "";
+   ENUM_ORDER_TYPE type=(ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+   return StringFormat(
+      "{\"ticket\":%I64u,\"symbol\":\"%s\",\"order_type\":\"%s\",\"time_msc\":%I64d,\"volume\":%.8f,\"price\":%.10f,\"magic\":%I64d,\"comment\":\"%s\"}",
+      ticket,JsonEscape(OrderGetString(ORDER_SYMBOL)),OrderTypeName(type),OrderGetInteger(ORDER_TIME_SETUP_MSC),
+      OrderGetDouble(ORDER_VOLUME_CURRENT),OrderGetDouble(ORDER_PRICE_OPEN),OrderGetInteger(ORDER_MAGIC),
+      JsonEscape(OrderGetString(ORDER_COMMENT))
+   );
+}
+
 void ProcessSync(const string request)
 {
+   bool terminal_connected=(bool)TerminalInfoInteger(TERMINAL_CONNECTED);
    long since_msc=JsonLong(request,"since_msc",0);
    datetime from=(datetime)(since_msc/1000);
    if(from<=0) from=(datetime)0;
@@ -181,10 +205,24 @@ void ProcessSync(const string request)
    }
    positions+="]";
 
+   string orders="[";
+   first=true;
+   int orders_total=OrdersTotal();
+   for(int i=0;i<orders_total;i++)
+   {
+      ulong ticket=OrderGetTicket(i);
+      string row=OrderJson(ticket);
+      if(row=="") continue;
+      if(!first) orders+=",";
+      orders+=row;
+      first=false;
+   }
+   orders+="]";
+
    string response=StringFormat(
-      "{\"schema_version\":1,\"status\":\"ok\",\"generated_at\":\"%s\",\"account_login\":\"%I64d\",\"server\":\"%s\",\"account\":{\"balance\":%.8f,\"equity\":%.8f,\"margin\":%.8f,\"free_margin\":%.8f},\"deals\":%s,\"positions\":%s}",
-      IsoUtc(),AccountInfoInteger(ACCOUNT_LOGIN),JsonEscape(AccountInfoString(ACCOUNT_SERVER)),AccountInfoDouble(ACCOUNT_BALANCE),
-      AccountInfoDouble(ACCOUNT_EQUITY),AccountInfoDouble(ACCOUNT_MARGIN),AccountInfoDouble(ACCOUNT_MARGIN_FREE),deals,positions
+      "{\"schema_version\":2,\"status\":\"ok\",\"terminal_connected\":%s,\"generated_at\":\"%s\",\"account_login\":\"%I64d\",\"server\":\"%s\",\"account\":{\"balance\":%.8f,\"equity\":%.8f,\"margin\":%.8f,\"free_margin\":%.8f},\"deals\":%s,\"positions\":%s,\"orders\":%s}",
+      terminal_connected ? "true" : "false",IsoUtc(),AccountInfoInteger(ACCOUNT_LOGIN),JsonEscape(AccountInfoString(ACCOUNT_SERVER)),AccountInfoDouble(ACCOUNT_BALANCE),
+      AccountInfoDouble(ACCOUNT_EQUITY),AccountInfoDouble(ACCOUNT_MARGIN),AccountInfoDouble(ACCOUNT_MARGIN_FREE),deals,positions,orders
    );
    WriteAtomic(RESPONSES+"sync.response.json",response);
 }
@@ -253,4 +291,3 @@ void OnStart()
    }
    Print("DashboardBridge: service stopped");
 }
-

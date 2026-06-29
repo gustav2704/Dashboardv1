@@ -5,19 +5,54 @@ export type Metrics = {
   open_positions: number; win_rate: number; profit_factor: number | null; expectancy: number;
   avg_duration_seconds: number; median_duration_seconds: number; avg_win: number; avg_loss: number;
   best_trade: number | null; worst_trade: number | null; today_profit: number; today_trades: number;
-  max_consecutive_wins: number; max_consecutive_losses: number; trades_per_month: number;
+  max_consecutive_wins: number; max_consecutive_losses: number; current_consecutive_losses: number; trades_per_month: number;
   max_drawdown: number; return_dd: number | null; sqn: number | null; commissions: number; swaps: number;
+}
+export type RiskStatus = 'green' | 'yellow' | 'red' | 'gray'
+export type RiskCheck = {
+  status: RiskStatus; actual: number; limit: number | null; ratio: number | null; source: string | null;
+}
+export type RiskGuard = {
+  status: RiskStatus; stop_recommended: boolean; reasons: string[];
+  live: { trades: number; max_drawdown: number; max_consecutive_losses: number; current_consecutive_losses: number };
+  checks: Record<'is' | 'oos', { drawdown: RiskCheck; loss_streak: RiskCheck }>;
 }
 export type Baseline = { sample_type: string; source: string; synced_at: string; metrics: Record<string, unknown> }
 export type SQXInfo = {
   project: string; databank: string; strategy_name: string; symbol: string;
-  timeframe: string; filter_result: string; last_synced_at: string;
+  timeframe: string; filter_result: string; last_synced_at: string; missing_from_sqx_at: string | null;
+}
+export type SQXAnalysisResult = {
+  available: boolean; reason?: string; detail?: string;
+}
+export type SQXEdge = SQXAnalysisResult & {
+  score?: number; grade?: string; pillars?: Record<string, number>;
+  xs_value?: number | null; config_source?: string; strategy_type?: string;
+}
+export type SQXEgt = SQXAnalysisResult & {
+  total?: number; buy?: number; sell?: number; n_buy?: number; n_sell?: number;
+  months?: number; grade?: string; sample_type?: string; pl_unit?: string;
+  from_month?: string; history_source?: string; symbol?: string; timeframe?: string;
+}
+export type SQXAnalytics = {
+  project: string; databank: string; synced_at: string; edge: SQXEdge; egt: SQXEgt;
+}
+export type StrategyDeletionImpact = {
+  strategy_id: number; name: string; missing_from_sqx_at: string | null;
+  allowed: boolean; blockers: string[];
+  counts: Record<'mappings' | 'sqx_links' | 'baseline_snapshots' | 'sqx_analytics_snapshots' | 'backtest_runs' | 'backtest_metrics' | 'backtest_batch_items' | 'expert_links' | 'alert_settings', number>;
+}
+export type BacktestSummary = {
+  state: 'validated' | 'running' | 'failed' | 'none';
+  has_completed: boolean; completed_count: number; latest_run_id: number | null;
+  latest_status: string | null; latest_completed_at: string | null;
 }
 export type Strategy = {
   id: number; symbol: string; sqx_name: string; mql5_name: string; account_login: string;
   origin: string; last_observed_at?: string;
   state: string; link_state: 'linked' | 'candidate' | 'sqx_only' | 'mt5_only' | 'catalog_only';
-  sqx: SQXInfo | null; metrics: Metrics; health: Health; baseline: Baseline | null; baselines: Baseline[]; mapping_count: number;
+  sqx: SQXInfo | null; sqx_analytics: SQXAnalytics | null; metrics: Metrics; health: Health; risk_guard: RiskGuard; baseline: Baseline | null; baselines: Baseline[];
+  backtest: BacktestSummary; mapping_count: number;
   magic_numbers: number[];
 }
 export type Trade = {
@@ -34,4 +69,35 @@ export type Dashboard = {
   totals: { strategies: number; active: number; net_profit: number; floating_profit: number; trades: number; red: number };
   integration: { linked: number; candidate: number; sqx_only: number; mt5_only: number; catalog_only: number };
   terminals: Terminal[]; strategies: Strategy[];
+}
+
+export type BacktestDefaults = {
+  strategy_id: number; broker: string; expert_path: string; sqx_symbol: string; symbol: string;
+  timeframe: string; from_date: string; to_date: string; deposit: number; currency: string;
+  leverage: string; model: number; spread: number; config_source: string;
+}
+export type BacktestRun = {
+  id: number; strategy_id: number; broker: string; expert_path: string; expert_hash: string;
+  sqx_symbol?: string; symbol: string; timeframe: string; from_date: string; to_date: string;
+  deposit: number; currency: string; leverage: string; model: number; spread?: number;
+  config_source: string; status: string; requested_at: string; started_at?: string;
+  finished_at?: string; report_path?: string; error?: string;
+  metrics?: Record<string, unknown>; raw_metrics?: Record<string, string>;
+}
+export type BacktestCandidates = {
+  counts: { eligible: number; resolvable: number; blocked: number; validated: number };
+  expert_files: number;
+  candidates: Array<{
+    id: number; sqx_name: string; state: 'eligible' | 'resolvable' | 'blocked' | 'validated';
+    reason: string; resolution_method?: string; confidence?: number;
+  }>;
+}
+export type BacktestBatchItem = {
+  id: number; strategy_id: number; status: string; sqx_name: string; mql5_name?: string;
+  symbol?: string; resolution_method?: string; confidence: number; error?: string;
+}
+export type BacktestBatch = {
+  id: number; status: string; model: number; policy: string; created_at: string;
+  started_at?: string; finished_at?: string; current_strategy_id?: number; error?: string;
+  counts: Record<string, number>; items: BacktestBatchItem[];
 }

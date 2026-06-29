@@ -107,6 +107,15 @@ def _max_streak(values: list[float], winning: bool) -> int:
     return best
 
 
+def _current_losing_streak(values: list[float]) -> int:
+    current = 0
+    for value in reversed(values):
+        if value >= 0:
+            break
+        current += 1
+    return current
+
+
 def compute_metrics(
     trades: list[dict[str, Any]],
     open_positions: list[dict[str, Any]] | None = None,
@@ -168,6 +177,7 @@ def compute_metrics(
         "today_trades": len(today_profits),
         "max_consecutive_wins": _max_streak(profits, True),
         "max_consecutive_losses": _max_streak(profits, False),
+        "current_consecutive_losses": _current_losing_streak(profits),
         "trades_per_month": count / months if months else 0.0,
         "max_drawdown": drawdown,
         "return_dd": sum(profits) / drawdown if drawdown else None,
@@ -198,24 +208,138 @@ def _number(source: dict[str, Any], *keys: str) -> float | None:
     return None
 
 
-def health_status(current: dict[str, Any], baseline: dict[str, Any] | None, rules: dict[str, float]) -> dict[str, Any]:
-    if current["trades"] < rules["min_trades"]:
-        return {"status": "gray", "reasons": ["Insufficient sample"], "baseline_sample": baseline and baseline.get("sample_type")}
-    if not baseline:
-        return {"status": "gray", "reasons": ["No SQX baseline"], "baseline_sample": None}
-    metrics = baseline.get("metrics", baseline)
+def _baseline_limit(
+    baselines: list[dict[str, Any]],
+    sample_type: str,
+    *keys: str,
+) -> tuple[float | None, str | None]:
+    for baseline in baselines:
+        if str(baseline.get("sample_type", "")).lower() != sample_type:
+            continue
+        value = _number(baseline.get("metrics", baseline), *keys)
+        if value is not None and value > 0:
+            return value, str(baseline.get("source") or "unknown")
+    return None, None
+
+
+def _risk_check(
+    actual: float,
+    limit: float | None,
+    source: str | None,
+    warning_ratio: float,
+    red_ratio: float = 1.0,
+) -> dict[str, Any]:
+    if limit is None:
+        return {"status": "gray", "actual": actual, "limit": None, "ratio": None, "source": None}
+    ratio = actual / limit
+    status = "red" if ratio > red_ratio else "yellow" if ratio >= warning_ratio else "green"
+    return {"status": status, "actual": actual, "limit": limit, "ratio": ratio, "source": source}
+
+
+def risk_guard_status(
+    live: dict[str, Any],
+    baselines: list[dict[str, Any]],
+    rules: dict[str, float],
+) -> dict[str, Any]:
+    checks: dict[str, Any] = {}
     red: list[str] = []
     yellow: list[str] = []
-    max_dd = _number(metrics, "MaxDD", "Drawdown", "MaxDrawdown")
-    if max_dd and max_dd > 0:
-        ratio = current["max_drawdown"] / abs(max_dd)
-        (red if ratio >= rules["drawdown_red"] else yellow if ratio >= rules["drawdown_yellow"] else []).append("Drawdown")
-    max_losses = _number(metrics, "MaxConsecLoss", "MaxConsecutiveLosses")
-    if max_losses:
-        if current["max_consecutive_losses"] > max_losses:
-            red.append("Loss streak")
-        elif current["max_consecutive_losses"] >= max_losses:
-            yellow.append("Loss streak")
+    for sample_type in ("is", "oos"):
+        drawdown_limit, drawdown_source = _baseline_limit(
+            baselines, sample_type, "MaxDD", "Drawdown", "MaxDrawdown"
+        )
+        streak_limit, streak_source = _baseline_limit(
+            baselines, sample_type, "MaxConsecLoss", "MaxConsecutiveLosses"
+        )
+        drawdown = _risk_check(
+            float(live["max_drawdown"]),
+            drawdown_limit,
+            drawdown_source,
+            float(rules["drawdown_yellow"]),
+            float(rules["drawdown_red"]),
+        )
+        loss_streak = _risk_check(
+            float(live["max_consecutive_losses"]),
+            streak_limit,
+            streak_source,
+            1.0,
+        )
+        sample_label = sample_type.upper()
+        if drawdown["status"] == "red":
+            red.append(f"{sample_label} drawdown exceeded")
+        elif drawdown["status"] == "yellow":
+            yellow.append(
+                f"{sample_label} drawdown at limit"
+                if drawdown["ratio"] == 1
+                else f"{sample_label} drawdown approaching limit"
+            )
+        if loss_streak["status"] == "red":
+            red.append(f"{sample_label} loss streak exceeded")
+        elif loss_streak["status"] == "yellow":
+            yellow.append(f"{sample_label} loss streak at limit")
+        checks[sample_type] = {"drawdown": drawdown, "loss_streak": loss_streak}
+    statuses = [
+        check["status"]
+        for sample in checks.values()
+        for check in sample.values()
+    ]
+    status = (
+        "red"
+        if "red" in statuses
+        else "yellow"
+        if "yellow" in statuses
+        else "green"
+        if "green" in statuses
+        else "gray"
+    )
+    return {
+        "status": status,
+        "stop_recommended": status == "red",
+        "reasons": red + yellow,
+        "red": red,
+        "yellow": yellow,
+        "live": {
+            "trades": live["trades"],
+            "max_drawdown": live["max_drawdown"],
+            "max_consecutive_losses": live["max_consecutive_losses"],
+            "current_consecutive_losses": live["current_consecutive_losses"],
+        },
+        "checks": checks,
+    }
+
+
+def health_status(
+    current: dict[str, Any],
+    baseline: dict[str, Any] | None,
+    rules: dict[str, float],
+    risk_guard: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    risk_guard = risk_guard or {"status": "gray", "red": [], "yellow": [], "reasons": []}
+    risk_red = list(risk_guard.get("red", []))
+    risk_yellow = list(risk_guard.get("yellow", []))
+    if current["trades"] < rules["min_trades"]:
+        if risk_red or risk_yellow:
+            return {
+                "status": "red" if risk_red else "yellow",
+                "reasons": risk_red + risk_yellow,
+                "red": risk_red,
+                "yellow": risk_yellow,
+                "baseline_sample": baseline and baseline.get("sample_type"),
+            }
+        return {"status": "gray", "reasons": ["Insufficient sample"], "red": [], "yellow": [], "baseline_sample": baseline and baseline.get("sample_type")}
+    if not baseline:
+        if risk_red or risk_yellow:
+            return {
+                "status": "red" if risk_red else "yellow",
+                "reasons": risk_red + risk_yellow,
+                "red": risk_red,
+                "yellow": risk_yellow,
+                "baseline_sample": None,
+            }
+        return {"status": "gray", "reasons": ["No SQX baseline"], "baseline_sample": None}
+    metrics = baseline.get("metrics", baseline)
+    red: list[str] = risk_red
+    yellow: list[str] = risk_yellow
     comparisons = [
         ("profit_factor", ("ProfitFactor",)),
         ("expectancy", ("Expectancy",)),

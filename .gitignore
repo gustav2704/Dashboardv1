@@ -4,6 +4,7 @@ frontend/dist/
 data/*.db
 data/*.db-*
 data/exports/
+data/backtests/
 *.log
 *.tsbuildinfo
 __pycache__/

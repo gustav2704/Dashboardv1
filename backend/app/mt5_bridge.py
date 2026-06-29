@@ -89,6 +89,13 @@ def request_chart(terminal_id: int, symbol: str, timeframe: str, start: int, end
 def _upsert_sync_response(conn: Any, terminal: Any, payload: dict[str, Any]) -> None:
     terminal_id = terminal["id"]
     generated_at = payload.get("generated_at") or utcnow()
+    if payload.get("terminal_connected", True) is False:
+        conn.execute(
+            """UPDATE terminals SET status='connecting',last_sync=?,last_error=NULL
+               WHERE id=?""",
+            (utcnow(), terminal_id),
+        )
+        return
     account = str(payload.get("account_login") or "")
     server = str(payload.get("server") or "")
     max_cursor = int(terminal["cursor_msc"] or 0)
@@ -141,6 +148,25 @@ def _upsert_sync_response(conn: Any, terminal: Any, payload: dict[str, Any]) -> 
                 int(position.get("magic", 0)),
                 str(position.get("comment", "")),
                 json.dumps(position, ensure_ascii=False),
+            ),
+        )
+    conn.execute("DELETE FROM pending_orders WHERE terminal_id=?", (terminal_id,))
+    for order in payload.get("orders", []):
+        conn.execute(
+            """INSERT INTO pending_orders(
+                 terminal_id,ticket,symbol,order_type,time_msc,volume,price,magic,comment,raw_json
+               ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (
+                terminal_id,
+                int(order.get("ticket", 0)),
+                str(order.get("symbol", "")),
+                str(order.get("order_type", "")),
+                int(order.get("time_msc", 0)),
+                float(order.get("volume", 0)),
+                float(order.get("price", 0)),
+                int(order.get("magic", 0)),
+                str(order.get("comment", "")),
+                json.dumps(order, ensure_ascii=False),
             ),
         )
     account_data = payload.get("account", payload)

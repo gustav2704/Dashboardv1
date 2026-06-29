@@ -18,9 +18,13 @@ from .catalog_export import export_catalog
 from .config import DEFAULT_CATALOG, DEFAULT_TERMINAL, EXPORT_DIR, FRONTEND_DIST, REFRESH_SECONDS
 from .db import DEFAULT_ALERTS, init_db, rows, session, utcnow
 from .mapping import auto_confirm_suggestions, confirm_mapping, suggestions
-from .metrics import compute_metrics, health_status, pick_baseline, reconstruct_trades
+from .metrics import compute_metrics, health_status, pick_baseline, reconstruct_trades, risk_guard_status
 from .mt5_bridge import ingest_responses, register_terminal, request_chart, request_sync, sync_all
+from . import backtest_batches
+from . import mt5_backtests
 from . import sqx_connector
+from . import strategy_deletion
+from . import strategy_identity
 
 
 class TerminalCreate(BaseModel):
@@ -53,6 +57,36 @@ class AlertRules(BaseModel):
     frequency_yellow_high: float = Field(gt=0)
     frequency_red_low: float = Field(gt=0)
     frequency_red_high: float = Field(gt=0)
+
+
+class BacktestCreate(BaseModel):
+    strategy_id: int
+    profile: str = Field(default="reference", pattern="^(reference|sqx)$")
+    symbol: str | None = None
+    timeframe: str | None = None
+    from_date: str | None = None
+    to_date: str | None = None
+    deposit: float | None = Field(default=None, gt=0)
+    currency: str | None = None
+    leverage: str | None = None
+    model: int | None = Field(default=None, ge=0, le=4)
+
+
+class BacktestImport(BaseModel):
+    strategy_id: int
+    report_path: str = Field(min_length=3)
+
+
+class BacktestBatchCreate(BaseModel):
+    model: int = Field(default=1)
+    policy: str = Field(default="strict", pattern="^strict$")
+    only_missing: bool = True
+
+
+class StrategyMerge(BaseModel):
+    canonical_id: int = Field(gt=0)
+    duplicate_ids: list[int] = Field(min_length=1)
+    dry_run: bool = True
 
 
 def _load_rules(conn: Any, strategy_id: int | None = None) -> dict[str, Any]:
@@ -105,17 +139,104 @@ def _latest_baselines(conn: Any, strategy_id: int) -> list[dict[str, Any]]:
            ORDER BY CASE source WHEN 'sqx' THEN 0 ELSE 1 END, synced_at DESC""",
         (strategy_id,),
     ).fetchall()
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     result = []
     for row in snapshots:
-        sample = row["sample_type"].lower()
-        if sample in seen:
+        key = (row["source"].lower(), row["sample_type"].lower())
+        if key in seen:
             continue
-        seen.add(sample)
+        seen.add(key)
         item = dict(row)
         item["metrics"] = json.loads(item.pop("metrics_json"))
         item.pop("orders_json", None)
         result.append(item)
+    return result
+
+
+def _latest_sqx_analytics(conn: Any, strategy_id: int) -> dict[str, Any] | None:
+    row = conn.execute(
+        """SELECT project,databank,analytics_json,synced_at
+           FROM sqx_analytics_snapshots
+           WHERE strategy_id=? ORDER BY synced_at DESC LIMIT 1""",
+        (strategy_id,),
+    ).fetchone()
+    if not row:
+        return None
+    payload = json.loads(row["analytics_json"])
+    return {
+        "project": row["project"],
+        "databank": row["databank"],
+        "synced_at": row["synced_at"],
+        "edge": payload.get("edge", {"available": False, "reason": "No disponible"}),
+        "egt": payload.get("egt", {"available": False, "reason": "No disponible"}),
+    }
+
+
+def _backtest_summaries(conn: Any) -> dict[int, dict[str, Any]]:
+    summary_rows = conn.execute(
+        """
+        WITH ranked AS (
+          SELECT strategy_id,id,status,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY strategy_id ORDER BY requested_at DESC,id DESC
+                 ) AS position
+          FROM backtest_runs
+        ),
+        aggregates AS (
+          SELECT r.strategy_id,
+                 COUNT(*) AS total_count,
+                 SUM(CASE WHEN r.status IN ('queued','preflight','running') THEN 1 ELSE 0 END)
+                   AS active_count,
+                 SUM(CASE WHEN r.status='completed' AND m.run_id IS NOT NULL THEN 1 ELSE 0 END)
+                   AS completed_count,
+                 MAX(CASE WHEN r.status='completed' AND m.run_id IS NOT NULL
+                          THEN COALESCE(r.finished_at,r.requested_at) END)
+                   AS latest_completed_at
+          FROM backtest_runs r
+          LEFT JOIN backtest_metrics m ON m.run_id=r.id
+          GROUP BY r.strategy_id
+        )
+        SELECT a.*,ranked.id AS latest_run_id,ranked.status AS latest_status
+        FROM aggregates a
+        JOIN ranked ON ranked.strategy_id=a.strategy_id AND ranked.position=1
+        """
+    ).fetchall()
+    result: dict[int, dict[str, Any]] = {}
+    for row in summary_rows:
+        completed_count = int(row["completed_count"] or 0)
+        active_count = int(row["active_count"] or 0)
+        state = "validated" if completed_count else "running" if active_count else "failed"
+        result[int(row["strategy_id"])] = {
+            "state": state,
+            "has_completed": completed_count > 0,
+            "completed_count": completed_count,
+            "latest_run_id": int(row["latest_run_id"]),
+            "latest_status": row["latest_status"],
+            "latest_completed_at": row["latest_completed_at"],
+        }
+    item_rows = conn.execute(
+        """SELECT i.strategy_id,i.status
+           FROM backtest_batch_items i
+           JOIN (
+             SELECT strategy_id,MAX(id) AS latest_id
+             FROM backtest_batch_items GROUP BY strategy_id
+           ) latest ON latest.latest_id=i.id"""
+    ).fetchall()
+    for row in item_rows:
+        strategy_id = int(row["strategy_id"])
+        current = result.get(strategy_id)
+        if current and current["has_completed"]:
+            continue
+        item_status = str(row["status"])
+        state = "running" if item_status in {"resolving", "queued", "running"} else "failed"
+        result[strategy_id] = {
+            "state": state,
+            "has_completed": False,
+            "completed_count": int(current["completed_count"]) if current else 0,
+            "latest_run_id": current["latest_run_id"] if current else None,
+            "latest_status": item_status,
+            "latest_completed_at": None,
+        }
     return result
 
 
@@ -135,25 +256,33 @@ def dashboard_data(window: str = "all", start: str | None = None, end: str | Non
         deals = rows(conn.execute("SELECT * FROM deals ORDER BY time_msc,ticket"))
         trades_all = reconstruct_trades(deals)
         positions_all = rows(conn.execute("SELECT * FROM positions"))
+        backtest_summaries = _backtest_summaries(conn)
         output = []
         for strategy in strategies:
             mappings = conn.execute("SELECT * FROM mappings WHERE strategy_id=? AND confirmed=1", (strategy["id"],)).fetchall()
             sqx_link = conn.execute(
-                """SELECT project,databank,strategy_name,symbol,timeframe,filter_result,last_synced_at
+                """SELECT project,databank,strategy_name,symbol,timeframe,filter_result,
+                          last_synced_at,missing_from_sqx_at
                    FROM sqx_strategy_links WHERE strategy_id=? ORDER BY last_synced_at DESC LIMIT 1""",
                 (strategy["id"],),
             ).fetchone()
             magic_numbers = sorted({int(mapping["magic"]) for mapping in mappings if mapping["magic"] is not None})
-            trades = sorted(
-                [t for t in trades_all if start_msc <= int(t["close_time_msc"]) <= end_msc and any(_matches(m, t) for m in mappings)],
+            strategy_trades = sorted(
+                [t for t in trades_all if any(_matches(m, t) for m in mappings)],
                 key=lambda t: (int(t.get("close_time_msc", 0)), int(t.get("deal_ticket", 0))),
             )
+            trades = [
+                trade for trade in strategy_trades
+                if start_msc <= int(trade["close_time_msc"]) <= end_msc
+            ]
             positions = [p for p in positions_all if any(_matches(m, p) for m in mappings)]
             current = compute_metrics(trades, positions)
             baselines = _latest_baselines(conn, strategy["id"])
+            sqx_analytics = _latest_sqx_analytics(conn, strategy["id"])
             baseline = pick_baseline(baselines)
             rules = _load_rules(conn, strategy["id"])
-            health = health_status(current, baseline, rules)
+            risk_guard = risk_guard_status(compute_metrics(strategy_trades), baselines, rules)
+            health = health_status(current, baseline, rules, risk_guard)
             relevant_terminals = [t for t in terminal_rows if not strategy["account_login"] or t.get("account_login") == strategy["account_login"]]
             connected = any(t["status"] == "connected" for t in relevant_terminals)
             if strategy["retired"]:
@@ -188,10 +317,23 @@ def dashboard_data(window: str = "all", start: str | None = None, end: str | Non
                     "state": state,
                     "link_state": link_state,
                     "sqx": dict(sqx_link) if sqx_link else None,
+                    "sqx_analytics": sqx_analytics,
                     "metrics": current,
                     "health": health,
+                    "risk_guard": risk_guard,
                     "baseline": baseline,
                     "baselines": baselines,
+                    "backtest": backtest_summaries.get(
+                        int(strategy["id"]),
+                        {
+                            "state": "none",
+                            "has_completed": False,
+                            "completed_count": 0,
+                            "latest_run_id": None,
+                            "latest_status": None,
+                            "latest_completed_at": None,
+                        },
+                    ),
                     "mapping_count": len(mappings),
                     "magic_numbers": magic_numbers,
                 }
@@ -224,6 +366,7 @@ def _worker(stop_event: threading.Event) -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    mt5_backtests.recover_interrupted_runs()
     if DEFAULT_CATALOG.is_file():
         import_catalog(DEFAULT_CATALOG)
     if DEFAULT_TERMINAL.is_dir():
@@ -231,10 +374,18 @@ async def lifespan(_: FastAPI):
     ingest_responses()
     stop = threading.Event()
     thread = threading.Thread(target=_worker, args=(stop,), daemon=True, name="dashboard-sync")
+    batch_thread = threading.Thread(
+        target=backtest_batches.worker,
+        args=(stop,),
+        daemon=True,
+        name="backtest-batches",
+    )
     thread.start()
+    batch_thread.start()
     yield
     stop.set()
     thread.join(timeout=2)
+    batch_thread.join(timeout=2)
 
 
 app = FastAPI(title="Dashboardv1", version="1.0.0", lifespan=lifespan)
@@ -284,6 +435,43 @@ def get_strategy(strategy_id: int, window: str = "all", start: str | None = None
     raise HTTPException(404, "Strategy not found")
 
 
+@app.get("/api/strategies/{strategy_id}/deletion-impact")
+def get_strategy_deletion_impact(strategy_id: int) -> dict[str, Any]:
+    try:
+        return strategy_deletion.deletion_impact(strategy_id)
+    except KeyError as exc:
+        raise HTTPException(404, exc.args[0]) from exc
+
+
+@app.delete("/api/strategies/{strategy_id}")
+def delete_strategy(strategy_id: int) -> dict[str, Any]:
+    try:
+        return strategy_deletion.delete_strategy(strategy_id)
+    except KeyError as exc:
+        raise HTTPException(404, exc.args[0]) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/api/strategy-identities/conflicts")
+def strategy_identity_conflicts() -> dict[str, Any]:
+    return strategy_identity.conflicts()
+
+
+@app.post("/api/strategy-identities/merge")
+def merge_strategy_identities(payload: StrategyMerge) -> dict[str, Any]:
+    try:
+        return strategy_identity.merge_strategies(
+            payload.canonical_id,
+            payload.duplicate_ids,
+            payload.dry_run,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, exc.args[0]) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
 @app.get("/api/terminals")
 def get_terminals() -> list[dict[str, Any]]:
     ingest_responses()
@@ -310,7 +498,7 @@ def sync_terminal(terminal_id: int) -> dict[str, Any]:
 
 
 @app.post("/api/catalog/import")
-def reload_catalog() -> dict[str, int]:
+def reload_catalog() -> dict[str, object]:
     if not DEFAULT_CATALOG.is_file():
         raise HTTPException(404, f"Could not find {DEFAULT_CATALOG}")
     return import_catalog(DEFAULT_CATALOG)
@@ -330,7 +518,7 @@ def download_catalog() -> FileResponse:
         for strategy in data["strategies"]
     ]
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    destination = EXPORT_DIR / f"Track_v1_actualizado_{timestamp}.xlsx"
+    destination = EXPORT_DIR / f"Ranking_multifuente_{timestamp}.xlsx"
     export_catalog(DEFAULT_CATALOG, destination, export_rows)
     return FileResponse(
         destination,
@@ -375,6 +563,137 @@ def sqx_sync(payload: SQXSync) -> dict[str, Any]:
         raise HTTPException(422, str(exc)) from exc
     except sqx_connector.SQXUnavailable as exc:
         raise HTTPException(503, str(exc)) from exc
+
+
+@app.get("/api/strategies/{strategy_id}/backtest-defaults")
+def get_backtest_defaults(strategy_id: int, profile: str = "reference") -> dict[str, Any]:
+    try:
+        return mt5_backtests.backtest_defaults(strategy_id, profile)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except sqx_connector.SQXUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@app.post("/api/backtests")
+def create_backtest(payload: BacktestCreate) -> dict[str, Any]:
+    try:
+        config = mt5_backtests.backtest_defaults(payload.strategy_id, payload.profile)
+        overrides = payload.model_dump(exclude={"strategy_id", "profile"}, exclude_none=True)
+        config.update(overrides)
+        return mt5_backtests.create_run(config)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except sqx_connector.SQXUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@app.get("/api/backtests")
+def get_backtests(strategy_id: int | None = None) -> list[dict[str, Any]]:
+    return mt5_backtests.list_runs(strategy_id)
+
+
+@app.post("/api/backtests/import")
+def import_backtest(payload: BacktestImport) -> dict[str, Any]:
+    report = Path(payload.report_path)
+    if not report.is_file():
+        raise HTTPException(422, f"Report does not exist: {report}")
+    try:
+        return mt5_backtests.import_report(payload.strategy_id, report)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.get("/api/backtests/candidates")
+def backtest_candidates() -> dict[str, Any]:
+    return backtest_batches.discover_candidates()
+
+
+@app.get("/api/backtests/batches")
+def get_backtest_batches() -> list[dict[str, Any]]:
+    return backtest_batches.list_batches()
+
+
+@app.post("/api/backtests/batches")
+def create_backtest_batch(payload: BacktestBatchCreate) -> dict[str, Any]:
+    try:
+        result = backtest_batches.create_batch(
+            payload.model,
+            payload.policy,
+            only_missing=payload.only_missing,
+        )
+        if result is None:
+            raise ValueError("No strategies are available for a new batch")
+        return result
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.get("/api/backtests/batches/{batch_id}")
+def get_backtest_batch(batch_id: int) -> dict[str, Any]:
+    try:
+        return backtest_batches.get_batch(batch_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.post("/api/backtests/batches/{batch_id}/pause")
+def pause_backtest_batch(batch_id: int) -> dict[str, Any]:
+    try:
+        return backtest_batches.pause_batch(batch_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.post("/api/backtests/batches/{batch_id}/resume")
+def resume_backtest_batch(batch_id: int) -> dict[str, Any]:
+    try:
+        return backtest_batches.resume_batch(batch_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.post("/api/backtests/batches/{batch_id}/cancel")
+def cancel_backtest_batch(batch_id: int) -> dict[str, Any]:
+    try:
+        return backtest_batches.cancel_batch(batch_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.get("/api/backtests/{run_id}")
+def get_backtest(run_id: int) -> dict[str, Any]:
+    try:
+        return mt5_backtests._run_row(run_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.post("/api/backtests/{run_id}/cancel")
+def cancel_backtest(run_id: int) -> dict[str, Any]:
+    try:
+        return mt5_backtests.cancel_run(run_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.post("/api/backtests/{run_id}/retry")
+def retry_backtest(run_id: int) -> dict[str, Any]:
+    try:
+        return mt5_backtests.retry_run(run_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.get("/api/strategies/{strategy_id}/backtests")
+def strategy_backtests(strategy_id: int) -> list[dict[str, Any]]:
+    return mt5_backtests.list_runs(strategy_id)
 
 
 @app.get("/api/alerts")

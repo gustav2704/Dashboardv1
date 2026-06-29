@@ -1,6 +1,19 @@
 from datetime import date, datetime
 
-from app.metrics import compute_metrics, health_status, pick_baseline, reconstruct_trades
+from app.metrics import compute_metrics, health_status, pick_baseline, reconstruct_trades, risk_guard_status
+
+
+RULES = {
+    "min_trades": 20,
+    "drawdown_yellow": .8,
+    "drawdown_red": 1.0,
+    "performance_yellow": .85,
+    "performance_red": .7,
+    "frequency_yellow_low": .5,
+    "frequency_yellow_high": 1.5,
+    "frequency_red_low": .25,
+    "frequency_red_high": 2.0,
+}
 
 
 def deal(ticket, position, time_msc, entry, volume, profit=0, commission=0, swap=0, deal_type="BUY"):
@@ -32,12 +45,28 @@ def test_metrics_streak_drawdown_and_sqn():
     assert metrics["winning_trades"] == 3
     assert metrics["losing_trades"] == 2
     assert metrics["breakeven_trades"] == 0
+    assert metrics["max_consecutive_wins"] == 2
     assert metrics["max_consecutive_losses"] == 2
+    assert metrics["current_consecutive_losses"] == 0
     assert metrics["max_drawdown"] == 7
     assert metrics["net_profit"] == 13
     assert metrics["best_trade"] == 10
     assert metrics["worst_trade"] == -4
     assert metrics["sqn"] is not None
+
+
+def test_winning_and_losing_streaks_are_interrupted_by_breakeven_trades():
+    profits = [5, 4, 0, 3, 2, -1, -2, 0, -3]
+    trades = [
+        {"net_profit": value, "open_time_msc": i * 1000, "close_time_msc": (i + 1) * 1000, "commission": 0, "swap": 0}
+        for i, value in enumerate(profits)
+    ]
+
+    metrics = compute_metrics(trades)
+
+    assert metrics["max_consecutive_wins"] == 2
+    assert metrics["max_consecutive_losses"] == 2
+    assert metrics["current_consecutive_losses"] == 1
 
 
 def test_metrics_tracks_today_profit_from_local_close_date():
@@ -61,8 +90,75 @@ def test_oos_baseline_is_preferred_and_health_is_gray_for_small_sample():
 
 def test_health_turns_red_when_drawdown_exceeds_baseline():
     current = compute_metrics([{"net_profit": value, "open_time_msc": i * 1000, "close_time_msc": (i + 1) * 1000, "commission": 0, "swap": 0} for i, value in enumerate([100] + [-10] * 20)])
-    baseline = {"sample_type": "oos", "metrics": {"MaxDD": 100}}
-    rules = {"min_trades": 20, "drawdown_yellow": .8, "drawdown_red": 1.0, "performance_yellow": .85, "performance_red": .7, "frequency_yellow_low": .5, "frequency_yellow_high": 1.5, "frequency_red_low": .25, "frequency_red_high": 2.0}
-    result = health_status(current, baseline, rules)
+    baseline = {"sample_type": "oos", "source": "sqx", "metrics": {"MaxDD": 100}}
+    risk_guard = risk_guard_status(current, [baseline], RULES)
+    result = health_status(current, baseline, RULES, risk_guard)
     assert result["status"] == "red"
-    assert "Drawdown" in result["red"]
+    assert "OOS drawdown exceeded" in result["red"]
+
+
+def test_risk_guard_evaluates_is_and_oos_independently():
+    live = compute_metrics([
+        {"net_profit": value, "open_time_msc": i * 1000, "close_time_msc": (i + 1) * 1000, "commission": 0, "swap": 0}
+        for i, value in enumerate([100, -60, -60])
+    ])
+    baselines = [
+        {"sample_type": "is", "source": "sqx", "metrics": {"MaxDD": 100, "MaxConsecLoss": 2}},
+        {"sample_type": "oos", "source": "sqx", "metrics": {"MaxDD": 150, "MaxConsecLoss": 1}},
+    ]
+
+    result = risk_guard_status(live, baselines, RULES)
+
+    assert result["status"] == "red"
+    assert result["stop_recommended"] is True
+    assert result["checks"]["is"]["drawdown"]["status"] == "red"
+    assert result["checks"]["is"]["loss_streak"]["status"] == "yellow"
+    assert result["checks"]["oos"]["drawdown"]["status"] == "yellow"
+    assert result["checks"]["oos"]["loss_streak"]["status"] == "red"
+
+
+def test_risk_guard_marks_equal_limits_yellow_without_stop_recommendation():
+    live = {**compute_metrics([]), "max_drawdown": 100, "max_consecutive_losses": 2}
+    baselines = [
+        {"sample_type": sample, "source": "sqx", "metrics": {"MaxDD": 100, "MaxConsecLoss": 2}}
+        for sample in ("is", "oos")
+    ]
+
+    result = risk_guard_status(live, baselines, RULES)
+
+    assert result["status"] == "yellow"
+    assert result["stop_recommended"] is False
+    assert all(
+        check["status"] == "yellow"
+        for sample in result["checks"].values()
+        for check in sample.values()
+    )
+
+
+def test_risk_guard_ignores_zero_limits_and_uses_valid_source_fallback():
+    live = {**compute_metrics([]), "max_drawdown": 50, "max_consecutive_losses": 3}
+    baselines = [
+        {"sample_type": "oos", "source": "sqx", "metrics": {"MaxDD": 0, "MaxConsecLoss": 0}},
+        {"sample_type": "oos", "source": "excel", "metrics": {"MaxDD": 100, "MaxConsecLoss": 4}},
+    ]
+
+    result = risk_guard_status(live, baselines, RULES)
+
+    assert result["checks"]["is"]["drawdown"]["status"] == "gray"
+    assert result["checks"]["oos"]["drawdown"]["source"] == "excel"
+    assert result["checks"]["oos"]["loss_streak"]["source"] == "excel"
+
+
+def test_risk_guard_overrides_insufficient_performance_sample():
+    current = compute_metrics([
+        {"net_profit": -60, "open_time_msc": 0, "close_time_msc": 1000, "commission": 0, "swap": 0},
+        {"net_profit": -60, "open_time_msc": 1000, "close_time_msc": 2000, "commission": 0, "swap": 0},
+    ])
+    baseline = {"sample_type": "oos", "source": "sqx", "metrics": {"MaxDD": 100}}
+    risk_guard = risk_guard_status(current, [baseline], RULES)
+
+    result = health_status(current, baseline, RULES, risk_guard)
+
+    assert current["trades"] < RULES["min_trades"]
+    assert result["status"] == "red"
+    assert "OOS drawdown exceeded" in result["reasons"]

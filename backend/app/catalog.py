@@ -7,6 +7,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 from .db import session, utcnow
+from .strategy_identity import add_alias, origin_with, resolve_catalog_identity
 
 MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -76,13 +77,14 @@ def _normalize(value: object) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
 
 
-def import_catalog(path: Path) -> dict[str, int]:
+def import_catalog(path: Path) -> dict[str, object]:
     rows = read_first_sheet(path)
     header_index = next(
         i for i, row in enumerate(rows) if row and str(row[0]).strip().lower() == "symbol"
     )
     headers = [str(value).strip() for value in rows[header_index]]
-    inserted = updated = 0
+    inserted = updated = ambiguous = 0
+    conflicts: list[dict[str, object]] = []
     last_symbol = ""
     with session() as conn:
         for source_row, values in enumerate(rows[header_index + 1 :], start=header_index + 2):
@@ -97,38 +99,47 @@ def import_catalog(path: Path) -> dict[str, int]:
             mql_name = str(record.get("mql5 bot name (alternative)") or "").strip()
             account = str(record.get("demo account number") or "").strip()
             catalog_json = json.dumps(record, ensure_ascii=False)
-            existing = conn.execute(
-                "SELECT id,origin FROM strategies WHERE sqx_name=? AND account_login=?",
-                (sqx_name, account),
-            ).fetchone()
-            if not existing and mql_name:
-                candidates = conn.execute(
-                    """SELECT id,origin,sqx_name,mql5_name FROM strategies
-                       WHERE account_login=? AND origin IN ('mt5','mt5+excel')""",
-                    (account,),
-                ).fetchall()
-                matching = [
-                    candidate
-                    for candidate in candidates
-                    if _normalize(mql_name)
-                    in {
-                        _normalize(candidate["sqx_name"]),
-                        _normalize(candidate["mql5_name"]),
+            resolution = resolve_catalog_identity(
+                conn, sqx_name, mql_name, account, last_symbol
+            )
+            if resolution["state"] == "ambiguous":
+                ambiguous += 1
+                conflicts.append(
+                    {
+                        "catalog_row": source_row,
+                        "sqx_name": sqx_name,
+                        "mql5_name": mql_name,
+                        "candidate_ids": resolution["candidate_ids"],
+                        "evidence": resolution["evidence"],
                     }
-                ]
-                if len(matching) == 1:
-                    existing = matching[0]
+                )
+                continue
+            existing = (
+                resolution["strategy"]
+                if resolution["state"] == "matched"
+                else None
+            )
             if existing:
+                link = conn.execute(
+                    "SELECT strategy_name FROM sqx_strategy_links WHERE strategy_id=?",
+                    (existing["id"],),
+                ).fetchone()
+                canonical_name = link["strategy_name"] if link else sqx_name
                 conn.execute(
-                    """UPDATE strategies SET symbol=?,sqx_name=?,mql5_name=?,catalog_row=?,
-                       catalog_json=?,origin=? WHERE id=?""",
+                    """UPDATE strategies SET symbol=?,sqx_name=?,mql5_name=?,
+                       account_login=COALESCE(NULLIF(account_login,''),?),
+                       catalog_row=?,catalog_json=?,origin=? WHERE id=?""",
                     (
                         last_symbol,
-                        sqx_name,
+                        canonical_name,
                         mql_name,
+                        account,
                         source_row,
                         catalog_json,
-                        "mt5+excel" if existing["origin"] in ("mt5", "mt5+excel") else "excel",
+                        origin_with(
+                            existing["origin"],
+                            *(("sqx", "excel") if link else ("excel",)),
+                        ),
                         existing["id"],
                     ),
                 )
@@ -152,6 +163,8 @@ def import_catalog(path: Path) -> dict[str, int]:
                 )
                 inserted += 1
                 strategy_id = cursor.lastrowid
+            add_alias(conn, strategy_id, sqx_name, "excel")
+            add_alias(conn, strategy_id, mql_name, "mql5")
             edge = record.get("Edge decay analyzer score")
             losses = str(record.get("maximun of losses in is/oos  in a row") or "").split()
             baseline_common = {
@@ -174,4 +187,10 @@ def import_catalog(path: Path) -> dict[str, int]:
                            VALUES(?,?,?,?,?)""",
                         (strategy_id, "excel", sample_type, json.dumps(metrics, ensure_ascii=False), utcnow()),
                     )
-    return {"inserted": inserted, "updated": updated, "total": inserted + updated}
+    return {
+        "inserted": inserted,
+        "updated": updated,
+        "ambiguous": ambiguous,
+        "conflicts": conflicts,
+        "total": inserted + updated,
+    }

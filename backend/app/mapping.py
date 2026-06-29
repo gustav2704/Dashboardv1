@@ -14,12 +14,14 @@ def normalize(value: str) -> str:
 
 def symbol_family(value: str) -> str:
     symbol = normalize(value)
-    if symbol.startswith(("ger40", "de40", "dax")):
+    if symbol.startswith(("ger40", "de40", "dax", "deuidx")):
         return "dax"
     if symbol.startswith(("us100", "nas100", "naq", "ndx", "usatech")):
         return "naq"
     if symbol.startswith(("xau", "gold")):
         return "xau"
+    if symbol.startswith(("us30", "usa30", "dj30", "dow")):
+        return "us30"
     return symbol
 
 

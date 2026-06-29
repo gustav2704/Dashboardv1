@@ -8,7 +8,9 @@ def test_name_normalization_handles_sqx_punctuation():
 
 def test_symbol_family_maps_broker_symbols_to_catalog_symbols():
     assert symbol_family("GER40") == "dax"
+    assert symbol_family("DEUIDXEUR_clonedwnx") == "dax"
     assert symbol_family("US100.cash") == "naq"
+    assert symbol_family("USA30IDXUSD_clonedwnx") == "us30"
     assert symbol_family("XAUUSD.cyr") == "xau"
 
 
