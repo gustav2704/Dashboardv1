@@ -63,6 +63,8 @@ def test_egt_matches_installed_plugin_formula_fixture():
     assert result["n_buy"] == 3
     assert result["n_sell"] == 2
     assert result["months"] == 3
+    assert result["source"] == "sqx_bridge"
+    assert result["history_source"] == "EGTHistoryBridge"
 
 
 def test_egt_bridge_failure_is_an_unavailable_result():
@@ -76,6 +78,50 @@ def test_egt_bridge_failure_is_an_unavailable_result():
 
     assert result["available"] is False
     assert result["reason"] == "Bridge no disponible"
+
+
+def test_egt_uses_csv_fallback_when_bridge_fails(tmp_path, monkeypatch):
+    module = _extractor()
+    history_dir = tmp_path / "egt_history"
+    history_dir.mkdir()
+    csv_path = history_dir / "NAQ.csv"
+    csv_path.write_text(
+        "\n".join(
+            [
+                "Date,Time,Open,High,Low,Close,Volume",
+                "2024.01.01,00:00,1,1,1,1,1",
+                "2024.01.02,00:00,2,2,2,2,1",
+                "2024.02.01,00:00,2,2,2,2,1",
+                "2024.02.02,00:00,1,1,1,1,1",
+                "2024.03.01,00:00,1,1,1,1,1",
+                "2024.03.02,00:00,3,3,3,3,1",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "DEFAULT_EGT_HISTORY_DIR", history_dir)
+
+    result = module.calculate_egt(
+        FakeEgtClient(module, fail=True),
+        {
+            "lastSettingsXml": """
+              <Settings><Data><Setups>
+                <Setup dateFrom="2024.01.01" dateTo="2024.03.31" session="No Session">
+                  <Chart symbol="USATECHIDXUSD_clonedwnx" timeframe="H1" />
+                </Setup>
+              </Setups></Data></Settings>
+            """
+        },
+        _orders(),
+    )
+
+    assert result["available"] is True
+    assert result["source"] == "csv_fallback"
+    assert result["history_source"] == "CSV fallback"
+    assert result["source_file"].endswith("NAQ.csv")
+    assert result["bars"] == 6
+    assert result["months"] == 3
+    assert result["total"] == 4.7
 
 
 def test_edge_defaults_match_verified_sqx_strategy_fixture():

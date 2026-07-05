@@ -176,7 +176,7 @@ main {
   padding: 31px 38px 18px;
   max-width: 1700px;
   width: 100%;
-  margin: auto;
+  margin: 0 auto 0 0;
   transition: max-width 180ms ease, padding 180ms ease;
 }
 .collapsed-sidebar main {
@@ -862,9 +862,42 @@ td small {
   padding: 10px 9px;
   white-space: nowrap;
 }
-.drawer-table td:nth-child(2) {
+.drawer-table td:nth-child(3) {
   font-weight: 700;
   color: #dce8ee;
+}
+.history-badge,
+.trade-source {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  padding: 2px 6px;
+  font: 700 10px Consolas;
+  white-space: nowrap;
+}
+.history-badge {
+  border: 1px solid #31566a;
+  background: #0a2130;
+  color: #b7c9d4;
+}
+.history-badge.positive {
+  border-color: #1e6959;
+  color: #49e1bd;
+}
+.history-badge.negative {
+  border-color: #743044;
+  color: #ff728b;
+}
+.trade-source {
+  border: 1px solid #2e5263;
+  background: #09202d;
+  color: #9fb7c6;
+}
+.trade-source.historical {
+  border-color: #6a568f;
+  background: #1a1330;
+  color: #c8b8ff;
 }
 .strategy-selector {
   display: flex;

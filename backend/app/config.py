@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT / "data"
 EXPORT_DIR = DATA_DIR / "exports"
 BACKTEST_DIR = DATA_DIR / "backtests"
+EGT_HISTORY_DIR = Path(os.environ.get("EGT_HISTORY_DIR", DATA_DIR / "egt_history"))
 DB_PATH = Path(os.environ.get("DASHBOARDV1_DB", DATA_DIR / "dashboard.db"))
 FRONTEND_DIST = ROOT / "frontend" / "dist"
 DEFAULT_CATALOG = ROOT.parent / "EA_track" / "Track_v1.xlsx"

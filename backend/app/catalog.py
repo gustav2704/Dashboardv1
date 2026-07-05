@@ -128,7 +128,7 @@ def import_catalog(path: Path) -> dict[str, object]:
                 conn.execute(
                     """UPDATE strategies SET symbol=?,sqx_name=?,mql5_name=?,
                        account_login=COALESCE(NULLIF(account_login,''),?),
-                       catalog_row=?,catalog_json=?,origin=? WHERE id=?""",
+                       catalog_row=?,catalog_json=?,origin=?,retired=0 WHERE id=?""",
                     (
                         last_symbol,
                         canonical_name,

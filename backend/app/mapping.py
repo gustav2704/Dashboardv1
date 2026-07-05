@@ -26,10 +26,17 @@ def symbol_family(value: str) -> str:
 
 
 def version_signature(value: str) -> tuple[int, ...]:
-    matches = re.findall(r"(?<!\d)(\d+)[._](\d+)[._](\d+)(?:[._(](\d+)\)?)?", value)
+    matches = []
+    for match in re.finditer(r"(?<!\d)(\d+)[._](\d+)[._](\d+)", value):
+        parts = [int(match.group(1)), int(match.group(2)), int(match.group(3))]
+        suffix = value[match.end():]
+        while extra := re.match(r"(?:[._](\d+)|\((\d+)\))", suffix):
+            parts.append(int(extra.group(1) or extra.group(2)))
+            suffix = suffix[extra.end():]
+        matches.append(tuple(parts))
     if not matches:
         return ()
-    return tuple(int(part) for part in matches[-1] if part != "")
+    return matches[-1]
 
 
 def _prefix_score(left: str, right: str) -> float:
@@ -98,9 +105,12 @@ def _observed(conn: Any) -> list[Any]:
              SELECT d.terminal_id,t.account_login,d.symbol,d.magic,d.comment,1 deal_count
              FROM deals d JOIN terminals t ON t.id=d.terminal_id
              WHERE UPPER(d.entry_type) IN ('IN','INOUT')
-             UNION ALL
+           UNION ALL
              SELECT p.terminal_id,t.account_login,p.symbol,p.magic,p.comment,0 deal_count
              FROM positions p JOIN terminals t ON t.id=p.terminal_id
+             UNION ALL
+             SELECT o.terminal_id,t.account_login,o.symbol,o.magic,o.comment,0 deal_count
+             FROM pending_orders o JOIN terminals t ON t.id=o.terminal_id
            )
            SELECT terminal_id,account_login,symbol,magic,comment,SUM(deal_count) deal_count
            FROM identities
@@ -153,7 +163,7 @@ def suggestions() -> list[dict[str, Any]]:
         strategies = conn.execute("SELECT * FROM strategies WHERE retired=0").fetchall()
         observed = _observed(conn)
         mapped = conn.execute(
-            "SELECT terminal_id,symbol,magic,comment_pattern FROM mappings WHERE confirmed=1"
+            "SELECT terminal_id,symbol,magic,comment_pattern FROM mappings WHERE confirmed=1 AND role='live'"
         ).fetchall()
         terminal_experts = {
             row["id"]: _expert_names(row["data_dir"])
@@ -216,7 +226,7 @@ def ensure_mt5_strategies() -> dict[str, int]:
     now = utcnow()
     with session() as conn:
         mappings = conn.execute(
-            "SELECT terminal_id,symbol,magic,comment_pattern FROM mappings WHERE confirmed=1"
+            "SELECT terminal_id,symbol,magic,comment_pattern FROM mappings WHERE confirmed=1 AND role='live'"
         ).fetchall()
         strategies = conn.execute("SELECT * FROM strategies WHERE retired=0").fetchall()
         for item in _observed(conn):
@@ -226,7 +236,7 @@ def ensure_mt5_strategies() -> dict[str, int]:
                        origin=CASE WHEN origin='excel' THEN 'mt5+excel' ELSE origin END
                        WHERE id IN (
                          SELECT strategy_id FROM mappings
-                         WHERE confirmed=1 AND terminal_id=? AND LOWER(symbol)=LOWER(?) AND magic=?
+                         WHERE confirmed=1 AND role='live' AND terminal_id=? AND LOWER(symbol)=LOWER(?) AND magic=?
                        )""",
                     (now, item["terminal_id"], item["symbol"], item["magic"]),
                 )
@@ -290,8 +300,8 @@ def ensure_mt5_strategies() -> dict[str, int]:
             conn.execute(
                 """INSERT OR IGNORE INTO mappings(
                      strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,
-                     confidence,confirmed,created_at
-                   ) VALUES(?,?,?,?,?,?,?,?,?)""",
+                     role,confidence,confirmed,created_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
                 (
                     strategy_id,
                     item["terminal_id"],
@@ -299,13 +309,14 @@ def ensure_mt5_strategies() -> dict[str, int]:
                     item["symbol"],
                     int(item["magic"] or 0),
                     observed_name,
+                    "live",
                     1.0,
                     1,
                     now,
                 ),
             )
             mappings = conn.execute(
-                "SELECT terminal_id,symbol,magic,comment_pattern FROM mappings WHERE confirmed=1"
+                "SELECT terminal_id,symbol,magic,comment_pattern FROM mappings WHERE confirmed=1 AND role='live'"
             ).fetchall()
     return {"created": created, "linked": linked, "safe_matches": safe_matches}
 
@@ -313,9 +324,9 @@ def ensure_mt5_strategies() -> dict[str, int]:
 def confirm_mapping(payload: dict[str, Any]) -> dict[str, Any]:
     with session() as conn:
         conn.execute(
-            """INSERT INTO mappings(strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,confidence,confirmed,created_at)
-               VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(strategy_id,terminal_id,symbol,magic,comment_pattern)
-               DO UPDATE SET confidence=excluded.confidence,confirmed=1""",
+            """INSERT INTO mappings(strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,role,confidence,confirmed,created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(strategy_id,terminal_id,symbol,magic,comment_pattern)
+               DO UPDATE SET role='live',confidence=excluded.confidence,confirmed=1""",
             (
                 int(payload["strategy_id"]),
                 int(payload["terminal_id"]),
@@ -323,6 +334,7 @@ def confirm_mapping(payload: dict[str, Any]) -> dict[str, Any]:
                 str(payload.get("symbol", "")),
                 int(payload.get("magic", 0)),
                 str(payload.get("comment_pattern", "")),
+                "live",
                 float(payload.get("confidence", 1.0)),
                 1,
                 utcnow(),

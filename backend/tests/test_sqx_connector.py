@@ -217,3 +217,221 @@ def test_failed_sync_does_not_change_missing_state(tmp_path, monkeypatch):
             "SELECT missing_from_sqx_at FROM sqx_strategy_links WHERE strategy_id=?",
             (strategy_id,),
         ).fetchone()["missing_from_sqx_at"] is None
+
+
+def _parameter_snapshot(variables):
+    return {"parameters": {"variables": variables}}
+
+
+def _insert_parameter_run(conn, strategy_id, variables, requested_at):
+    conn.execute(
+        """INSERT INTO backtest_runs(
+             strategy_id,broker,expert_path,expert_hash,symbol,timeframe,
+             from_date,to_date,deposit,currency,leverage,model,inputs_json,
+             config_source,config_snapshot_json,status,requested_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            strategy_id,
+            "FPM",
+            "bot.ex5",
+            "hash",
+            "US100",
+            "H1",
+            "2024-01-01",
+            "2025-01-01",
+            100000,
+            "USD",
+            "1:100",
+            1,
+            "{}",
+            "test",
+            json.dumps(_parameter_snapshot(variables)),
+            "completed",
+            requested_at,
+        ),
+    )
+
+
+def test_sync_relinks_a_unique_parameter_identical_rename(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "rename.db")
+    db.init_db()
+    now = db.utcnow()
+    variables = [
+        {"name": "Period", "value": "26"},
+        {"name": "StopLoss", "value": "2.5"},
+    ]
+    with db.session() as conn:
+        strategy_id = conn.execute(
+            """INSERT INTO strategies(
+                 symbol,sqx_name,account_login,origin,created_at
+               ) VALUES('NAQ','Old MACD 3.3.15(1)','123','mt5+sqx',?)""",
+            (now,),
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO sqx_strategy_links(
+                 strategy_id,project,databank,strategy_name,symbol,timeframe,
+                 last_synced_at
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                strategy_id,
+                "Retester",
+                "Results",
+                "Old MACD 3.3.15(1)",
+                "USATECHIDXUSD",
+                "H1",
+                now,
+            ),
+        )
+        _insert_parameter_run(conn, strategy_id, variables, now)
+
+    payload = [_item("New MACD 3.3.15(1)", "USATECHIDXUSD")]
+
+    def fake_run(*args, **kwargs):
+        if args[0] == "bulk":
+            return payload
+        if args[0] == "inspect":
+            return _parameter_snapshot(variables)
+        raise AssertionError(args)
+
+    monkeypatch.setattr(sqx_connector, "_run", fake_run)
+    result = sqx_connector.sync("Retester", "Results")
+
+    assert result["renamed"] == 1
+    assert result["created"] == 0
+    assert result["rename_conflicts"] == []
+    with db.session() as conn:
+        link = conn.execute(
+            "SELECT * FROM sqx_strategy_links WHERE strategy_id=?",
+            (strategy_id,),
+        ).fetchone()
+        count = conn.execute("SELECT COUNT(*) FROM strategies").fetchone()[0]
+    assert count == 1
+    assert link["strategy_name"] == "New MACD 3.3.15(1)"
+    assert link["missing_from_sqx_at"] is None
+
+
+def test_sync_does_not_relink_a_different_parameter_set(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "rename-conflict.db")
+    db.init_db()
+    now = db.utcnow()
+    with db.session() as conn:
+        strategy_id = conn.execute(
+            """INSERT INTO strategies(symbol,sqx_name,origin,created_at)
+               VALUES('XAU','Old Bot 1.2.3','sqx',?)""",
+            (now,),
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO sqx_strategy_links(
+                 strategy_id,project,databank,strategy_name,symbol,last_synced_at
+               ) VALUES(?,?,?,?,?,?)""",
+            (
+                strategy_id,
+                "Retester",
+                "Results",
+                "Old Bot 1.2.3",
+                "XAUUSD",
+                now,
+            ),
+        )
+        _insert_parameter_run(
+            conn, strategy_id, [{"name": "Period", "value": "10"}], now
+        )
+
+    def fake_run(*args, **kwargs):
+        if args[0] == "bulk":
+            return [_item("New Bot 1.2.3", "XAUUSD")]
+        if args[0] == "inspect":
+            return _parameter_snapshot(
+                [{"name": "Period", "value": "20"}]
+            )
+        raise AssertionError(args)
+
+    monkeypatch.setattr(sqx_connector, "_run", fake_run)
+    result = sqx_connector.sync("Retester", "Results")
+
+    assert result["renamed"] == 0
+    assert result["created"] == 1
+    assert len(result["rename_conflicts"]) == 1
+    with db.session() as conn:
+        old_link = conn.execute(
+            "SELECT * FROM sqx_strategy_links WHERE strategy_id=?",
+            (strategy_id,),
+        ).fetchone()
+    assert old_link["missing_from_sqx_at"]
+
+
+def test_sync_promotes_a_current_link_to_its_identity_root(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "lineage-link.db")
+    db.init_db()
+    now = db.utcnow()
+    with db.session() as conn:
+        root = conn.execute(
+            """INSERT INTO strategies(
+                 symbol,sqx_name,account_login,origin,created_at
+               ) VALUES('NAQ','Old ADX 3.14.14','100','mt5+sqx',?)""",
+            (now,),
+        ).lastrowid
+        child = conn.execute(
+            """INSERT INTO strategies(
+                 identity_strategy_id,symbol,sqx_name,account_login,origin,created_at
+               ) VALUES(?,'NAQ','Current ADX 3.14.14','200','mt5+sqx',?)""",
+            (root, now),
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO sqx_strategy_links(
+                 strategy_id,project,databank,strategy_name,symbol,last_synced_at,
+                 missing_from_sqx_at
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                root,
+                "Retester",
+                "Results",
+                "Old ADX 3.14.14",
+                "USATECHIDXUSD",
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            """INSERT INTO sqx_strategy_links(
+                 strategy_id,project,databank,strategy_name,symbol,last_synced_at
+               ) VALUES(?,?,?,?,?,?)""",
+            (
+                child,
+                "Retester",
+                "Results",
+                "Current ADX 3.14.14",
+                "USATECHIDXUSD",
+                now,
+            ),
+        )
+
+    monkeypatch.setattr(
+        sqx_connector,
+        "_run",
+        lambda *args, **kwargs: [
+            _item("Current ADX 3.14.14", "USATECHIDXUSD")
+        ],
+    )
+    result = sqx_connector.sync("Retester", "Results")
+
+    assert result["promoted"] == 1
+    assert result["created"] == 0
+    with db.session() as conn:
+        links = conn.execute(
+            "SELECT strategy_id,strategy_name,missing_from_sqx_at "
+            "FROM sqx_strategy_links"
+        ).fetchall()
+        strategy_count = conn.execute(
+            "SELECT COUNT(*) FROM strategies"
+        ).fetchone()[0]
+    assert strategy_count == 2
+    assert [tuple(row) for row in links] == [
+        (root, "Current ADX 3.14.14", None)
+    ]

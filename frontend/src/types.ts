@@ -32,7 +32,8 @@ export type SQXEdge = SQXAnalysisResult & {
 export type SQXEgt = SQXAnalysisResult & {
   total?: number; buy?: number; sell?: number; n_buy?: number; n_sell?: number;
   months?: number; grade?: string; sample_type?: string; pl_unit?: string;
-  from_month?: string; history_source?: string; symbol?: string; timeframe?: string;
+  from_month?: string; source?: string; history_source?: string; source_file?: string | null;
+  bars?: number | null; symbol?: string; timeframe?: string;
 }
 export type SQXAnalytics = {
   project: string; databank: string; synced_at: string; edge: SQXEdge; egt: SQXEgt;
@@ -48,21 +49,22 @@ export type BacktestSummary = {
   latest_status: string | null; latest_completed_at: string | null;
 }
 export type Strategy = {
-  id: number; symbol: string; sqx_name: string; mql5_name: string; account_login: string;
+  id: number; identity_strategy_id: number; symbol: string; sqx_name: string; mql5_name: string; account_login: string;
+  lineage_accounts: { current: string[]; predecessor: string[] };
   origin: string; last_observed_at?: string;
   state: string; link_state: 'linked' | 'candidate' | 'sqx_only' | 'mt5_only' | 'catalog_only';
-  sqx: SQXInfo | null; sqx_analytics: SQXAnalytics | null; metrics: Metrics; health: Health; risk_guard: RiskGuard; baseline: Baseline | null; baselines: Baseline[];
-  backtest: BacktestSummary; mapping_count: number;
+  sqx: SQXInfo | null; sqx_analytics: SQXAnalytics | null; metrics: Metrics; historical_metrics: Metrics; lifetime_metrics: Metrics; health: Health; risk_guard: RiskGuard; baseline: Baseline | null; baselines: Baseline[];
+  backtest: BacktestSummary; mapping_count: number; historical_mapping_count: number;
   magic_numbers: number[];
 }
 export type Trade = {
   terminal_id: number; position_id: number; deal_ticket: number; symbol: string; direction: string;
   open_time_msc: number; close_time_msc: number; open_price: number; close_price: number; volume: number;
   magic: number; comment: string; exit_comment: string; profit: number; commission: number; swap: number;
-  net_profit: number; status: string;
+  net_profit: number; status: string; source_account?: string; source_role?: 'live' | 'historical';
 }
 export type EquityPoint = { time_msc: number; equity: number; net_profit: number }
-export type StrategyDetails = Strategy & { mappings: unknown[]; trades: Trade[]; equity_curve: EquityPoint[] }
+export type StrategyDetails = Strategy & { mappings: unknown[]; trades: Trade[]; current_trades: Trade[]; historical_trades: Trade[]; equity_curve: EquityPoint[] }
 export type Terminal = { id: number; name: string; data_dir: string; account_login?: string; server?: string; status: string; last_seen?: string; last_error?: string }
 export type Dashboard = {
   generated_at: string; window: string;

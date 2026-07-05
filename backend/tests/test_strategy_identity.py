@@ -149,6 +149,35 @@ def test_catalog_enriches_an_accountless_sqx_identity(tmp_path, monkeypatch):
     assert strategy["origin"] == "sqx+excel"
 
 
+def test_catalog_reactivates_a_unique_retired_identity(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "retired-catalog.db")
+    db.init_db()
+    now = db.utcnow()
+    with db.session() as conn:
+        strategy_id = conn.execute(
+            """INSERT INTO strategies(
+                 symbol,sqx_name,mql5_name,account_login,origin,retired,created_at
+               ) VALUES('NAQ','Retired Bot 3.3.15(1)','Bot MQL 3.3.15(1)',
+                        '123','sqx',1,?)""",
+            (now,),
+        ).lastrowid
+        strategy_identity.add_alias(
+            conn, strategy_id, "Retired Bot 3.3.15(1)", "legacy"
+        )
+    source = tmp_path / "catalog.xlsx"
+    _catalog(source, "Retired Bot 3.3.15(1)")
+
+    result = import_catalog(source)
+
+    assert result["updated"] == 1
+    assert result["inserted"] == 0
+    with db.session() as conn:
+        strategies = conn.execute(
+            "SELECT id,retired,catalog_row FROM strategies"
+        ).fetchall()
+    assert [tuple(row) for row in strategies] == [(strategy_id, 0, 2)]
+
+
 def test_sqx_sync_matches_a_recorded_alias(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "sqx-alias.db")
     db.init_db()
@@ -439,6 +468,43 @@ def test_merge_moves_related_records_and_preserves_canonical_link(
         assert not conn.execute("PRAGMA foreign_key_check").fetchall()
 
 
+def test_merge_reactivates_a_retired_canonical_when_duplicate_is_active(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "merge-retired.db")
+    db.init_db()
+    now = db.utcnow()
+    with db.session() as conn:
+        canonical = conn.execute(
+            """INSERT INTO strategies(
+                 symbol,sqx_name,account_login,origin,retired,created_at
+               ) VALUES('XAU','Strategy 5.12.48','123','sqx',1,?)""",
+            (now,),
+        ).lastrowid
+        duplicate = conn.execute(
+            """INSERT INTO strategies(
+                 symbol,sqx_name,mql5_name,account_login,origin,created_at
+               ) VALUES('XAU','Catalog Strategy 5.12.48','MQL 5.12.48',
+                        '123','excel',?)""",
+            (now,),
+        ).lastrowid
+
+    strategy_identity.merge_strategies(
+        canonical, [duplicate], dry_run=False
+    )
+
+    with db.session() as conn:
+        strategy = conn.execute(
+            "SELECT retired,origin FROM strategies WHERE id=?", (canonical,)
+        ).fetchone()
+        duplicate_exists = conn.execute(
+            "SELECT 1 FROM strategies WHERE id=?", (duplicate,)
+        ).fetchone()
+    assert strategy["retired"] == 0
+    assert strategy["origin"] == "sqx+excel"
+    assert duplicate_exists is None
+
+
 def test_merge_rejects_multiple_sqx_links(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "linked.db")
     db.init_db()
@@ -471,3 +537,272 @@ def test_merge_rejects_multiple_sqx_links(tmp_path, monkeypatch):
         assert "multiple SQX links" in str(exc)
     else:
         raise AssertionError("Expected merge to reject multiple SQX links")
+
+
+def test_merge_rejects_rows_from_different_accounts(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "cross-account.db")
+    db.init_db()
+    now = db.utcnow()
+    with db.session() as conn:
+        first = conn.execute(
+            """INSERT INTO strategies(sqx_name,account_login,created_at)
+               VALUES('Same bot','7396577',?)""",
+            (now,),
+        ).lastrowid
+        second = conn.execute(
+            """INSERT INTO strategies(sqx_name,account_login,created_at)
+               VALUES('Same bot','100121894',?)""",
+            (now,),
+        ).lastrowid
+
+    try:
+        strategy_identity.merge_strategies(first, [second], dry_run=True)
+    except ValueError as exc:
+        assert "different accounts" in str(exc)
+    else:
+        raise AssertionError("Expected a cross-account merge to be rejected")
+
+
+def _insert_parameter_run(conn, strategy_id, variables, requested_at):
+    return conn.execute(
+        """INSERT INTO backtest_runs(
+             strategy_id,broker,expert_path,expert_hash,symbol,timeframe,
+             from_date,to_date,deposit,currency,leverage,model,inputs_json,
+             config_source,config_snapshot_json,status,requested_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            strategy_id,
+            "FPM",
+            "bot.ex5",
+            "same-hash",
+            "US100",
+            "H1",
+            "2024-01-01",
+            "2025-01-01",
+            100000,
+            "USD",
+            "1:100",
+            1,
+            "{}",
+            "test",
+            json.dumps({"parameters": {"variables": variables}}),
+            "completed",
+            requested_at,
+        ),
+    ).lastrowid
+
+
+def test_reconcile_sqx_link_merges_a_parameter_identical_duplicate(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "reconcile.db")
+    db.init_db()
+    now = db.utcnow()
+    variables = [
+        {"name": "Period", "value": "26"},
+        {"name": "StopLoss", "value": "2.5"},
+    ]
+    with db.session() as conn:
+        canonical = conn.execute(
+            """INSERT INTO strategies(
+                 symbol,sqx_name,mql5_name,account_login,origin,created_at
+               ) VALUES('NAQ','Old Bot 3.3.15(1)','MQL Bot','123','mt5+sqx',?)""",
+            (now,),
+        ).lastrowid
+        duplicate = conn.execute(
+            """INSERT INTO strategies(
+                 symbol,sqx_name,origin,created_at
+               ) VALUES('NAQ','New Bot 3.3.15(1)','sqx',?)""",
+            (now,),
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO sqx_strategy_links(
+                 strategy_id,project,databank,strategy_name,symbol,timeframe,
+                 last_synced_at,missing_from_sqx_at
+               ) VALUES(?,?,?,?,?,?,?,?)""",
+            (
+                canonical,
+                "Retester",
+                "Results",
+                "Old Bot 3.3.15(1)",
+                "USATECHIDXUSD",
+                "H1",
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            """INSERT INTO sqx_strategy_links(
+                 strategy_id,project,databank,strategy_name,symbol,timeframe,
+                 last_synced_at
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                duplicate,
+                "Retester",
+                "Results",
+                "New Bot 3.3.15(1)",
+                "USATECHIDXUSD",
+                "H1",
+                now,
+            ),
+        )
+        _insert_parameter_run(conn, canonical, variables, now)
+        _insert_parameter_run(conn, duplicate, variables, now)
+        for strategy_id, confidence, method in (
+            (canonical, 0.75, "parameter_fingerprint"),
+            (duplicate, 1.0, "exact_name"),
+        ):
+            conn.execute(
+                """INSERT INTO strategy_expert_links(
+                     strategy_id,expert_path,expert_hash,resolution_method,
+                     confidence,updated_at
+                   ) VALUES(?,?,?,?,?,?)""",
+                (
+                    strategy_id,
+                    "bot.ex5",
+                    "same-hash",
+                    method,
+                    confidence,
+                    now,
+                ),
+            )
+
+    preview = strategy_identity.reconcile_sqx_link(
+        canonical, duplicate, dry_run=True
+    )
+    assert preview["mode"] == "merge_duplicate"
+    assert preview["parameters_match"] is True
+
+    result = strategy_identity.reconcile_sqx_link(
+        canonical, duplicate, dry_run=False
+    )
+    assert result["dry_run"] is False
+    with db.session() as conn:
+        assert not conn.execute(
+            "SELECT 1 FROM strategies WHERE id=?", (duplicate,)
+        ).fetchone()
+        link = conn.execute(
+            "SELECT * FROM sqx_strategy_links WHERE strategy_id=?",
+            (canonical,),
+        ).fetchone()
+        expert = conn.execute(
+            "SELECT * FROM strategy_expert_links WHERE strategy_id=?",
+            (canonical,),
+        ).fetchone()
+        run_count = conn.execute(
+            "SELECT COUNT(*) FROM backtest_runs WHERE strategy_id=?",
+            (canonical,),
+        ).fetchone()[0]
+    assert link["strategy_name"] == "New Bot 3.3.15(1)"
+    assert link["missing_from_sqx_at"] is None
+    assert expert["resolution_method"] == "exact_name"
+    assert run_count == 2
+
+
+def test_reconcile_sqx_link_promotes_a_current_lineage_link(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "promote.db")
+    db.init_db()
+    now = db.utcnow()
+    with db.session() as conn:
+        canonical = conn.execute(
+            """INSERT INTO strategies(
+                 symbol,sqx_name,account_login,origin,created_at
+               ) VALUES('NAQ','Old ADX 3.14.14','100','mt5+sqx',?)""",
+            (now,),
+        ).lastrowid
+        child = conn.execute(
+            """INSERT INTO strategies(
+                 identity_strategy_id,symbol,sqx_name,account_login,origin,created_at
+               ) VALUES(?, 'NAQ','Current ADX 3.14.14','200','mt5+sqx',?)""",
+            (canonical, now),
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO sqx_strategy_links(
+                 strategy_id,project,databank,strategy_name,symbol,last_synced_at,
+                 missing_from_sqx_at
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                canonical,
+                "Retester",
+                "Results",
+                "Old ADX 3.14.14",
+                "USATECHIDXUSD",
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            """INSERT INTO sqx_strategy_links(
+                 strategy_id,project,databank,strategy_name,symbol,last_synced_at
+               ) VALUES(?,?,?,?,?,?)""",
+            (
+                child,
+                "Retester",
+                "Results",
+                "Current ADX 3.14.14",
+                "USATECHIDXUSD",
+                now,
+            ),
+        )
+
+    result = strategy_identity.reconcile_sqx_link(
+        canonical, child, dry_run=False
+    )
+    assert result["mode"] == "promote_identity_link"
+    with db.session() as conn:
+        assert conn.execute(
+            "SELECT 1 FROM strategies WHERE id=?", (child,)
+        ).fetchone()
+        links = conn.execute(
+            "SELECT strategy_id,strategy_name FROM sqx_strategy_links"
+        ).fetchall()
+    assert [tuple(row) for row in links] == [
+        (canonical, "Current ADX 3.14.14")
+    ]
+
+
+def test_reconcile_sqx_link_rejects_different_parameter_sets(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "mismatch.db")
+    db.init_db()
+    now = db.utcnow()
+    with db.session() as conn:
+        ids = []
+        for name, missing in (("Old Bot 1.2.3", now), ("New Bot 1.2.3", None)):
+            strategy_id = conn.execute(
+                """INSERT INTO strategies(symbol,sqx_name,origin,created_at)
+                   VALUES('XAU',?,'sqx',?)""",
+                (name, now),
+            ).lastrowid
+            ids.append(strategy_id)
+            conn.execute(
+                """INSERT INTO sqx_strategy_links(
+                     strategy_id,project,databank,strategy_name,symbol,
+                     last_synced_at,missing_from_sqx_at
+                   ) VALUES(?,?,?,?,?,?,?)""",
+                (
+                    strategy_id,
+                    "Retester",
+                    "Results",
+                    name,
+                    "XAUUSD",
+                    now,
+                    missing,
+                ),
+            )
+        _insert_parameter_run(
+            conn, ids[0], [{"name": "Period", "value": "10"}], now
+        )
+        _insert_parameter_run(
+            conn, ids[1], [{"name": "Period", "value": "20"}], now
+        )
+
+    try:
+        strategy_identity.reconcile_sqx_link(ids[0], ids[1], dry_run=True)
+    except ValueError as exc:
+        assert "parameter fingerprint" in str(exc)
+    else:
+        raise AssertionError("Expected different parameter sets to be rejected")

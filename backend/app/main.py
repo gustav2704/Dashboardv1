@@ -17,6 +17,7 @@ from .catalog import import_catalog
 from .catalog_export import export_catalog
 from .config import DEFAULT_CATALOG, DEFAULT_TERMINAL, EXPORT_DIR, FRONTEND_DIST, REFRESH_SECONDS
 from .db import DEFAULT_ALERTS, init_db, rows, session, utcnow
+from .history_import import import_tradebuddy_history, imported_history_trades
 from .mapping import auto_confirm_suggestions, confirm_mapping, suggestions
 from .metrics import compute_metrics, health_status, pick_baseline, reconstruct_trades, risk_guard_status
 from .mt5_bridge import ingest_responses, register_terminal, request_chart, request_sync, sync_all
@@ -89,6 +90,38 @@ class StrategyMerge(BaseModel):
     dry_run: bool = True
 
 
+class SQXLinkReconcile(BaseModel):
+    canonical_id: int = Field(gt=0)
+    source_id: int = Field(gt=0)
+    dry_run: bool = True
+
+
+class TradeBuddyImport(BaseModel):
+    path: str = Field(min_length=3)
+    account_login: str = Field(min_length=1)
+    broker: str = Field(default="FirstPrudentialMarkets-Demo", min_length=1)
+
+
+class MigrationMapping(BaseModel):
+    terminal_id: int | None = Field(default=None, gt=0)
+    account_login: str = ""
+    symbol: str = Field(min_length=1)
+    magic: int = 0
+    comment_pattern: str = ""
+    confidence: float = Field(default=1.0, ge=0, le=1)
+
+
+class AccountMigration(BaseModel):
+    canonical_strategy_id: int = Field(gt=0)
+    old_account: str = Field(min_length=1)
+    new_account: str = Field(min_length=1)
+    broker: str = Field(default="FirstPrudentialMarkets-Demo", min_length=1)
+    tradebuddy_path: str | None = None
+    historical_mappings: list[MigrationMapping] = Field(default_factory=list)
+    live_mapping: MigrationMapping | None = None
+    duplicate_strategy_ids: list[int] = Field(default_factory=list)
+
+
 def _load_rules(conn: Any, strategy_id: int | None = None) -> dict[str, Any]:
     keys = [f"alerts:{strategy_id}"] if strategy_id else []
     keys.append("alert_defaults")
@@ -108,6 +141,36 @@ def _matches(mapping: Any, item: dict[str, Any]) -> bool:
         return False
     pattern = str(mapping["comment_pattern"] or "").lower()
     return not pattern or pattern in str(item.get("comment", "")).lower()
+
+
+def _matching_mapping(mappings: list[Any], item: dict[str, Any]) -> Any | None:
+    for mapping in mappings:
+        if _matches(mapping, item):
+            return mapping
+    return None
+
+
+def _annotate_trade_source(trade: dict[str, Any], mapping: Any, role: str) -> dict[str, Any]:
+    return {
+        **trade,
+        "source_account": mapping["account_login"] or "",
+        "source_role": role,
+    }
+
+
+def _identity_strategy_id(strategy: Any) -> int:
+    return int(strategy["identity_strategy_id"] or strategy["id"])
+
+
+def _lineage_accounts(conn: Any, strategy_id: int) -> dict[str, list[str]]:
+    result = {"current": [], "predecessor": []}
+    for row in conn.execute(
+        """SELECT account_login,role FROM strategy_account_lineage
+           WHERE strategy_id=? ORDER BY id""",
+        (strategy_id,),
+    ):
+        result[str(row["role"])].append(str(row["account_login"]))
+    return result
 
 
 def _window_start(window: str, start: str | None) -> int:
@@ -259,35 +322,81 @@ def dashboard_data(window: str = "all", start: str | None = None, end: str | Non
         backtest_summaries = _backtest_summaries(conn)
         output = []
         for strategy in strategies:
+            strategy_id = int(strategy["id"])
+            identity_id = _identity_strategy_id(strategy)
+            lineage_accounts = _lineage_accounts(conn, strategy_id)
+            current_account = str(strategy["account_login"] or "")
+            predecessor_accounts = set(lineage_accounts["predecessor"])
             mappings = conn.execute("SELECT * FROM mappings WHERE strategy_id=? AND confirmed=1", (strategy["id"],)).fetchall()
+            live_mappings = [
+                mapping for mapping in mappings
+                if str(mapping["role"] or "live") == "live"
+                and (
+                    not current_account
+                    or not str(mapping["account_login"] or "")
+                    or str(mapping["account_login"] or "") == current_account
+                )
+            ]
+            mapped_accounts = {
+                str(mapping["account_login"]).strip()
+                for mapping in live_mappings
+                if str(mapping["account_login"] or "").strip()
+            }
+            effective_account = (
+                current_account
+                or (next(iter(mapped_accounts)) if len(mapped_accounts) == 1 else "")
+            )
+            historical_mappings = [
+                mapping for mapping in mappings
+                if str(mapping["role"] or "live") == "historical"
+                and str(mapping["account_login"] or "") in predecessor_accounts
+            ]
             sqx_link = conn.execute(
                 """SELECT project,databank,strategy_name,symbol,timeframe,filter_result,
                           last_synced_at,missing_from_sqx_at
                    FROM sqx_strategy_links WHERE strategy_id=? ORDER BY last_synced_at DESC LIMIT 1""",
-                (strategy["id"],),
+                (identity_id,),
             ).fetchone()
-            magic_numbers = sorted({int(mapping["magic"]) for mapping in mappings if mapping["magic"] is not None})
+            magic_numbers = sorted({int(mapping["magic"]) for mapping in live_mappings if mapping["magic"] is not None})
             strategy_trades = sorted(
-                [t for t in trades_all if any(_matches(m, t) for m in mappings)],
+                [t for t in trades_all if any(_matches(m, t) for m in live_mappings)],
+                key=lambda t: (int(t.get("close_time_msc", 0)), int(t.get("deal_ticket", 0))),
+            )
+            historical_mt5_trades = sorted(
+                [t for t in trades_all if any(_matches(m, t) for m in historical_mappings)],
+                key=lambda t: (int(t.get("close_time_msc", 0)), int(t.get("deal_ticket", 0))),
+            )
+            imported_trades = imported_history_trades(conn, historical_mappings)
+            historical_all = sorted(
+                historical_mt5_trades + imported_trades,
                 key=lambda t: (int(t.get("close_time_msc", 0)), int(t.get("deal_ticket", 0))),
             )
             trades = [
                 trade for trade in strategy_trades
                 if start_msc <= int(trade["close_time_msc"]) <= end_msc
             ]
-            positions = [p for p in positions_all if any(_matches(m, p) for m in mappings)]
+            historical_trades = [
+                trade for trade in historical_all
+                if start_msc <= int(trade["close_time_msc"]) <= end_msc
+            ]
+            positions = [p for p in positions_all if any(_matches(m, p) for m in live_mappings)]
             current = compute_metrics(trades, positions)
-            baselines = _latest_baselines(conn, strategy["id"])
-            sqx_analytics = _latest_sqx_analytics(conn, strategy["id"])
+            historical_metrics = compute_metrics(historical_trades)
+            lifetime_metrics = compute_metrics(trades + historical_trades, positions)
+            baselines = _latest_baselines(conn, identity_id)
+            sqx_analytics = _latest_sqx_analytics(conn, identity_id)
             baseline = pick_baseline(baselines)
-            rules = _load_rules(conn, strategy["id"])
+            rules = _load_rules(conn, identity_id)
             risk_guard = risk_guard_status(compute_metrics(strategy_trades), baselines, rules)
             health = health_status(current, baseline, rules, risk_guard)
-            relevant_terminals = [t for t in terminal_rows if not strategy["account_login"] or t.get("account_login") == strategy["account_login"]]
+            relevant_terminals = [
+                terminal for terminal in terminal_rows
+                if not effective_account or terminal.get("account_login") == effective_account
+            ]
             connected = any(t["status"] == "connected" for t in relevant_terminals)
             if strategy["retired"]:
                 state = "retired"
-            elif not mappings:
+            elif not live_mappings:
                 state = "unlinked"
             elif not connected:
                 state = "terminal_disconnected"
@@ -295,23 +404,25 @@ def dashboard_data(window: str = "all", start: str | None = None, end: str | Non
                 state = "active"
             else:
                 state = "no_recent_trades"
-            if sqx_link and mappings:
+            if sqx_link and live_mappings:
                 link_state = "linked"
-            elif sqx_link and strategy["id"] in pending_candidates:
+            elif sqx_link and identity_id in pending_candidates:
                 link_state = "candidate"
             elif sqx_link:
                 link_state = "sqx_only"
-            elif mappings or "mt5" in str(strategy["origin"] or "").split("+"):
+            elif live_mappings or "mt5" in str(strategy["origin"] or "").split("+"):
                 link_state = "mt5_only"
             else:
                 link_state = "catalog_only"
             output.append(
                 {
                     "id": strategy["id"],
+                    "identity_strategy_id": identity_id,
+                    "lineage_accounts": lineage_accounts,
                     "symbol": strategy["symbol"],
                     "sqx_name": strategy["sqx_name"],
                     "mql5_name": strategy["mql5_name"],
-                    "account_login": strategy["account_login"],
+                    "account_login": effective_account,
                     "origin": strategy["origin"],
                     "last_observed_at": strategy["last_observed_at"],
                     "state": state,
@@ -319,12 +430,14 @@ def dashboard_data(window: str = "all", start: str | None = None, end: str | Non
                     "sqx": dict(sqx_link) if sqx_link else None,
                     "sqx_analytics": sqx_analytics,
                     "metrics": current,
+                    "historical_metrics": historical_metrics,
+                    "lifetime_metrics": lifetime_metrics,
                     "health": health,
                     "risk_guard": risk_guard,
                     "baseline": baseline,
                     "baselines": baselines,
                     "backtest": backtest_summaries.get(
-                        int(strategy["id"]),
+                        identity_id,
                         {
                             "state": "none",
                             "has_completed": False,
@@ -334,7 +447,8 @@ def dashboard_data(window: str = "all", start: str | None = None, end: str | Non
                             "latest_completed_at": None,
                         },
                     ),
-                    "mapping_count": len(mappings),
+                    "mapping_count": len(live_mappings),
+                    "historical_mapping_count": len(historical_mappings),
                     "magic_numbers": magic_numbers,
                 }
             )
@@ -342,9 +456,9 @@ def dashboard_data(window: str = "all", start: str | None = None, end: str | Non
     totals = {
         "strategies": len(output),
         "active": sum(1 for item in output if item["state"] == "active"),
-        "net_profit": sum(item["metrics"]["net_profit"] for item in output),
+        "net_profit": sum(item["lifetime_metrics"]["net_profit"] for item in output),
         "floating_profit": sum(item["metrics"]["floating_profit"] for item in output),
-        "trades": sum(item["metrics"]["trades"] for item in output),
+        "trades": sum(item["lifetime_metrics"]["trades"] for item in output),
         "red": sum(1 for item in output if item["health"]["status"] == "red"),
     }
     integration = {
@@ -410,14 +524,49 @@ def get_strategy(strategy_id: int, window: str = "all", start: str | None = None
             with session() as conn:
                 mappings = rows(conn.execute("SELECT * FROM mappings WHERE strategy_id=?", (strategy_id,)))
                 confirmed_mappings = [mapping for mapping in mappings if int(mapping.get("confirmed", 1)) == 1]
+                current_account = str(strategy.get("account_login") or "")
+                predecessor_accounts = set(strategy["lineage_accounts"]["predecessor"])
+                live_mappings = [
+                    mapping for mapping in confirmed_mappings
+                    if str(mapping.get("role") or "live") == "live"
+                    and (
+                        not current_account
+                        or not str(mapping.get("account_login") or "")
+                        or str(mapping.get("account_login") or "") == current_account
+                    )
+                ]
+                historical_mappings = [
+                    mapping for mapping in confirmed_mappings
+                    if str(mapping.get("role") or "live") == "historical"
+                    and str(mapping.get("account_login") or "") in predecessor_accounts
+                ]
                 all_trades = reconstruct_trades(rows(conn.execute("SELECT * FROM deals ORDER BY time_msc,ticket")))
-                trades = sorted(
+                current_trades = sorted(
                     [
-                        trade
+                        _annotate_trade_source(trade, mapping, "live")
                         for trade in all_trades
                         if start_msc <= int(trade["close_time_msc"]) <= end_msc
-                        and any(_matches(mapping, trade) for mapping in confirmed_mappings)
+                        if (mapping := _matching_mapping(live_mappings, trade))
                     ],
+                    key=lambda trade: (int(trade.get("close_time_msc", 0)), int(trade.get("deal_ticket", 0))),
+                )
+                historical_mt5 = [
+                    _annotate_trade_source(trade, mapping, "historical")
+                    for trade in all_trades
+                    if start_msc <= int(trade["close_time_msc"]) <= end_msc
+                    if (mapping := _matching_mapping(historical_mappings, trade))
+                ]
+                historical_imported = [
+                    trade
+                    for trade in imported_history_trades(conn, historical_mappings)
+                    if start_msc <= int(trade["close_time_msc"]) <= end_msc
+                ]
+                historical_trades = sorted(
+                    historical_mt5 + historical_imported,
+                    key=lambda trade: (int(trade.get("close_time_msc", 0)), int(trade.get("deal_ticket", 0))),
+                )
+                trades = sorted(
+                    current_trades + historical_trades,
                     key=lambda trade: (int(trade.get("close_time_msc", 0)), int(trade.get("deal_ticket", 0))),
                 )
             equity = 0.0
@@ -431,7 +580,14 @@ def get_strategy(strategy_id: int, window: str = "all", start: str | None = None
                         "net_profit": float(trade.get("net_profit", 0)),
                     }
                 )
-            return {**strategy, "mappings": mappings, "trades": trades[-500:], "equity_curve": equity_curve}
+            return {
+                **strategy,
+                "mappings": mappings,
+                "trades": trades[-500:],
+                "current_trades": current_trades[-500:],
+                "historical_trades": historical_trades[-500:],
+                "equity_curve": equity_curve,
+            }
     raise HTTPException(404, "Strategy not found")
 
 
@@ -466,6 +622,239 @@ def merge_strategy_identities(payload: StrategyMerge) -> dict[str, Any]:
             payload.duplicate_ids,
             payload.dry_run,
         )
+    except KeyError as exc:
+        raise HTTPException(404, exc.args[0]) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/strategy-identities/reconcile-sqx")
+def reconcile_sqx_identity(payload: SQXLinkReconcile) -> dict[str, Any]:
+    try:
+        return strategy_identity.reconcile_sqx_link(
+            payload.canonical_id,
+            payload.source_id,
+            payload.dry_run,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, exc.args[0]) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/history/import/tradebuddy")
+def post_tradebuddy_import(payload: TradeBuddyImport) -> dict[str, Any]:
+    try:
+        return import_tradebuddy_history(Path(payload.path), payload.account_login, payload.broker)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+def _migration_terminal(conn: Any, account_login: str, broker: str) -> int:
+    row = conn.execute(
+        """SELECT id FROM terminals WHERE account_login=?
+           ORDER BY CASE WHEN status='connected' THEN 0 ELSE 1 END,last_seen DESC,id DESC LIMIT 1""",
+        (account_login,),
+    ).fetchone()
+    if row:
+        return int(row["id"])
+    now = utcnow()
+    data_dir = f"migration://{broker}/{account_login}"
+    return int(
+        conn.execute(
+            """INSERT INTO terminals(name,data_dir,account_login,server,status,last_seen,last_sync,created_at)
+               VALUES(?,?,?,?,?,?,?,?)
+               ON CONFLICT(data_dir) DO UPDATE SET account_login=excluded.account_login
+               RETURNING id""",
+            (
+                f"Migrated history {account_login}",
+                data_dir,
+                account_login,
+                broker,
+                "history",
+                now,
+                now,
+                now,
+            ),
+        ).fetchone()["id"]
+    )
+
+
+def _upsert_migration_mapping(
+    conn: Any,
+    strategy_id: int,
+    mapping: MigrationMapping,
+    account_login: str,
+    broker: str,
+    role: str,
+) -> int:
+    terminal_id = mapping.terminal_id or _migration_terminal(conn, account_login, broker)
+    conn.execute(
+        """INSERT INTO mappings(
+             strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,role,
+             confidence,confirmed,created_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(strategy_id,terminal_id,symbol,magic,comment_pattern)
+           DO UPDATE SET account_login=excluded.account_login,role=excluded.role,
+                         confidence=excluded.confidence,confirmed=1""",
+        (
+            strategy_id,
+            terminal_id,
+            account_login,
+            mapping.symbol,
+            int(mapping.magic),
+            mapping.comment_pattern,
+            role,
+            float(mapping.confidence),
+            1,
+            utcnow(),
+        ),
+    )
+    return terminal_id
+
+
+@app.post("/api/account-migrations")
+def post_account_migration(payload: AccountMigration) -> dict[str, Any]:
+    try:
+        merge_result = None
+        if payload.duplicate_strategy_ids:
+            requested_ids = [
+                payload.canonical_strategy_id,
+                *payload.duplicate_strategy_ids,
+            ]
+            with session() as conn:
+                placeholders = ",".join("?" for _ in requested_ids)
+                rows_found = conn.execute(
+                    f"""SELECT id,account_login FROM strategies
+                        WHERE id IN ({placeholders})""",
+                    requested_ids,
+                ).fetchall()
+                if len(rows_found) != len(set(requested_ids)):
+                    raise KeyError("One or more migration strategy IDs were not found")
+                allowed_accounts = {payload.old_account, payload.new_account}
+                if any(
+                    str(row["account_login"] or "") not in allowed_accounts
+                    for row in rows_found
+                ):
+                    raise ValueError(
+                        "Migration duplicates must belong to the old or new account"
+                    )
+            merge_result = strategy_identity.merge_strategies(
+                payload.canonical_strategy_id,
+                payload.duplicate_strategy_ids,
+                dry_run=False,
+                allow_cross_account=True,
+            )
+        import_result = None
+        if payload.tradebuddy_path:
+            import_result = import_tradebuddy_history(
+                Path(payload.tradebuddy_path),
+                payload.old_account,
+                payload.broker,
+            )
+        with session() as conn:
+            if not conn.execute(
+                "SELECT 1 FROM strategies WHERE id=?", (payload.canonical_strategy_id,)
+            ).fetchone():
+                raise KeyError("Strategy not found")
+            converted = conn.execute(
+                """UPDATE mappings SET role='historical'
+                   WHERE strategy_id=? AND confirmed=1 AND role='live' AND account_login=?""",
+                (payload.canonical_strategy_id, payload.old_account),
+            ).rowcount
+            historical_upserts = 0
+            live_upserts = 0
+            for mapping in payload.historical_mappings:
+                _upsert_migration_mapping(
+                    conn,
+                    payload.canonical_strategy_id,
+                    mapping,
+                    mapping.account_login or payload.old_account,
+                    payload.broker,
+                    "historical",
+                )
+                historical_upserts += 1
+            if payload.live_mapping:
+                _upsert_migration_mapping(
+                    conn,
+                    payload.canonical_strategy_id,
+                    payload.live_mapping,
+                    payload.live_mapping.account_login or payload.new_account,
+                    payload.broker,
+                    "live",
+                )
+                live_upserts += 1
+            conn.execute(
+                """UPDATE strategies
+                   SET account_login=?,identity_strategy_id=COALESCE(identity_strategy_id,id)
+                   WHERE id=?""",
+                (payload.new_account, payload.canonical_strategy_id),
+            )
+            conn.execute(
+                """INSERT INTO strategy_account_lineage(
+                     strategy_id,account_login,role,source,created_at
+                   ) VALUES(?,?,?,?,?)
+                   ON CONFLICT(strategy_id,account_login) DO UPDATE SET
+                     role='predecessor',source=excluded.source""",
+                (
+                    payload.canonical_strategy_id,
+                    payload.old_account,
+                    "predecessor",
+                    "account_migration",
+                    utcnow(),
+                ),
+            )
+            conn.execute(
+                """INSERT INTO strategy_account_lineage(
+                     strategy_id,account_login,role,source,created_at
+                   ) VALUES(?,?,?,?,?)
+                   ON CONFLICT(strategy_id,account_login) DO UPDATE SET
+                     role='current',source=excluded.source""",
+                (
+                    payload.canonical_strategy_id,
+                    payload.new_account,
+                    "current",
+                    "account_migration",
+                    utcnow(),
+                ),
+            )
+            historical = compute_metrics(imported_history_trades(
+                conn,
+                rows(conn.execute(
+                    """SELECT * FROM mappings
+                       WHERE strategy_id=? AND confirmed=1 AND role='historical'""",
+                    (payload.canonical_strategy_id,),
+                )),
+            ))
+            summary = {
+                "canonical_strategy_id": payload.canonical_strategy_id,
+                "old_account": payload.old_account,
+                "new_account": payload.new_account,
+                "converted_old_live_mappings": converted,
+                "historical_mapping_upserts": historical_upserts,
+                "live_mapping_upserts": live_upserts,
+                "import": import_result,
+                "merge": merge_result,
+                "imported_historical_metrics": historical,
+            }
+            conn.execute(
+                """INSERT INTO account_migration_audits(
+                     canonical_strategy_id,old_account,new_account,source_file,summary_json,created_at
+                   ) VALUES(?,?,?,?,?,?)""",
+                (
+                    payload.canonical_strategy_id,
+                    payload.old_account,
+                    payload.new_account,
+                    payload.tradebuddy_path,
+                    json.dumps(summary, ensure_ascii=False),
+                    utcnow(),
+                ),
+            )
+        return summary
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(404, exc.args[0]) from exc
     except ValueError as exc:
@@ -724,7 +1113,12 @@ def get_chart(
 ) -> dict[str, Any]:
     with session() as conn:
         strategy = conn.execute("SELECT * FROM strategies WHERE id=?", (strategy_id,)).fetchone()
-        mapping = conn.execute("SELECT * FROM mappings WHERE strategy_id=? AND confirmed=1 ORDER BY id LIMIT 1", (strategy_id,)).fetchone()
+        mapping = conn.execute(
+            """SELECT * FROM mappings
+               WHERE strategy_id=? AND confirmed=1 AND role='live'
+               ORDER BY id LIMIT 1""",
+            (strategy_id,),
+        ).fetchone()
         if not strategy:
             raise HTTPException(404, "Strategy not found")
         chart_symbol = (mapping["symbol"] if mapping else None) or strategy["symbol"]

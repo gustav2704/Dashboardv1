@@ -42,6 +42,161 @@ def test_dashboard_returns_sorted_unique_magic_numbers(tmp_path, monkeypatch):
     assert strategies["Many magics"]["magic_numbers"] == [100, 900]
 
 
+def test_dashboard_derives_account_from_unique_confirmed_live_mapping(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "mapped-accounts.db")
+    monkeypatch.setattr(main, "suggestions", lambda: [])
+    db.init_db()
+    now = db.utcnow()
+
+    with db.session() as conn:
+        terminal_id = conn.execute(
+            """INSERT INTO terminals(name,data_dir,account_login,status,created_at)
+               VALUES(?,?,?,?,?)""",
+            ("FPM Demo", str(tmp_path / "fpm"), "7396577", "connected", now),
+        ).lastrowid
+        first_id = conn.execute(
+            "INSERT INTO strategies(symbol,sqx_name,account_login,origin,created_at) VALUES(?,?,?,?,?)",
+            ("USA30IDXUSD_clonedwnx", "Strategy 3.8.23(1)", "", "sqx", now),
+        ).lastrowid
+        second_id = conn.execute(
+            "INSERT INTO strategies(symbol,sqx_name,account_login,origin,created_at) VALUES(?,?,?,?,?)",
+            ("USA30IDXUSD_clonedwnx", "Strategy 3.8.23(1)(1)", None, "sqx", now),
+        ).lastrowid
+        canonical_id = conn.execute(
+            "INSERT INTO strategies(symbol,sqx_name,account_login,origin,created_at) VALUES(?,?,?,?,?)",
+            ("XAU", "Canonical account", "100121894", "sqx", now),
+        ).lastrowid
+        ignored_id = conn.execute(
+            "INSERT INTO strategies(symbol,sqx_name,account_login,origin,created_at) VALUES(?,?,?,?,?)",
+            ("XAU", "Ignored mappings", "", "sqx", now),
+        ).lastrowid
+        conflicting_id = conn.execute(
+            "INSERT INTO strategies(symbol,sqx_name,account_login,origin,created_at) VALUES(?,?,?,?,?)",
+            ("XAU", "Conflicting mappings", "", "sqx", now),
+        ).lastrowid
+        conn.executemany(
+            """INSERT INTO mappings(
+                 strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,
+                 role,confirmed,created_at
+               ) VALUES(?,?,?,?,?,?,?,?,?)""",
+            [
+                (first_id, terminal_id, "7396577", "US30", 38231, "US30_Strategy_3_8_23_1", "live", 1, now),
+                (second_id, terminal_id, "7396577", "US30", 382311, "US30Strategy_3_8_23_1_1", "live", 1, now),
+                (canonical_id, terminal_id, "", "XAUUSD", 1, "canonical", "live", 1, now),
+                (ignored_id, terminal_id, "111", "XAUUSD", 2, "historical", "historical", 1, now),
+                (ignored_id, terminal_id, "222", "XAUUSD", 3, "unconfirmed", "live", 0, now),
+                (conflicting_id, terminal_id, "111", "XAUUSD", 4, "first", "live", 1, now),
+                (conflicting_id, terminal_id, "222", "XAUUSD", 5, "second", "live", 1, now),
+            ],
+        )
+
+    strategies = {item["sqx_name"]: item for item in dashboard_data()["strategies"]}
+
+    assert strategies["Strategy 3.8.23(1)"]["id"] == first_id
+    assert strategies["Strategy 3.8.23(1)"]["account_login"] == "7396577"
+    assert strategies["Strategy 3.8.23(1)"]["magic_numbers"] == [38231]
+    assert strategies["Strategy 3.8.23(1)(1)"]["id"] == second_id
+    assert strategies["Strategy 3.8.23(1)(1)"]["account_login"] == "7396577"
+    assert strategies["Strategy 3.8.23(1)(1)"]["magic_numbers"] == [382311]
+    assert strategies["Canonical account"]["id"] == canonical_id
+    assert strategies["Canonical account"]["account_login"] == "100121894"
+    assert strategies["Ignored mappings"]["id"] == ignored_id
+    assert strategies["Ignored mappings"]["account_login"] == ""
+    assert strategies["Conflicting mappings"]["id"] == conflicting_id
+    assert strategies["Conflicting mappings"]["account_login"] == ""
+
+
+def test_dashboard_keeps_historical_mapping_out_of_current_magic_and_metrics(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "roles.db")
+    monkeypatch.setattr(main, "suggestions", lambda: [])
+    db.init_db()
+    now = db.utcnow()
+
+    def msc(value: datetime) -> int:
+        return int(value.timestamp() * 1000)
+
+    with db.session() as conn:
+        live_terminal = conn.execute(
+            "INSERT INTO terminals(name,data_dir,account_login,status,created_at) VALUES(?,?,?,?,?)",
+            ("Current", str(tmp_path / "current"), "100121894", "connected", now),
+        ).lastrowid
+        old_terminal = conn.execute(
+            "INSERT INTO terminals(name,data_dir,account_login,status,created_at) VALUES(?,?,?,?,?)",
+            ("Old", str(tmp_path / "old"), "7396577", "disconnected", now),
+        ).lastrowid
+        strategy_id = conn.execute(
+            "INSERT INTO strategies(symbol,sqx_name,mql5_name,account_login,origin,created_at) VALUES(?,?,?,?,?,?)",
+            ("NAQ", "NAQ WF Matrix - Strategy 3.14.14dwnx", "NAQ_B_Adx_3.14.14dwnx", "100121894", "mt5+excel", now),
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO sqx_strategy_links(
+                 strategy_id,project,databank,strategy_name,symbol,timeframe,filter_result,last_synced_at
+               ) VALUES(?,?,?,?,?,?,?,?)""",
+            (strategy_id, "Retester", "Results", "NAQ_B_Adx_3.14.14dwnx", "NAQ", "H1", "PASSED", now),
+        )
+        conn.execute(
+            """INSERT INTO mappings(strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,role,created_at)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (strategy_id, live_terminal, "100121894", "NAS100", 1, "WF_Matrix_NAQStrategy_3_14_14d", "live", now),
+        )
+        conn.execute(
+            """INSERT INTO mappings(strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,role,created_at)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (strategy_id, old_terminal, "7396577", "US100", 31414, "WF_Matrix_NAQStrategy_3_14_14d", "historical", now),
+        )
+        conn.execute(
+            """INSERT INTO strategy_account_lineage(
+                 strategy_id,account_login,role,source,created_at
+               ) VALUES(?,?,?,?,?)""",
+            (strategy_id, "7396577", "predecessor", "test", now),
+        )
+        deals = []
+        ticket = 1
+        for index, profit in enumerate((-5, -6, -7, -8)):
+            position = 200 + index
+            deals.extend([
+                (old_terminal, ticket, position, msc(datetime(2026, 6, 10 + index, 8)), "US100", "BUY", "IN", 1.0, 100, 0, 31414),
+                (old_terminal, ticket + 1, position, msc(datetime(2026, 6, 10 + index, 12)), "US100", "SELL", "OUT", 1.0, 95, profit, 31414),
+            ])
+            ticket += 2
+        for index, profit in enumerate((10, 20, 30, 40)):
+            position = 100 + index
+            deals.extend([
+                (live_terminal, ticket, position, msc(datetime(2026, 6, 24, index * 2 + 1)), "NAS100", "BUY", "IN", 1.0, 100, 0, 1),
+                (live_terminal, ticket + 1, position, msc(datetime(2026, 6, 24, index * 2 + 2)), "NAS100", "SELL", "OUT", 1.0, 110, profit, 1),
+            ])
+            ticket += 2
+        conn.executemany(
+            """INSERT INTO deals(terminal_id,ticket,position_id,time_msc,symbol,deal_type,entry_type,volume,price,profit,commission,swap,magic,comment,raw_json)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            [
+                (terminal_id, ticket, position_id, time_msc, symbol, deal_type, entry_type, volume, price, profit, 0, 0, magic, "WF_Matrix_NAQStrategy_3_14_14d", "{}")
+                for terminal_id, ticket, position_id, time_msc, symbol, deal_type, entry_type, volume, price, profit, magic in deals
+            ],
+        )
+
+    strategy = next(item for item in dashboard_data()["strategies"] if item["id"] == strategy_id)
+
+    assert strategy["link_state"] == "linked"
+    assert strategy["magic_numbers"] == [1]
+    assert strategy["mapping_count"] == 1
+    assert strategy["historical_mapping_count"] == 1
+    assert strategy["metrics"]["trades"] == 4
+    assert strategy["metrics"]["net_profit"] == 100
+    assert strategy["metrics"]["max_consecutive_wins"] == 4
+    assert strategy["metrics"]["max_consecutive_losses"] == 0
+    assert strategy["historical_metrics"]["trades"] == 4
+    assert strategy["historical_metrics"]["net_profit"] == -26
+    assert strategy["historical_metrics"]["max_consecutive_losses"] == 4
+    assert strategy["lifetime_metrics"]["trades"] == 8
+    assert strategy["lifetime_metrics"]["net_profit"] == 74
+    assert strategy["lifetime_metrics"]["max_consecutive_wins"] == 4
+    assert strategy["lifetime_metrics"]["max_consecutive_losses"] == 4
+    detail = get_strategy(strategy_id)
+    source_accounts = {trade["source_role"]: trade["source_account"] for trade in detail["trades"]}
+    assert source_accounts == {"live": "100121894", "historical": "7396577"}
+
+
 def test_strategy_detail_respects_window_and_returns_equity_curve(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "detail.db")
     db.init_db()

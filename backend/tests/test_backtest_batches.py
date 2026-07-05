@@ -3,10 +3,10 @@ from pathlib import Path
 from app import backtest_batches, db, mt5_backtests
 
 
-def _strategy(conn, name, linked=True):
+def _strategy(conn, name, linked=True, symbol="XAU", sqx_symbol="XAUUSD_DWNXClone", mql5_name=None):
     strategy_id = conn.execute(
         "INSERT INTO strategies(symbol,sqx_name,mql5_name,origin,created_at) VALUES(?,?,?,?,?)",
-        ("XAU", name, name, "sqx", db.utcnow()),
+        (symbol, name, name if mql5_name is None else mql5_name, "sqx", db.utcnow()),
     ).lastrowid
     if linked:
         conn.execute(
@@ -14,7 +14,7 @@ def _strategy(conn, name, linked=True):
                  strategy_id,project,databank,strategy_name,symbol,timeframe,
                  filter_result,last_synced_at
                ) VALUES(?,?,?,?,?,?,?,?)""",
-            (strategy_id, "Retester", "Results", name, "XAUUSD_DWNXClone", "H1", "", db.utcnow()),
+            (strategy_id, "Retester", "Results", name, sqx_symbol, "H1", "", db.utcnow()),
         )
     return strategy_id
 
@@ -39,6 +39,80 @@ def test_candidate_discovery_is_strict_and_excludes_unlinked_bots(tmp_path, monk
     assert states["Exact Bot"] == "eligible"
     assert states["SQX Version 5.14.99"] == "resolvable"
     assert states["Unlinked Bot"] == "blocked"
+
+
+def test_strict_identity_suffix_distinguishes_repeated_parentheses(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "strict-us30.db")
+    experts = tmp_path / "Experts" / "US30"
+    experts.mkdir(parents=True)
+    first = experts / "WF Matrix - Strategy 3.8.23(1).ex5"
+    second = experts / "WF Matrix - Strategy 3.8.23(1)(1).ex5"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    monkeypatch.setattr(backtest_batches, "EXPERT_SEARCH_ROOTS", (tmp_path / "Experts",))
+    monkeypatch.setattr(backtest_batches, "DEFAULT_TERMINAL", tmp_path / "terminal")
+    db.init_db()
+    with db.session() as conn:
+        _strategy(
+            conn, "Strategy 3.8.23(1)", symbol="USA30IDXUSD_clonedwnx",
+            sqx_symbol="USA30IDXUSD_clonedwnx", mql5_name="",
+        )
+        _strategy(
+            conn, "Strategy 3.8.23(1)(1)", symbol="USA30IDXUSD_clonedwnx",
+            sqx_symbol="USA30IDXUSD_clonedwnx", mql5_name="",
+        )
+
+    result = backtest_batches.discover_candidates()
+    candidates = {item["sqx_name"]: item for item in result["candidates"]}
+
+    assert candidates["Strategy 3.8.23(1)"]["resolution_method"] == "exact_identity_suffix"
+    assert candidates["Strategy 3.8.23(1)"]["expert_path"] == str(first.resolve())
+    assert candidates["Strategy 3.8.23(1)(1)"]["resolution_method"] == "exact_identity_suffix"
+    assert candidates["Strategy 3.8.23(1)(1)"]["expert_path"] == str(second.resolve())
+
+
+def test_strict_identity_suffix_accepts_xau_wf_matrix_prefix(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "strict-xau.db")
+    experts = tmp_path / "Experts" / "XAUUSD"
+    experts.mkdir(parents=True)
+    expert = experts / "XAUWF Matrix - Strategy 3.13.39dwnx.ex5"
+    expert.write_bytes(b"xau")
+    monkeypatch.setattr(backtest_batches, "EXPERT_SEARCH_ROOTS", (tmp_path / "Experts",))
+    monkeypatch.setattr(backtest_batches, "DEFAULT_TERMINAL", tmp_path / "terminal")
+    db.init_db()
+    with db.session() as conn:
+        _strategy(conn, "XAU-Strategy 3.13.39dwnx", mql5_name="")
+
+    candidate = backtest_batches.discover_candidates()["candidates"][0]
+
+    assert candidate["state"] == "eligible"
+    assert candidate["resolution_method"] == "exact_identity_suffix"
+    assert candidate["expert_path"] == str(expert.resolve())
+
+
+def test_strict_identity_suffix_blocks_distinct_hashes_for_same_identity(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "strict-ambiguous.db")
+    experts = tmp_path / "Experts"
+    first_root = experts / "a" / "US30"
+    second_root = experts / "b" / "US30"
+    first_root.mkdir(parents=True)
+    second_root.mkdir(parents=True)
+    (first_root / "WF Matrix - Strategy 5.1.22(1).ex5").write_bytes(b"first")
+    (second_root / "WF Matrix - Strategy 5.1.22(1).ex5").write_bytes(b"second")
+    monkeypatch.setattr(backtest_batches, "EXPERT_SEARCH_ROOTS", (experts,))
+    monkeypatch.setattr(backtest_batches, "DEFAULT_TERMINAL", tmp_path / "terminal")
+    db.init_db()
+    with db.session() as conn:
+        _strategy(
+            conn, "Strategy 5.1.22(1)", symbol="USA30IDXUSD_clonedwnx",
+            sqx_symbol="USA30IDXUSD_clonedwnx", mql5_name="",
+        )
+
+    candidate = backtest_batches.discover_candidates()["candidates"][0]
+
+    assert candidate["state"] == "blocked"
+    assert candidate["resolution_method"] == "ambiguous"
+    assert candidate["reason"] == "Several EX5 builds match this strict identity"
 
 
 def test_full_rerun_batch_includes_validated_candidates(tmp_path, monkeypatch):

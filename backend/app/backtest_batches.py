@@ -94,6 +94,39 @@ def _dedupe_by_hash(paths: list[Path]) -> list[tuple[Path, str]]:
     return [(path, digest) for digest, path in hashes.items()]
 
 
+def _prefer_default_terminal(matches: list[tuple[Path, str]]) -> tuple[Path, str]:
+    fpm_matches = [item for item in matches if DEFAULT_TERMINAL in item[0].parents]
+    return (fpm_matches or matches)[0]
+
+
+def _strict_identity_tail(name: str) -> str:
+    normalized = normalize(name)
+    marker = normalized.rfind("strategy")
+    return normalized[marker:] if marker >= 0 else normalized
+
+
+def _strict_identity_paths(files: list[Path], names: list[str], family: str) -> list[Path]:
+    identities = [
+        (_strict_identity_tail(name), version_signature(name))
+        for name in names
+        if _strict_identity_tail(name) and version_signature(name)
+    ]
+    if not identities:
+        return []
+
+    matches: list[Path] = []
+    for path in files:
+        parent_family = symbol_family(path.parent.name)
+        path_family = symbol_family(path.stem) or parent_family
+        if family and path_family and path_family != family and parent_family != family:
+            continue
+        stem = normalize(path.stem)
+        signature = version_signature(path.stem)
+        if any(stem.endswith(identity) and signature == expected for identity, expected in identities):
+            matches.append(path)
+    return matches
+
+
 def discover_candidates() -> dict[str, Any]:
     files = _expert_files()
     by_name: dict[str, list[Path]] = {}
@@ -110,7 +143,8 @@ def discover_candidates() -> dict[str, Any]:
                       l.project,l.databank,l.strategy_name,l.symbol AS sqx_symbol,l.timeframe,
                       l.missing_from_sqx_at
                FROM strategies s
-               LEFT JOIN sqx_strategy_links l ON l.strategy_id=s.id
+               LEFT JOIN sqx_strategy_links l
+                 ON l.strategy_id=COALESCE(s.identity_strategy_id,s.id)
                WHERE s.retired=0 ORDER BY s.symbol,s.sqx_name"""
         ))
         validated = {
@@ -141,27 +175,38 @@ def discover_candidates() -> dict[str, Any]:
         confidence = 0.0
         selected: tuple[Path, str] | None = None
         if exact:
-            fpm_exact = [item for item in exact if DEFAULT_TERMINAL in item[0].parents]
-            selected = (fpm_exact or exact)[0]
+            selected = _prefer_default_terminal(exact)
             method, confidence = "exact_name", 1.0
         else:
-            signature = next((version_signature(name) for name in names if version_signature(name)), "")
-            signature_paths = by_signature.get(signature, [])
-            scoped = [
-                path for path in signature_paths
-                if symbol_family(path.stem) == family or symbol_family(str(path.parent)) == family
-            ]
-            signature_matches = _dedupe_by_hash(scoped or signature_paths)
-            if len(signature_matches) == 1:
-                selected = signature_matches[0]
-                method, confidence = "parameter_fingerprint", 0.75
-            elif len(signature_matches) > 1:
+            identity_matches = _dedupe_by_hash(_strict_identity_paths(files, names, family))
+            if len(identity_matches) == 1:
+                selected = _prefer_default_terminal(identity_matches)
+                method, confidence = "exact_identity_suffix", 1.0
+            elif len(identity_matches) > 1:
                 output.append({
-                    **strategy, "state": "blocked", "reason": "Several EX5 builds match this version",
+                    **strategy, "state": "blocked", "reason": "Several EX5 builds match this strict identity",
                     "resolution_method": "ambiguous", "confidence": 0.0, "family": family,
                     "target_symbol": target_symbol,
                 })
                 continue
+            else:
+                signature = next((version_signature(name) for name in names if version_signature(name)), "")
+                signature_paths = by_signature.get(signature, [])
+                scoped = [
+                    path for path in signature_paths
+                    if symbol_family(path.stem) == family or symbol_family(path.parent.name) == family
+                ]
+                signature_matches = _dedupe_by_hash(scoped or signature_paths)
+                if len(signature_matches) == 1:
+                    selected = signature_matches[0]
+                    method, confidence = "parameter_fingerprint", 0.75
+                elif len(signature_matches) > 1:
+                    output.append({
+                        **strategy, "state": "blocked", "reason": "Several EX5 builds match this version",
+                        "resolution_method": "ambiguous", "confidence": 0.0, "family": family,
+                        "target_symbol": target_symbol,
+                    })
+                    continue
 
         if not strategy.get("strategy_name"):
             state, reason = "blocked", "No SQX configuration is linked"
@@ -170,7 +215,7 @@ def discover_candidates() -> dict[str, Any]:
         elif not strategy.get("timeframe"):
             state, reason = "blocked", "No timeframe could be recovered"
         elif selected:
-            state = "eligible" if method == "exact_name" else "resolvable"
+            state = "eligible" if method in {"exact_name", "exact_identity_suffix"} else "resolvable"
             reason = "Exact EX5 match" if state == "eligible" else "Requires SQX parameter fingerprint"
         else:
             state, reason = "resolvable", "Will request MQ5 source from SQX"
@@ -249,7 +294,8 @@ def _resolve_item(item_id: int, model: int) -> None:
             """SELECT i.*,s.sqx_name,l.project,l.databank,l.strategy_name,l.symbol AS sqx_symbol,l.timeframe
                FROM backtest_batch_items i
                JOIN strategies s ON s.id=i.strategy_id
-               LEFT JOIN sqx_strategy_links l ON l.strategy_id=s.id
+               LEFT JOIN sqx_strategy_links l
+                 ON l.strategy_id=COALESCE(s.identity_strategy_id,s.id)
                WHERE i.id=?""",
             (item_id,),
         ).fetchone()

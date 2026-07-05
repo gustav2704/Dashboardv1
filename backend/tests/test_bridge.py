@@ -86,6 +86,67 @@ def test_open_position_discovers_mt5_strategy_without_deals(tmp_path, monkeypatc
         assert tuple(strategy) == ("US100.cash", "New MT5 bot", "mt5", "456")
 
 
+def test_pending_order_can_confirm_existing_strategy_mapping(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "pending-order.db")
+    db.init_db()
+    data_dir = tmp_path / "terminal"
+    (data_dir / "MQL5").mkdir(parents=True)
+    (data_dir / "origin.txt").write_text("C:\\MT5", encoding="utf-8")
+    terminal = register_terminal("Fixture", str(data_dir))
+    now = db.utcnow()
+    with db.session() as conn:
+        strategy_id = conn.execute(
+            """INSERT INTO strategies(symbol,sqx_name,mql5_name,account_login,origin,created_at)
+               VALUES(?,?,?,?,?,?)""",
+            (
+                "NAQ",
+                "NAQ WF Matrix - Strategy 3.3.15(1)dwnx",
+                "NAQ_MACD_B_Strategy 3.3.15(1)dwnx",
+                "456",
+                "excel",
+                now,
+            ),
+        ).lastrowid
+    response_dir = data_dir / BRIDGE_RELATIVE / "Responses"
+    response_dir.mkdir(parents=True)
+    payload = {
+        "status": "ok",
+        "generated_at": "2026-06-26T12:00:00Z",
+        "account_login": "456",
+        "server": "Demo",
+        "account": {"balance": 10000, "equity": 10000},
+        "deals": [],
+        "positions": [],
+        "orders": [
+            {
+                "ticket": 20,
+                "symbol": "NAS100",
+                "order_type": "BUY_STOP",
+                "time_msc": 1000,
+                "volume": 0.1,
+                "price": 21000,
+                "magic": 2,
+                "comment": "WF_Matrix_NAQStrategy_3_3_15_1",
+            }
+        ],
+    }
+    (response_dir / "sync.response.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    result = ingest_responses()
+
+    assert result["strategies_linked"] == 1
+    with db.session() as conn:
+        mapping = conn.execute("SELECT strategy_id,symbol,magic,comment_pattern,role FROM mappings").fetchone()
+        assert tuple(mapping) == (
+            strategy_id,
+            "NAS100",
+            2,
+            "WF_Matrix_NAQStrategy_3_3_15_1",
+            "live",
+        )
+        assert conn.execute("SELECT COUNT(*) FROM strategies").fetchone()[0] == 1
+
+
 def test_disconnected_snapshot_does_not_clear_live_state(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "connecting.db")
     db.init_db()

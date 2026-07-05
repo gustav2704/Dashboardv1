@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from collections import defaultdict
 from typing import Any, Iterable
 
@@ -62,15 +64,13 @@ def resolve_catalog_identity(
     strategies = conn.execute(
         """SELECT s.*,l.strategy_name AS linked_name,l.symbol AS linked_symbol
            FROM strategies s
-           LEFT JOIN sqx_strategy_links l ON l.strategy_id=s.id
-           WHERE s.retired=0""",
+           LEFT JOIN sqx_strategy_links l ON l.strategy_id=s.id""",
     ).fetchall()
     aliases: dict[int, set[str]] = defaultdict(set)
     for row in conn.execute(
         """SELECT a.strategy_id,a.normalized_alias
            FROM strategy_aliases a
-           JOIN strategies s ON s.id=a.strategy_id
-           WHERE s.retired=0""",
+           JOIN strategies s ON s.id=a.strategy_id""",
     ).fetchall():
         aliases[int(row["strategy_id"])].add(str(row["normalized_alias"]))
 
@@ -299,7 +299,10 @@ def conflicts() -> dict[str, Any]:
 
 
 def _merge_impact(
-    conn: Any, canonical_id: int, duplicate_ids: list[int]
+    conn: Any,
+    canonical_id: int,
+    duplicate_ids: list[int],
+    allow_cross_account: bool = False,
 ) -> dict[str, Any]:
     requested = [canonical_id, *duplicate_ids]
     placeholders = ",".join("?" for _ in requested)
@@ -310,13 +313,39 @@ def _merge_impact(
     if len(found) != len(set(requested)):
         missing = sorted(set(requested) - {int(row["id"]) for row in found})
         raise KeyError(f"Strategy IDs not found: {missing}")
+    accounts = {
+        str(row["account_login"] or "")
+        for row in conn.execute(
+            f"SELECT account_login FROM strategies WHERE id IN ({placeholders})",
+            requested,
+        )
+        if str(row["account_login"] or "").strip()
+    }
+    if len(accounts) > 1 and not allow_cross_account:
+        raise ValueError(
+            "Cannot merge strategy rows from different accounts; use an account migration"
+        )
     linked = conn.execute(
-        f"""SELECT strategy_id,project,databank,strategy_name
+        f"""SELECT id,strategy_id,project,databank,strategy_name,missing_from_sqx_at
             FROM sqx_strategy_links WHERE strategy_id IN ({placeholders})""",
         requested,
     ).fetchall()
+    retained_link = linked[0] if len(linked) == 1 else None
     if len(linked) > 1:
-        raise ValueError("Cannot merge strategies that have multiple SQX links")
+        scopes = {
+            (
+                str(row["project"]).casefold(),
+                str(row["databank"]).casefold(),
+            )
+            for row in linked
+        }
+        active_links = [row for row in linked if not row["missing_from_sqx_at"]]
+        if len(scopes) != 1 or len(active_links) != 1:
+            raise ValueError(
+                "Cannot merge multiple SQX links unless exactly one current link "
+                "replaces missing links in the same databank"
+            )
+        retained_link = active_links[0]
     active_runs = conn.execute(
         f"""SELECT COUNT(*) FROM backtest_runs
             WHERE strategy_id IN ({placeholders})
@@ -341,6 +370,7 @@ def _merge_impact(
         "backtest_batch_items",
         "strategy_expert_links",
         "strategy_aliases",
+        "strategy_account_lineage",
     )
     counts = {
         table: int(
@@ -355,7 +385,12 @@ def _merge_impact(
     return {
         "canonical_id": canonical_id,
         "duplicate_ids": duplicate_ids,
-        "sqx_link": dict(linked[0]) if linked else None,
+        "sqx_link": dict(retained_link) if retained_link else None,
+        "dropped_sqx_links": [
+            dict(row)
+            for row in linked
+            if not retained_link or int(row["id"]) != int(retained_link["id"])
+        ],
         "counts": counts,
     }
 
@@ -370,10 +405,11 @@ def _move_mappings(
             conn.execute(
                 """INSERT INTO mappings(
                      strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,
-                     confidence,confirmed,created_at
-                   ) VALUES(?,?,?,?,?,?,?,?,?)
+                     role,confidence,confirmed,created_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(strategy_id,terminal_id,symbol,magic,comment_pattern)
                    DO UPDATE SET
+                     role=excluded.role,
                      confidence=MAX(mappings.confidence,excluded.confidence),
                      confirmed=MAX(mappings.confirmed,excluded.confirmed)""",
                 (
@@ -383,6 +419,7 @@ def _move_mappings(
                     row["symbol"],
                     row["magic"],
                     row["comment_pattern"],
+                    row["role"] if "role" in row.keys() else "live",
                     row["confidence"],
                     row["confirmed"],
                     row["created_at"],
@@ -477,9 +514,14 @@ def _move_expert_link(
             ORDER BY updated_at DESC""",
         all_ids,
     ).fetchall()
-    chosen = next(
-        (row for row in candidates if int(row["strategy_id"]) == canonical_id),
-        candidates[0] if candidates else None,
+    chosen = max(
+        candidates,
+        key=lambda row: (
+            float(row["confidence"] or 0),
+            float(row["parameters_match"] or 0),
+            str(row["updated_at"] or ""),
+        ),
+        default=None,
     )
     for duplicate_id in duplicate_ids:
         conn.execute(
@@ -529,6 +571,39 @@ def _move_aliases(
         )
 
 
+def _move_lineages(
+    conn: Any, canonical_id: int, duplicate_ids: Iterable[int]
+) -> None:
+    for duplicate_id in duplicate_ids:
+        for row in conn.execute(
+            """SELECT account_login,role,source,created_at
+               FROM strategy_account_lineage WHERE strategy_id=?""",
+            (duplicate_id,),
+        ):
+            conn.execute(
+                """INSERT INTO strategy_account_lineage(
+                     strategy_id,account_login,role,source,created_at
+                   ) VALUES(?,?,?,?,?)
+                   ON CONFLICT(strategy_id,account_login) DO UPDATE SET
+                     role=CASE
+                       WHEN excluded.role='current' THEN 'current'
+                       ELSE strategy_account_lineage.role
+                     END,
+                     source=excluded.source""",
+                (
+                    canonical_id,
+                    row["account_login"],
+                    row["role"],
+                    row["source"],
+                    row["created_at"],
+                ),
+            )
+        conn.execute(
+            "DELETE FROM strategy_account_lineage WHERE strategy_id=?",
+            (duplicate_id,),
+        )
+
+
 def _move_alerts(
     conn: Any, canonical_id: int, duplicate_ids: Iterable[int]
 ) -> None:
@@ -555,6 +630,7 @@ def merge_strategies(
     canonical_id: int,
     duplicate_ids: list[int],
     dry_run: bool = True,
+    allow_cross_account: bool = False,
 ) -> dict[str, Any]:
     duplicate_ids = sorted(
         {
@@ -566,7 +642,12 @@ def merge_strategies(
     if not duplicate_ids:
         raise ValueError("At least one duplicate strategy ID is required")
     with session() as conn:
-        impact = _merge_impact(conn, canonical_id, duplicate_ids)
+        impact = _merge_impact(
+            conn,
+            canonical_id,
+            duplicate_ids,
+            allow_cross_account=allow_cross_account,
+        )
         if dry_run:
             return {**impact, "dry_run": True}
 
@@ -578,6 +659,7 @@ def merge_strategies(
             requested,
         ).fetchall()
         origins = [str(row["origin"] or "") for row in strategies]
+        merged_retired = int(all(bool(row["retired"]) for row in strategies))
         catalog_candidates = [
             row for row in strategies if str(row["catalog_json"] or "{}") != "{}"
         ]
@@ -586,6 +668,30 @@ def merge_strategies(
             key=lambda row: (str(row["created_at"]), int(row["id"])),
             default=None,
         )
+
+        for link in [
+            impact.get("sqx_link"),
+            *impact.get("dropped_sqx_links", []),
+        ]:
+            if link:
+                add_alias(
+                    conn,
+                    canonical_id,
+                    link["strategy_name"],
+                    "sqx",
+                )
+        retained_link = impact.get("sqx_link")
+        if retained_link:
+            conn.execute(
+                f"""DELETE FROM sqx_strategy_links
+                    WHERE strategy_id IN ({placeholders}) AND id<>?""",
+                (*requested, retained_link["id"]),
+            )
+            if int(retained_link["strategy_id"]) != canonical_id:
+                conn.execute(
+                    "UPDATE sqx_strategy_links SET strategy_id=? WHERE id=?",
+                    (canonical_id, retained_link["id"]),
+                )
 
         _move_mappings(conn, canonical_id, duplicate_ids)
         conn.execute(
@@ -602,22 +708,13 @@ def merge_strategies(
         collapsed = _move_batch_items(conn, canonical_id, duplicate_ids)
         _move_expert_link(conn, canonical_id, duplicate_ids)
         _move_aliases(conn, canonical_id, duplicate_ids)
+        _move_lineages(conn, canonical_id, duplicate_ids)
         _move_alerts(conn, canonical_id, duplicate_ids)
         conn.execute(
             f"""UPDATE backtest_batches SET current_strategy_id=?
                 WHERE current_strategy_id IN ({','.join('?' for _ in duplicate_ids)})""",
             (canonical_id, *duplicate_ids),
         )
-        duplicate_link = conn.execute(
-            f"""SELECT strategy_id FROM sqx_strategy_links
-                WHERE strategy_id IN ({','.join('?' for _ in duplicate_ids)})""",
-            duplicate_ids,
-        ).fetchone()
-        if duplicate_link:
-            conn.execute(
-                "UPDATE sqx_strategy_links SET strategy_id=? WHERE strategy_id=?",
-                (canonical_id, duplicate_link["strategy_id"]),
-            )
         conn.execute(
             f"""DELETE FROM strategies
                 WHERE id IN ({','.join('?' for _ in duplicate_ids)})""",
@@ -627,8 +724,8 @@ def merge_strategies(
         merged_origin = ""
         for origin in origins:
             merged_origin = origin_with(merged_origin, *origin.split("+"))
-        assignments = ["origin=?"]
-        values: list[Any] = [merged_origin]
+        assignments = ["origin=?", "retired=?"]
+        values: list[Any] = [merged_origin, merged_retired]
         if latest_catalog:
             assignments.extend(
                 ["symbol=?", "mql5_name=?", "catalog_row=?", "catalog_json=?"]
@@ -658,3 +755,208 @@ def merge_strategies(
             "collapsed_batch_items": collapsed,
             "canonical_name": canonical["sqx_name"],
         }
+
+
+def parameter_fingerprint(snapshot: dict[str, Any]) -> str | None:
+    variables = snapshot.get("parameters", {}).get("variables", [])
+    if not isinstance(variables, list):
+        return None
+    normalized = sorted(
+        (
+            normalize(str(item.get("name") or "")),
+            str(
+                item.get("value") if item.get("value") is not None else ""
+            ).strip().casefold(),
+        )
+        for item in variables
+        if normalize(str(item.get("name") or ""))
+    )
+    if normalized:
+        encoded = json.dumps(
+            normalized,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+    return None
+
+
+def _latest_parameter_fingerprint(conn: Any, strategy_id: int) -> str | None:
+    rows = conn.execute(
+        """SELECT config_snapshot_json
+           FROM backtest_runs
+           WHERE strategy_id=? AND config_snapshot_json IS NOT NULL
+           ORDER BY id DESC""",
+        (strategy_id,),
+    ).fetchall()
+    for row in rows:
+        try:
+            snapshot = json.loads(row["config_snapshot_json"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        fingerprint = parameter_fingerprint(snapshot)
+        if fingerprint:
+            return fingerprint
+    return None
+
+
+def _reconciliation_evidence(
+    conn: Any,
+    canonical_id: int,
+    source_id: int,
+) -> dict[str, Any]:
+    strategies = {
+        int(row["id"]): row
+        for row in conn.execute(
+            """SELECT id,symbol,sqx_name,mql5_name,account_login,identity_strategy_id
+               FROM strategies WHERE id IN (?,?)""",
+            (canonical_id, source_id),
+        ).fetchall()
+    }
+    if set(strategies) != {canonical_id, source_id}:
+        raise KeyError("One or more strategy IDs were not found")
+    links = {
+        int(row["strategy_id"]): row
+        for row in conn.execute(
+            """SELECT * FROM sqx_strategy_links
+               WHERE strategy_id IN (?,?)""",
+            (canonical_id, source_id),
+        ).fetchall()
+    }
+    canonical_link = links.get(canonical_id)
+    source_link = links.get(source_id)
+    if not canonical_link or not canonical_link["missing_from_sqx_at"]:
+        raise ValueError("Canonical strategy does not have a missing SQX link")
+    if not source_link or source_link["missing_from_sqx_at"]:
+        raise ValueError("Source strategy does not have a current SQX link")
+    if (
+        str(canonical_link["project"]).casefold(),
+        str(canonical_link["databank"]).casefold(),
+    ) != (
+        str(source_link["project"]).casefold(),
+        str(source_link["databank"]).casefold(),
+    ):
+        raise ValueError("SQX links belong to different databanks")
+    canonical_family = symbol_family(
+        str(canonical_link["symbol"] or strategies[canonical_id]["symbol"] or "")
+    )
+    source_family = symbol_family(
+        str(source_link["symbol"] or strategies[source_id]["symbol"] or "")
+    )
+    if canonical_family != source_family:
+        raise ValueError("SQX links belong to different symbol families")
+    canonical_version = version_signature(str(canonical_link["strategy_name"]))
+    source_version = version_signature(str(source_link["strategy_name"]))
+    if not canonical_version or canonical_version != source_version:
+        raise ValueError("SQX links do not share an exact version signature")
+
+    lineage_match = int(
+        strategies[source_id]["identity_strategy_id"] or source_id
+    ) == canonical_id
+    canonical_parameters = _latest_parameter_fingerprint(conn, canonical_id)
+    source_parameters = _latest_parameter_fingerprint(conn, source_id)
+    parameters_match = bool(
+        canonical_parameters
+        and source_parameters
+        and canonical_parameters == source_parameters
+    )
+    expert_rows = {
+        int(row["strategy_id"]): str(row["expert_hash"] or "")
+        for row in conn.execute(
+            """SELECT strategy_id,expert_hash FROM strategy_expert_links
+               WHERE strategy_id IN (?,?)""",
+            (canonical_id, source_id),
+        ).fetchall()
+    }
+    canonical_hash = expert_rows.get(canonical_id, "")
+    source_hash = expert_rows.get(source_id, "")
+    expert_hashes_match = bool(
+        canonical_hash and source_hash and canonical_hash == source_hash
+    )
+    if not lineage_match and not parameters_match:
+        raise ValueError(
+            "SQX reconciliation requires an explicit identity lineage or an "
+            "identical parameter fingerprint"
+        )
+    if (
+        not lineage_match
+        and canonical_hash
+        and source_hash
+        and not expert_hashes_match
+    ):
+        raise ValueError("SQX reconciliation expert hashes do not match")
+    return {
+        "canonical_id": canonical_id,
+        "source_id": source_id,
+        "canonical_link": dict(canonical_link),
+        "source_link": dict(source_link),
+        "lineage_match": lineage_match,
+        "parameters_match": parameters_match,
+        "expert_hashes_match": expert_hashes_match,
+        "parameter_fingerprint": canonical_parameters if parameters_match else None,
+        "expert_hash": canonical_hash if expert_hashes_match else None,
+    }
+
+
+def reconcile_sqx_link(
+    canonical_id: int,
+    source_id: int,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    with session() as conn:
+        evidence = _reconciliation_evidence(conn, canonical_id, source_id)
+        if evidence["lineage_match"]:
+            active_runs = conn.execute(
+                """SELECT COUNT(*) FROM backtest_runs
+                   WHERE strategy_id IN (?,?)
+                     AND status IN ('queued','preflight','running')""",
+                (canonical_id, source_id),
+            ).fetchone()[0]
+            if active_runs:
+                raise ValueError(
+                    "Cannot move an SQX link while a related backtest is active"
+                )
+            if dry_run:
+                return {**evidence, "mode": "promote_identity_link", "dry_run": True}
+            add_alias(
+                conn,
+                canonical_id,
+                evidence["canonical_link"]["strategy_name"],
+                "sqx",
+            )
+            add_alias(
+                conn,
+                canonical_id,
+                evidence["source_link"]["strategy_name"],
+                "sqx",
+            )
+            conn.execute(
+                "DELETE FROM sqx_strategy_links WHERE id=?",
+                (evidence["canonical_link"]["id"],),
+            )
+            conn.execute(
+                "UPDATE sqx_strategy_links SET strategy_id=? WHERE id=?",
+                (canonical_id, evidence["source_link"]["id"]),
+            )
+            canonicalize_linked_name(conn, canonical_id)
+            return {
+                **evidence,
+                "mode": "promote_identity_link",
+                "dry_run": False,
+            }
+
+    preview = merge_strategies(canonical_id, [source_id], dry_run=True)
+    if dry_run:
+        return {
+            **evidence,
+            "mode": "merge_duplicate",
+            "merge": preview,
+            "dry_run": True,
+        }
+    result = merge_strategies(canonical_id, [source_id], dry_run=False)
+    return {
+        **evidence,
+        "mode": "merge_duplicate",
+        "merge": result,
+        "dry_run": False,
+    }

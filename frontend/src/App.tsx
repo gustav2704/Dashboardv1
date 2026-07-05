@@ -5,7 +5,7 @@ import ChartPanel from './ChartPanel'
 import type { BacktestBatch, BacktestCandidates, BacktestDefaults, BacktestRun, BacktestSummary, Baseline, Dashboard, Metrics, RiskCheck, RiskGuard, Strategy, StrategyDeletionImpact, StrategyDetails } from './types'
 
 type Tab = 'overview' | 'detail' | 'chart' | 'backtests' | 'settings'
-type SortKey = 'state' | 'source' | 'backtest' | 'edge' | 'egt' | 'strategy' | 'symbol' | 'account' | 'magic' | 'net_profit' | 'trades' | 'win_rate' | 'profit_factor' | 'max_drawdown' | 'avg_wl' | 'best_trade' | 'today_profit'
+type SortKey = 'state' | 'source' | 'backtest' | 'edge' | 'egt' | 'strategy' | 'symbol' | 'account' | 'magic' | 'net_profit' | 'trades' | 'win_rate' | 'profit_factor' | 'max_drawdown' | 'avg_wl' | 'best_trade' | 'today_profit' | 'history'
 type SortDirection = 'ascending' | 'descending'
 type SortState = { key: SortKey; direction: SortDirection } | null
 const SIDEBAR_STORAGE_KEY = 'dashboardv1:sidebar-collapsed'
@@ -46,6 +46,9 @@ function buildDashboardQuery(windowName: string, customStart: string, customEnd:
 function recoveryFactor(metrics: Metrics) {
   if (metrics.return_dd != null) return number(metrics.return_dd)
   return metrics.max_drawdown === 0 && metrics.net_profit > 0 ? '∞' : '—'
+}
+function performanceMetrics(strategy: Strategy) {
+  return strategy.lifetime_metrics || strategy.metrics
 }
 function healthLabel(status: string) {
   return status === 'gray' ? 'Not evaluated' : status === 'green' ? 'In range' : status === 'yellow' ? 'Attention' : 'Deviation'
@@ -113,14 +116,15 @@ function sortValue(strategy: Strategy, key: SortKey): string | number | null {
     case 'symbol': return strategy.symbol || null
     case 'account': return strategy.account_login || null
     case 'magic': return strategy.magic_numbers?.[0] ?? null
-    case 'net_profit': return strategy.metrics.net_profit
-    case 'trades': return strategy.metrics.trades
-    case 'win_rate': return strategy.metrics.win_rate
-    case 'profit_factor': return strategy.metrics.profit_factor
-    case 'max_drawdown': return strategy.metrics.max_drawdown
-    case 'avg_wl': return strategy.metrics.avg_loss < 0 ? strategy.metrics.avg_win / Math.abs(strategy.metrics.avg_loss) : strategy.metrics.avg_win || null
-    case 'best_trade': return strategy.metrics.best_trade
+    case 'net_profit': return performanceMetrics(strategy).net_profit
+    case 'trades': return performanceMetrics(strategy).trades
+    case 'win_rate': return performanceMetrics(strategy).win_rate
+    case 'profit_factor': return performanceMetrics(strategy).profit_factor
+    case 'max_drawdown': return performanceMetrics(strategy).max_drawdown
+    case 'avg_wl': return performanceMetrics(strategy).avg_loss < 0 ? performanceMetrics(strategy).avg_win / Math.abs(performanceMetrics(strategy).avg_loss) : performanceMetrics(strategy).avg_win || null
+    case 'best_trade': return performanceMetrics(strategy).best_trade
     case 'today_profit': return strategy.metrics.today_profit
+    case 'history': return strategy.historical_metrics.trades
   }
 }
 
@@ -150,8 +154,8 @@ function Comparison({ label, current, baseline, format = number }: { label: stri
 
 function StreakPair({ metrics }: { metrics: Metrics }) {
   return <div className="streak-pair" aria-label="Maximum consecutive winning and losing trades">
-    <div><span>Winning streak</span><strong className="streak-win">{metrics.max_consecutive_wins ?? 0}</strong></div>
-    <div><span>Losing streak</span><strong className="streak-loss">{metrics.max_consecutive_losses ?? 0}</strong></div>
+    <div><span>Lifetime winning streak</span><strong className="streak-win">{metrics.max_consecutive_wins ?? 0}</strong></div>
+    <div><span>Lifetime losing streak</span><strong className="streak-loss">{metrics.max_consecutive_losses ?? 0}</strong></div>
   </div>
 }
 
@@ -244,7 +248,7 @@ function SQXAnalyticsBadge({ strategy, kind }: { strategy: Strategy; kind: 'edge
   const egt = strategy.sqx_analytics?.egt
   if (!egt) return <span className="analytics-badge unavailable" title="No SQX analytics snapshot">—</span>
   if (!egt.available) return <span className="analytics-badge unavailable" title={egt.reason || 'Not available'}>N/A</span>
-  return <span className="analytics-badge egt" title={`EGT · ${egt.grade || 'No grade'}`}>{number(egt.total)}<small>{egt.grade}</small></span>
+  return <span className="analytics-badge egt" title={`EGT · ${egt.grade || 'No grade'} · ${egt.history_source || egt.source || 'Unknown source'}`}>{number(egt.total)}<small>{egt.grade}</small></span>
 }
 
 function SQXAnalyticsPanel({ strategy }: { strategy: Strategy }) {
@@ -265,7 +269,7 @@ function SQXAnalyticsPanel({ strategy }: { strategy: Strategy }) {
       <div className={egt?.available ? 'sqx-analysis-summary' : 'sqx-analysis-summary unavailable'}>
         <span>EGT</span>
         <strong>{egt?.available ? `${number(egt.total)} · ${egt.grade}` : 'Not available'}</strong>
-        <small>{egt?.available ? `Buy ${number(egt.buy)} · Sell ${number(egt.sell)} · ${egt.months || 0} months` : egt?.reason || 'Run an SQX sync to calculate it.'}</small>
+        <small>{egt?.available ? `Buy ${number(egt.buy)} · Sell ${number(egt.sell)} · ${egt.months || 0} months · ${egt.history_source || egt.source || 'Unknown source'}${egt.bars ? ` · ${egt.bars} bars` : ''}` : egt?.reason || 'Run an SQX sync to calculate it.'}</small>
       </div>
     </div>
   </section>
@@ -273,6 +277,7 @@ function SQXAnalyticsPanel({ strategy }: { strategy: Strategy }) {
 
 function StrategyDetail({ strategy, onDeleted }: { strategy: Strategy; onDeleted: (strategyId: number) => void }) {
   const m = strategy.metrics
+  const lifetime = strategy.lifetime_metrics
   const [baselineId, setBaselineId] = useState('')
   useEffect(() => setBaselineId(''), [strategy.id])
   const b = strategy.baselines.find(item => `${item.source}:${item.sample_type}:${item.synced_at}` === baselineId) || strategy.baseline
@@ -293,7 +298,7 @@ function StrategyDetail({ strategy, onDeleted }: { strategy: Strategy; onDeleted
       <Comparison label="Trades / month" current={m.trades_per_month} baseline={baselineValue(b, 'AvgTradesPerMonth')} />
       <Comparison label="Max drawdown" current={m.max_drawdown} baseline={baselineValue(b, 'MaxDD', 'Drawdown')} format={money} />
     </section>
-    <section className="panel compact-metrics"><div><span>Win rate</span><strong>{(m.win_rate * 100).toFixed(1)}%</strong></div><div><span>Average duration</span><strong>{duration(m.avg_duration_seconds)}</strong></div><div><StreakPair metrics={m} /></div><div><span>Average win</span><strong>{money(m.avg_win)}</strong></div><div><span>Average loss</span><strong>{money(m.avg_loss)}</strong></div><div><span>Commission + swap</span><strong>{money(m.commissions + m.swaps)}</strong></div></section>
+    <section className="panel compact-metrics"><div><span>Win rate</span><strong>{(m.win_rate * 100).toFixed(1)}%</strong></div><div><span>Average duration</span><strong>{duration(m.avg_duration_seconds)}</strong></div><div><StreakPair metrics={lifetime} /></div><div><span>Average win</span><strong>{money(m.avg_win)}</strong></div><div><span>Average loss</span><strong>{money(m.avg_loss)}</strong></div><div><span>Commission + swap</span><strong>{money(m.commissions + m.swaps)}</strong></div></section>
     <SQXAnalyticsPanel strategy={strategy} />
     <RiskGuardPanel risk={strategy.risk_guard} />
   </div>
@@ -348,6 +353,8 @@ function StrategySidePanel({ strategy, query, onClose, onDeleted }: { strategy: 
 
   const active = detail || strategy
   const m = active.metrics
+  const historical = active.historical_metrics
+  const lifetime = active.lifetime_metrics
   const history = detail ? [...detail.trades].reverse().slice(0, 80) : []
   return <aside className="strategy-drawer" aria-label="Quick strategy statistics">
     <div className="drawer-header">
@@ -359,7 +366,9 @@ function StrategySidePanel({ strategy, query, onClose, onDeleted }: { strategy: 
       {!detail && !error && <div className="drawer-loading">Loading details…</div>}
       <MissingSqxNotice strategy={active} onDeleted={onDeleted} />
       <div className="drawer-stat-grid">
-        <DrawerMetric label="Total net P/L" value={signedMoney(m.net_profit)} detail={`${m.trades} trades | Exp ${money(m.expectancy)}`} tone={m.net_profit >= 0 ? 'positive' : 'negative'} />
+        <DrawerMetric label="Lifetime P/L" value={signedMoney(lifetime.net_profit)} detail={`${lifetime.trades} total trades`} tone={lifetime.net_profit >= 0 ? 'positive' : 'negative'} />
+        <DrawerMetric label="Current P/L" value={signedMoney(m.net_profit)} detail={`${m.trades} live-account trades | Exp ${money(m.expectancy)}`} tone={m.net_profit >= 0 ? 'positive' : 'negative'} />
+        <DrawerMetric label="Historical P/L" value={signedMoney(historical.net_profit)} detail={`${historical.trades} imported/old-account trades`} tone={historical.net_profit >= 0 ? 'positive' : 'negative'} />
         <DrawerMetric label="Health" value={healthLabel(active.health.status)} detail={active.health.reasons.join(', ') || 'No active alerts'} tone={`status-${active.health.status}`} dotStatus={active.health.status} />
         <DrawerMetric label="Today" value={signedMoney(m.today_profit)} detail={`${m.today_trades} trades today`} tone={m.today_profit >= 0 ? 'positive' : 'negative'} />
         <DrawerMetric label="Win %" value={`${(m.win_rate * 100).toFixed(1)}%`} detail={`${m.winning_trades}/${m.trades} won`} tone={m.win_rate >= .5 ? 'positive' : 'negative'} />
@@ -370,7 +379,7 @@ function StrategySidePanel({ strategy, query, onClose, onDeleted }: { strategy: 
         <DrawerMetric label="Avg. dur." value={duration(m.avg_duration_seconds)} detail="Average time per trade" />
         <DrawerMetric label="Best trade" value={signedMoney(m.best_trade)} detail="Closed trade" tone={(m.best_trade || 0) >= 0 ? 'positive' : 'negative'} />
         <DrawerMetric label="Worst trade" value={signedMoney(m.worst_trade)} detail="Closed trade" tone={(m.worst_trade || 0) >= 0 ? 'positive' : 'negative'} />
-        <div className="drawer-card streak-card"><StreakPair metrics={m} /></div>
+        <div className="drawer-card streak-card"><StreakPair metrics={lifetime} /></div>
       </div>
       <section className={`drawer-section drawer-risk ${active.risk_guard.status}`}>
         <div className="drawer-section-title"><span className="eyebrow">RISK GUARD</span><span className={`risk-verdict ${active.risk_guard.stop_recommended ? 'stop' : active.risk_guard.status}`}>{active.risk_guard.stop_recommended ? 'Stop recommended' : active.risk_guard.status === 'gray' ? 'Not evaluated' : active.risk_guard.status === 'yellow' ? 'Attention' : 'Within limits'}</span></div>
@@ -387,7 +396,7 @@ function StrategySidePanel({ strategy, query, onClose, onDeleted }: { strategy: 
       </section>
       <section className="drawer-section drawer-history">
         <div className="drawer-section-title"><span className="eyebrow">HISTORY ({detail?.trades.length || 0})</span></div>
-        {history.length ? <table className="drawer-table"><thead><tr><th>Close</th><th>Sym.</th><th>Dir.</th><th>Lots</th><th>Net P/L</th><th>Dur.</th></tr></thead><tbody>{history.map(trade => <tr key={`${trade.terminal_id}-${trade.deal_ticket}`}><td>{new Date(trade.close_time_msc).toLocaleString('en-US', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</td><td>{trade.symbol}</td><td>{directionLabel(trade.direction)}</td><td>{trade.volume.toFixed(2)}</td><td className={trade.net_profit >= 0 ? 'value-good' : 'value-bad'}>{signedMoney(trade.net_profit)}</td><td>{tradeDuration(trade.open_time_msc, trade.close_time_msc)}</td></tr>)}</tbody></table> : <div className="drawer-empty">{detail ? 'No history for this window.' : 'Loading history…'}</div>}
+        {history.length ? <table className="drawer-table"><thead><tr><th>Close</th><th>Acct.</th><th>Sym.</th><th>Dir.</th><th>Lots</th><th>Net P/L</th><th>Dur.</th></tr></thead><tbody>{history.map(trade => <tr key={`${trade.terminal_id}-${trade.deal_ticket}`}><td>{new Date(trade.close_time_msc).toLocaleString('en-US', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</td><td><span className={`trade-source ${trade.source_role || 'live'}`}>{trade.source_account || 'Live'}</span></td><td>{trade.symbol}</td><td>{directionLabel(trade.direction)}</td><td>{trade.volume.toFixed(2)}</td><td className={trade.net_profit >= 0 ? 'value-good' : 'value-bad'}>{signedMoney(trade.net_profit)}</td><td>{tradeDuration(trade.open_time_msc, trade.close_time_msc)}</td></tr>)}</tbody></table> : <div className="drawer-empty">{detail ? 'No history for this window.' : 'Loading history…'}</div>}
       </section>
     </div>
   </aside>
@@ -520,10 +529,10 @@ function Backtests({ strategies, initialStrategyId, onCompleted }: { strategies:
         </div>
       </div>
       <div className="batch-counts">
-        <div><span>Eligible</span><strong>{candidates?.counts.eligible ?? '—'}</strong></div>
-        <div><span>Resolvable</span><strong>{candidates?.counts.resolvable ?? '—'}</strong></div>
-        <div><span>Blocked</span><strong>{candidates?.counts.blocked ?? '—'}</strong></div>
-        <div><span>Validated</span><strong>{candidates?.counts.validated ?? '—'}</strong></div>
+        <div><span>Eligible</span><strong>{candidates?.counts.eligible ?? '?'}</strong></div>
+        <div><span>Resolvable</span><strong>{candidates?.counts.resolvable ?? '?'}</strong></div>
+        <div><span>Blocked</span><strong>{candidates?.counts.blocked ?? '?'}</strong></div>
+        <div><span>Validated</span><strong>{candidates?.counts.validated ?? '?'}</strong></div>
       </div>
       {activeBatch && <div className="batch-progress">
         <div className="batch-progress-head">
@@ -580,7 +589,7 @@ function Backtests({ strategies, initialStrategyId, onCompleted }: { strategies:
             <td>{number(metricNumber(run.metrics, 'profit_factor'))}</td>
             <td>{number(metricNumber(run.metrics, 'sharpe_ratio'))}</td>
             <td>{money(metricNumber(run.metrics, 'max_drawdown'))}</td>
-            <td>{metricNumber(run.metrics, 'trades') ?? '—'}</td>
+            <td>{metricNumber(run.metrics, 'trades') ?? '?'}</td>
             <td>{active
               ? <button className="icon-button danger" title="Cancel run" onClick={() => action(run, 'cancel')}><Square size={14}/></button>
               : <button className="icon-button" title="Retry run" onClick={() => action(run, 'retry')}><RotateCcw size={14}/></button>}</td>
@@ -618,8 +627,8 @@ function Settings({ reload }: { reload: () => void }) {
   async function syncSqx() {
     setNotice('Querying SQX…')
     try {
-      const result = await api<{ received:number; imported:number; matched:number; created:number; unmatched:number; passed:number; edge_available:number; egt_available:number; analytics_unavailable:number }>('/api/sqx/sync', { method: 'POST', body: JSON.stringify({ project, databank }) })
-      setNotice(`SQX: ${result.imported}/${result.received} imported · Edge ${result.edge_available} · EGT ${result.egt_available} · ${result.analytics_unavailable} with unavailable analytics.`)
+      const result = await api<{ received:number; imported:number; matched:number; created:number; unmatched:number; passed:number; edge_available:number; egt_available:number; analytics_unavailable:number; renamed:number; promoted:number; rename_conflicts:Array<{strategy_name:string;reason:string}> }>('/api/sqx/sync', { method: 'POST', body: JSON.stringify({ project, databank }) })
+      setNotice(`SQX: ${result.imported}/${result.received} imported · ${result.renamed + result.promoted} links reconciled · ${result.rename_conflicts.length} rename conflicts · Edge ${result.edge_available} · EGT ${result.egt_available} · ${result.analytics_unavailable} with unavailable analytics.`)
       reload()
       setSqxDatabanks(await api<Record<string, Array<{name:string;records:number;view:string}>>>('/api/sqx/databanks'))
     }
@@ -764,8 +773,12 @@ export default function App() {
           </div>
           <div ref={overviewTableScrollRef} className="table-scroll" aria-label="Scrollable strategy table" tabIndex={0} onScroll={() => syncOverviewScroll('table')}>
             <table ref={overviewTableRef}>
-              <thead><tr><SortableHeader label="State" sortKey="state" sort={sort} onSort={changeSort}/><SortableHeader label="Source" sortKey="source" sort={sort} onSort={changeSort}/><SortableHeader label="Backtest" sortKey="backtest" sort={sort} onSort={changeSort}/><SortableHeader label="Edge" sortKey="edge" sort={sort} onSort={changeSort}/><SortableHeader label="EGT" sortKey="egt" sort={sort} onSort={changeSort}/><SortableHeader label="Strategy" sortKey="strategy" sort={sort} onSort={changeSort}/><SortableHeader label="Symbol" sortKey="symbol" sort={sort} onSort={changeSort}/><SortableHeader label="Account" sortKey="account" sort={sort} onSort={changeSort}/><SortableHeader label="Magic" sortKey="magic" sort={sort} onSort={changeSort}/><SortableHeader label="Net P/L" sortKey="net_profit" sort={sort} onSort={changeSort}/><SortableHeader label="Trades" sortKey="trades" sort={sort} onSort={changeSort}/><SortableHeader label="Win %" sortKey="win_rate" sort={sort} onSort={changeSort}/><SortableHeader label="Avg W/L" sortKey="avg_wl" sort={sort} onSort={changeSort}/><SortableHeader label="Best trade" sortKey="best_trade" sort={sort} onSort={changeSort}/><SortableHeader label="P/L today" sortKey="today_profit" sort={sort} onSort={changeSort}/><SortableHeader label="Factor P" sortKey="profit_factor" sort={sort} onSort={changeSort}/><SortableHeader label="Max DD" sortKey="max_drawdown" sort={sort} onSort={changeSort}/><th aria-label="Open panel"></th></tr></thead>
-              <tbody>{sortedStrategies.map(strategy => <tr key={strategy.id} className={panelStrategyId === strategy.id ? 'selected-row' : ''} onClick={() => { setSelectedId(strategy.id); setPanelStrategyId(strategy.id) }}><td><span className={`state-tag ${strategy.state}`}><HealthDot status={strategy.health.status}/>{stateLabels[strategy.state] || strategy.state}</span></td><td><span className={`link-tag ${strategy.link_state}`}>{linkLabels[strategy.link_state] || strategy.link_state}</span>{strategy.sqx?.missing_from_sqx_at && <small className="sqx-missing">MISSING FROM SQX</small>}</td><td className="backtest-cell"><BacktestBadge summary={strategy.backtest}/></td><td><SQXAnalyticsBadge strategy={strategy} kind="edge"/></td><td><SQXAnalyticsBadge strategy={strategy} kind="egt"/></td><td><strong>{strategy.mql5_name || strategy.sqx_name}</strong><small>{strategy.sqx_name}</small></td><td>{strategy.symbol || '—'}</td><td>{strategy.account_login || '—'}</td><td className="magic-numbers">{strategy.magic_numbers?.length ? strategy.magic_numbers.join(', ') : '—'}</td><td className={strategy.metrics.net_profit >= 0 ? 'value-good' : 'value-bad'}>{money(strategy.metrics.net_profit)}</td><td>{strategy.metrics.trades}</td><td>{(strategy.metrics.win_rate * 100).toFixed(1)}%</td><td>{money(strategy.metrics.avg_win)} / {money(strategy.metrics.avg_loss)}</td><td className={(strategy.metrics.best_trade || 0) >= 0 ? 'value-good' : 'value-bad'}>{money(strategy.metrics.best_trade)}</td><td className={strategy.metrics.today_profit >= 0 ? 'value-good' : 'value-bad'}>{money(strategy.metrics.today_profit)}</td><td>{number(strategy.metrics.profit_factor)}</td><td>{money(strategy.metrics.max_drawdown)}</td><td className="row-action">›</td></tr>)}</tbody>
+              <thead><tr><SortableHeader label="State" sortKey="state" sort={sort} onSort={changeSort}/><SortableHeader label="Source" sortKey="source" sort={sort} onSort={changeSort}/><SortableHeader label="Backtest" sortKey="backtest" sort={sort} onSort={changeSort}/><SortableHeader label="Edge" sortKey="edge" sort={sort} onSort={changeSort}/><SortableHeader label="EGT" sortKey="egt" sort={sort} onSort={changeSort}/><SortableHeader label="Strategy" sortKey="strategy" sort={sort} onSort={changeSort}/><SortableHeader label="Symbol" sortKey="symbol" sort={sort} onSort={changeSort}/><SortableHeader label="Account" sortKey="account" sort={sort} onSort={changeSort}/><SortableHeader label="Magic" sortKey="magic" sort={sort} onSort={changeSort}/><SortableHeader label="Net P/L" sortKey="net_profit" sort={sort} onSort={changeSort}/><SortableHeader label="Trades" sortKey="trades" sort={sort} onSort={changeSort}/><SortableHeader label="Win %" sortKey="win_rate" sort={sort} onSort={changeSort}/><SortableHeader label="Avg W/L" sortKey="avg_wl" sort={sort} onSort={changeSort}/><SortableHeader label="Best trade" sortKey="best_trade" sort={sort} onSort={changeSort}/><SortableHeader label="P/L today" sortKey="today_profit" sort={sort} onSort={changeSort}/><SortableHeader label="Factor P" sortKey="profit_factor" sort={sort} onSort={changeSort}/><SortableHeader label="Max DD" sortKey="max_drawdown" sort={sort} onSort={changeSort}/><SortableHeader label="History" sortKey="history" sort={sort} onSort={changeSort}/><th aria-label="Open panel"></th></tr></thead>
+              <tbody>{sortedStrategies.map(strategy => {
+                const p = performanceMetrics(strategy)
+                const h = strategy.historical_metrics
+                return <tr key={strategy.id} className={panelStrategyId === strategy.id ? 'selected-row' : ''} onClick={() => { setSelectedId(strategy.id); setPanelStrategyId(strategy.id) }}><td><span className={`state-tag ${strategy.state}`}><HealthDot status={strategy.health.status}/>{stateLabels[strategy.state] || strategy.state}</span></td><td><span className={`link-tag ${strategy.link_state}`}>{linkLabels[strategy.link_state] || strategy.link_state}</span>{strategy.sqx?.missing_from_sqx_at && <small className="sqx-missing">MISSING FROM SQX</small>}</td><td className="backtest-cell"><BacktestBadge summary={strategy.backtest}/></td><td><SQXAnalyticsBadge strategy={strategy} kind="edge"/></td><td><SQXAnalyticsBadge strategy={strategy} kind="egt"/></td><td><strong>{strategy.mql5_name || strategy.sqx_name}</strong><small>{strategy.sqx_name}</small></td><td>{strategy.symbol || '—'}</td><td>{strategy.account_login || '—'}</td><td className="magic-numbers">{strategy.magic_numbers?.length ? strategy.magic_numbers.join(', ') : '—'}</td><td className={p.net_profit >= 0 ? 'value-good' : 'value-bad'}>{money(p.net_profit)}</td><td>{p.trades}</td><td>{(p.win_rate * 100).toFixed(1)}%</td><td>{money(p.avg_win)} / {money(p.avg_loss)}</td><td className={(p.best_trade || 0) >= 0 ? 'value-good' : 'value-bad'}>{money(p.best_trade)}</td><td className={strategy.metrics.today_profit >= 0 ? 'value-good' : 'value-bad'}>{money(strategy.metrics.today_profit)}</td><td>{number(p.profit_factor)}</td><td>{money(p.max_drawdown)}</td><td>{h.trades ? <span className={h.net_profit >= 0 ? 'history-badge positive' : 'history-badge negative'}>{h.trades} / {signedMoney(h.net_profit)}</span> : '—'}</td><td className="row-action">›</td></tr>
+              })}</tbody>
             </table>
           </div>
         </section>

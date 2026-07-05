@@ -8,10 +8,14 @@ import sys
 from difflib import SequenceMatcher
 from typing import Any
 
-from .config import SQX_DIR, SQX_EXTRACTOR
+from .config import EGT_HISTORY_DIR, SQX_DIR, SQX_EXTRACTOR
 from .db import session, utcnow
 from .mapping import normalize, symbol_family, version_signature
-from .strategy_identity import add_alias, canonicalize_linked_name
+from .strategy_identity import (
+    add_alias,
+    canonicalize_linked_name,
+    parameter_fingerprint,
+)
 
 
 class SQXUnavailable(RuntimeError):
@@ -32,6 +36,7 @@ def _run(*args: str, timeout: int = 60) -> Any:
     ]
     environment = os.environ.copy()
     environment["PYTHONIOENCODING"] = "utf-8"
+    environment["EGT_HISTORY_DIR"] = str(EGT_HISTORY_DIR)
     try:
         completed = subprocess.run(
             command,
@@ -158,6 +163,35 @@ def _origin_with_sqx(origin: str) -> str:
     return "+".join(source for source in ("mt5", "sqx", "excel") if source in sources)
 
 
+def _latest_parameter_fingerprints(
+    conn: Any,
+    strategy_ids: set[int],
+) -> dict[int, str]:
+    if not strategy_ids:
+        return {}
+    placeholders = ",".join("?" for _ in strategy_ids)
+    result: dict[int, str] = {}
+    for row in conn.execute(
+        f"""SELECT strategy_id,config_snapshot_json
+            FROM backtest_runs
+            WHERE strategy_id IN ({placeholders})
+              AND config_snapshot_json IS NOT NULL
+            ORDER BY id DESC""",
+        sorted(strategy_ids),
+    ).fetchall():
+        strategy_id = int(row["strategy_id"])
+        if strategy_id in result:
+            continue
+        try:
+            snapshot = json.loads(row["config_snapshot_json"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        fingerprint = parameter_fingerprint(snapshot)
+        if fingerprint:
+            result[strategy_id] = fingerprint
+    return result
+
+
 def _find_strategy(
     strategies: list[Any],
     claimed: set[int],
@@ -271,7 +305,8 @@ def sync(project: str, databank: str) -> dict[str, Any]:
     incoming = _items(payload)
     imported = matched = variant_matched = created = unmatched = baselines = passed = 0
     edge_available = egt_available = analytics_unavailable = 0
-    marked_missing = restored = 0
+    marked_missing = restored = renamed = promoted = 0
+    rename_conflicts: list[dict[str, Any]] = []
     synced_at = utcnow()
     incoming_names = {
         name.casefold()
@@ -280,6 +315,7 @@ def sync(project: str, databank: str) -> dict[str, Any]:
     }
     with session() as conn:
         strategies = list(conn.execute("SELECT * FROM strategies WHERE retired=0").fetchall())
+        strategies_by_id = {int(row["id"]): row for row in strategies}
         strategy_aliases: dict[int, set[str]] = {}
         for row in conn.execute(
             "SELECT strategy_id,alias FROM strategy_aliases"
@@ -287,14 +323,67 @@ def sync(project: str, databank: str) -> dict[str, Any]:
             strategy_aliases.setdefault(int(row["strategy_id"]), set()).add(
                 str(row["alias"])
             )
+        all_links = list(conn.execute("SELECT * FROM sqx_strategy_links").fetchall())
+        links_by_strategy = {
+            int(row["strategy_id"]): row
+            for row in all_links
+        }
+        for link in list(all_links):
+            if (
+                str(link["project"]).casefold() != project.casefold()
+                or str(link["databank"]).casefold() != databank.casefold()
+                or str(link["strategy_name"]).casefold() not in incoming_names
+            ):
+                continue
+            owner_id = int(link["strategy_id"])
+            owner = strategies_by_id.get(owner_id)
+            if not owner:
+                continue
+            identity_id = int(owner["identity_strategy_id"] or owner_id)
+            if identity_id == owner_id:
+                continue
+            root_link = links_by_strategy.get(identity_id)
+            if (
+                not root_link
+                or not root_link["missing_from_sqx_at"]
+                or str(root_link["project"]).casefold() != project.casefold()
+                or str(root_link["databank"]).casefold() != databank.casefold()
+                or str(root_link["strategy_name"]).casefold() in incoming_names
+            ):
+                continue
+            add_alias(conn, identity_id, root_link["strategy_name"], "sqx")
+            add_alias(conn, identity_id, link["strategy_name"], "sqx")
+            conn.execute(
+                "DELETE FROM sqx_strategy_links WHERE id=?",
+                (root_link["id"],),
+            )
+            conn.execute(
+                "UPDATE sqx_strategy_links SET strategy_id=? WHERE id=?",
+                (identity_id, link["id"]),
+            )
+            canonicalize_linked_name(conn, identity_id)
+            promoted += 1
+
+        existing_link_rows = list(
+            conn.execute("SELECT * FROM sqx_strategy_links").fetchall()
+        )
         existing_links = {
             (
                 row["project"].casefold(),
                 row["databank"].casefold(),
                 row["strategy_name"].casefold(),
             ): row
-            for row in conn.execute("SELECT * FROM sqx_strategy_links").fetchall()
+            for row in existing_link_rows
         }
+        scoped_stale_links = [
+            row
+            for row in existing_link_rows
+            if str(row["project"]).casefold() == project.casefold()
+            and str(row["databank"]).casefold() == databank.casefold()
+            and str(row["strategy_name"]).casefold() not in incoming_names
+        ]
+        stale_ids = {int(row["strategy_id"]) for row in scoped_stale_links}
+        stored_fingerprints = _latest_parameter_fingerprints(conn, stale_ids)
         claimed = {int(row["strategy_id"]) for row in existing_links.values()}
         reserved: dict[tuple[str, str, str], Any] = {}
         reserved_ids: set[int] = set()
@@ -322,6 +411,85 @@ def sync(project: str, databank: str) -> dict[str, Any]:
             if len(literal) == 1:
                 reserved[key] = literal[0]
                 reserved_ids.add(int(literal[0]["id"]))
+                continue
+
+            identity = item.get("identity", item)
+            symbol = str(identity.get("symbol") or "")
+            signature = version_signature(name)
+            candidates = [
+                row
+                for row in scoped_stale_links
+                if int(row["strategy_id"]) not in reserved_ids
+                and signature
+                and version_signature(str(row["strategy_name"])) == signature
+                and symbol_family(str(row["symbol"] or "")) == symbol_family(symbol)
+                and int(row["strategy_id"]) in stored_fingerprints
+            ]
+            if not candidates:
+                continue
+            try:
+                inspected = inspect_strategy(project, databank, name)
+            except SQXUnavailable as exc:
+                rename_conflicts.append(
+                    {
+                        "strategy_name": name,
+                        "candidate_ids": [
+                            int(row["strategy_id"]) for row in candidates
+                        ],
+                        "reason": f"Could not verify parameters: {exc}",
+                    }
+                )
+                continue
+            incoming_fingerprint = parameter_fingerprint(inspected)
+            matches = [
+                row
+                for row in candidates
+                if incoming_fingerprint
+                and stored_fingerprints[int(row["strategy_id"])]
+                == incoming_fingerprint
+            ]
+            if len(matches) != 1:
+                rename_conflicts.append(
+                    {
+                        "strategy_name": name,
+                        "candidate_ids": [
+                            int(row["strategy_id"]) for row in candidates
+                        ],
+                        "reason": (
+                            "No unique parameter fingerprint match"
+                            if not matches
+                            else "Several parameter fingerprints match"
+                        ),
+                    }
+                )
+                continue
+            old_link = matches[0]
+            strategy_id = int(old_link["strategy_id"])
+            old_name = str(old_link["strategy_name"])
+            conn.execute(
+                """UPDATE sqx_strategy_links SET
+                     strategy_name=?,symbol=?,timeframe=?,filter_result=?,
+                     last_synced_at=?,missing_from_sqx_at=NULL
+                   WHERE id=?""",
+                (
+                    name,
+                    symbol,
+                    str(identity.get("timeframe") or ""),
+                    str(identity.get("filter_result") or ""),
+                    synced_at,
+                    old_link["id"],
+                ),
+            )
+            add_alias(conn, strategy_id, old_name, "sqx")
+            add_alias(conn, strategy_id, name, "sqx")
+            canonicalize_linked_name(conn, strategy_id)
+            reserved_ids.add(strategy_id)
+            renamed += 1
+            refreshed_link = conn.execute(
+                "SELECT * FROM sqx_strategy_links WHERE id=?",
+                (old_link["id"],),
+            ).fetchone()
+            existing_links[key] = refreshed_link
 
         for item in incoming:
             identity = item.get("identity", item)
@@ -482,5 +650,8 @@ def sync(project: str, databank: str) -> dict[str, Any]:
         "analytics_unavailable": analytics_unavailable,
         "marked_missing": marked_missing,
         "restored": restored,
+        "renamed": renamed,
+        "promoted": promoted,
+        "rename_conflicts": rename_conflicts,
         "synced_at": synced_at,
     }

@@ -257,13 +257,17 @@ def _setting(snapshot: dict[str, Any], key: str) -> str | None:
 def backtest_defaults(strategy_id: int, profile: str = "reference") -> dict[str, Any]:
     with session() as conn:
         strategy = conn.execute("SELECT * FROM strategies WHERE id=?", (strategy_id,)).fetchone()
-        link = conn.execute("SELECT * FROM sqx_strategy_links WHERE strategy_id=?", (strategy_id,)).fetchone()
+        if not strategy:
+            raise KeyError("Strategy not found")
+        identity_id = int(strategy["identity_strategy_id"] or strategy_id)
+        link = conn.execute(
+            "SELECT * FROM sqx_strategy_links WHERE strategy_id=?",
+            (identity_id,),
+        ).fetchone()
         mapping = conn.execute(
             "SELECT target_symbol FROM symbol_mappings WHERE broker='FPM' AND source_symbol=?",
             ((link["symbol"] if link else "") or "",),
         ).fetchone()
-    if not strategy:
-        raise KeyError("Strategy not found")
     name = str((link["strategy_name"] if link else None) or strategy["sqx_name"])
     expert_candidates = list((DEFAULT_TERMINAL / "MQL5" / "Experts").rglob(f"{name}.ex5"))
     if not expert_candidates:

@@ -17,6 +17,7 @@ def test_symbol_family_maps_broker_symbols_to_catalog_symbols():
 def test_version_signature_uses_strategy_version_numbers():
     assert version_signature("WF_Matrix_DAXStrategy_1_9_26_3") == (1, 9, 26, 3)
     assert version_signature("WF Matrix - DAXStrategy 1.9.26(3)dwnx") == (1, 9, 26, 3)
+    assert version_signature("WF Matrix - Strategy 3.8.23(1)(1)") == (3, 8, 23, 1, 1)
 
 
 def test_candidate_requires_matching_account_and_symbol_family():

@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from .config import DATA_DIR, DB_PATH
+from .config import DATA_DIR, DB_PATH, EGT_HISTORY_DIR
 
 
 SCHEMA = """
@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS terminals (
 
 CREATE TABLE IF NOT EXISTS strategies (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  identity_strategy_id INTEGER REFERENCES strategies(id) ON DELETE SET NULL,
   symbol TEXT,
   sqx_name TEXT NOT NULL,
   mql5_name TEXT,
@@ -43,6 +44,19 @@ CREATE TABLE IF NOT EXISTS strategies (
   created_at TEXT NOT NULL,
   UNIQUE(sqx_name, account_login)
 );
+
+CREATE TABLE IF NOT EXISTS strategy_account_lineage (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  strategy_id INTEGER NOT NULL REFERENCES strategies(id) ON DELETE CASCADE,
+  account_login TEXT NOT NULL,
+  role TEXT NOT NULL CHECK(role IN ('current','predecessor')),
+  source TEXT NOT NULL DEFAULT 'dashboard',
+  created_at TEXT NOT NULL,
+  UNIQUE(strategy_id, account_login)
+);
+
+CREATE INDEX IF NOT EXISTS idx_strategy_lineage_account
+ON strategy_account_lineage(strategy_id, role, account_login);
 
 CREATE TABLE IF NOT EXISTS strategy_aliases (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,10 +79,49 @@ CREATE TABLE IF NOT EXISTS mappings (
   symbol TEXT,
   magic INTEGER,
   comment_pattern TEXT,
+  role TEXT NOT NULL DEFAULT 'live',
   confidence REAL NOT NULL DEFAULT 1.0,
   confirmed INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
   UNIQUE(strategy_id, terminal_id, symbol, magic, comment_pattern)
+);
+
+CREATE TABLE IF NOT EXISTS imported_history_trades (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_account TEXT NOT NULL,
+  broker TEXT NOT NULL,
+  source_file TEXT NOT NULL,
+  source_ticket INTEGER NOT NULL,
+  symbol TEXT NOT NULL,
+  volume REAL NOT NULL,
+  direction TEXT NOT NULL,
+  open_price REAL NOT NULL,
+  open_time_msc INTEGER NOT NULL,
+  close_price REAL NOT NULL,
+  close_time_msc INTEGER NOT NULL,
+  commission REAL NOT NULL DEFAULT 0,
+  swap REAL NOT NULL DEFAULT 0,
+  profit REAL NOT NULL DEFAULT 0,
+  stop_loss REAL,
+  take_profit REAL,
+  magic INTEGER NOT NULL DEFAULT 0,
+  comment TEXT NOT NULL DEFAULT '',
+  raw_line TEXT NOT NULL,
+  imported_at TEXT NOT NULL,
+  UNIQUE(source_account, broker, source_ticket)
+);
+
+CREATE INDEX IF NOT EXISTS idx_imported_history_identity
+ON imported_history_trades(source_account, symbol, magic, comment);
+
+CREATE TABLE IF NOT EXISTS account_migration_audits (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  canonical_strategy_id INTEGER NOT NULL REFERENCES strategies(id) ON DELETE CASCADE,
+  old_account TEXT NOT NULL,
+  new_account TEXT NOT NULL,
+  source_file TEXT,
+  summary_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS deals (
@@ -330,6 +383,7 @@ def session(path: Path | None = None) -> Iterator[sqlite3.Connection]:
 
 def init_db(path: Path | None = None) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    EGT_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
     with session(path) as conn:
         conn.executescript(SCHEMA)
         strategy_columns = {
@@ -341,6 +395,28 @@ def init_db(path: Path | None = None) -> None:
             )
         if "last_observed_at" not in strategy_columns:
             conn.execute("ALTER TABLE strategies ADD COLUMN last_observed_at TEXT")
+        if "identity_strategy_id" not in strategy_columns:
+            conn.execute(
+                """ALTER TABLE strategies
+                   ADD COLUMN identity_strategy_id INTEGER REFERENCES strategies(id)"""
+            )
+        conn.execute(
+            "UPDATE strategies SET identity_strategy_id=id WHERE identity_strategy_id IS NULL"
+        )
+        conn.execute(
+            """INSERT OR IGNORE INTO strategy_account_lineage(
+                 strategy_id,account_login,role,source,created_at
+               )
+               SELECT id,account_login,'current','schema_migration',?
+               FROM strategies
+               WHERE account_login IS NOT NULL AND account_login<>''""",
+            (utcnow(),),
+        )
+        mapping_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(mappings)").fetchall()
+        }
+        if "role" not in mapping_columns:
+            conn.execute("ALTER TABLE mappings ADD COLUMN role TEXT NOT NULL DEFAULT 'live'")
         sqx_link_columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(sqx_strategy_links)").fetchall()
         }
