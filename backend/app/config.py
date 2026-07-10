@@ -32,7 +32,7 @@ MT5_TERMINAL_EXE = Path(
     )
 )
 MT5_TESTER_TIMEOUT = int(os.environ.get("MT5_TESTER_TIMEOUT", "1800"))
-BACKTEST_START_DATE = os.environ.get("MT5_BACKTEST_START_DATE", "2019-01-01")
+BACKTEST_START_DATE = os.environ.get("MT5_BACKTEST_START_DATE", "2016-01-01")
 DARWINEX_TERMINAL = Path(
     os.environ.get(
         "DARWINEX_DATA_DIR",

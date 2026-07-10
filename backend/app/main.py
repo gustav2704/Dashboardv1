@@ -8,8 +8,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -90,9 +90,23 @@ class StrategyMerge(BaseModel):
     dry_run: bool = True
 
 
+class StrategyNoteUpdate(BaseModel):
+    note: str = Field(max_length=10_000)
+
+
+class StrategySelectionUpdate(BaseModel):
+    selection: bool
+
+
 class SQXLinkReconcile(BaseModel):
     canonical_id: int = Field(gt=0)
     source_id: int = Field(gt=0)
+    dry_run: bool = True
+
+
+class DeploymentIdentityLink(BaseModel):
+    deployment_id: int = Field(gt=0)
+    canonical_id: int = Field(gt=0)
     dry_run: bool = True
 
 
@@ -150,10 +164,15 @@ def _matching_mapping(mappings: list[Any], item: dict[str, Any]) -> Any | None:
     return None
 
 
-def _annotate_trade_source(trade: dict[str, Any], mapping: Any, role: str) -> dict[str, Any]:
+def _annotate_trade_source(
+    trade: dict[str, Any],
+    mapping: Any,
+    role: str,
+    account_fallback: str = "",
+) -> dict[str, Any]:
     return {
         **trade,
-        "source_account": mapping["account_login"] or "",
+        "source_account": mapping["account_login"] or account_fallback,
         "source_role": role,
     }
 
@@ -359,11 +378,19 @@ def dashboard_data(window: str = "all", start: str | None = None, end: str | Non
             ).fetchone()
             magic_numbers = sorted({int(mapping["magic"]) for mapping in live_mappings if mapping["magic"] is not None})
             strategy_trades = sorted(
-                [t for t in trades_all if any(_matches(m, t) for m in live_mappings)],
+                [
+                    _annotate_trade_source(t, mapping, "live", effective_account)
+                    for t in trades_all
+                    if (mapping := _matching_mapping(live_mappings, t))
+                ],
                 key=lambda t: (int(t.get("close_time_msc", 0)), int(t.get("deal_ticket", 0))),
             )
             historical_mt5_trades = sorted(
-                [t for t in trades_all if any(_matches(m, t) for m in historical_mappings)],
+                [
+                    _annotate_trade_source(t, mapping, "historical")
+                    for t in trades_all
+                    if (mapping := _matching_mapping(historical_mappings, t))
+                ],
                 key=lambda t: (int(t.get("close_time_msc", 0)), int(t.get("deal_ticket", 0))),
             )
             imported_trades = imported_history_trades(conn, historical_mappings)
@@ -383,6 +410,30 @@ def dashboard_data(window: str = "all", start: str | None = None, end: str | Non
             current = compute_metrics(trades, positions)
             historical_metrics = compute_metrics(historical_trades)
             lifetime_metrics = compute_metrics(trades + historical_trades, positions)
+            known_accounts = {
+                str(account).strip()
+                for account in (
+                    [effective_account]
+                    + lineage_accounts["current"]
+                    + lineage_accounts["predecessor"]
+                )
+                if str(account).strip()
+            }
+            account_trades = {
+                account: [
+                    trade
+                    for trade in trades + historical_trades
+                    if str(trade.get("source_account") or "") == account
+                ]
+                for account in known_accounts
+            }
+            account_metrics = {
+                account: compute_metrics(
+                    account_trades[account],
+                    positions if account == effective_account else [],
+                )
+                for account in sorted(known_accounts)
+            }
             baselines = _latest_baselines(conn, identity_id)
             sqx_analytics = _latest_sqx_analytics(conn, identity_id)
             baseline = pick_baseline(baselines)
@@ -404,13 +455,26 @@ def dashboard_data(window: str = "all", start: str | None = None, end: str | Non
                 state = "active"
             else:
                 state = "no_recent_trades"
+            origin_tokens = set(str(strategy["origin"] or "").split("+"))
+            catalog_payload = str(strategy["catalog_json"] or "").strip()
+            try:
+                has_catalog_data = bool(json.loads(catalog_payload or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                has_catalog_data = bool(catalog_payload)
+            has_catalog = (
+                strategy["catalog_row"] is not None
+                or has_catalog_data
+                or "excel" in origin_tokens
+            )
             if sqx_link and live_mappings:
                 link_state = "linked"
             elif sqx_link and identity_id in pending_candidates:
                 link_state = "candidate"
+            elif sqx_link and has_catalog:
+                link_state = "sqx_catalog"
             elif sqx_link:
                 link_state = "sqx_only"
-            elif live_mappings or "mt5" in str(strategy["origin"] or "").split("+"):
+            elif live_mappings or "mt5" in origin_tokens:
                 link_state = "mt5_only"
             else:
                 link_state = "catalog_only"
@@ -425,6 +489,9 @@ def dashboard_data(window: str = "all", start: str | None = None, end: str | Non
                     "account_login": effective_account,
                     "origin": strategy["origin"],
                     "last_observed_at": strategy["last_observed_at"],
+                    "note": strategy["note"],
+                    "note_updated_at": strategy["note_updated_at"],
+                    "selection": bool(strategy["monitoring_selected"]),
                     "state": state,
                     "link_state": link_state,
                     "sqx": dict(sqx_link) if sqx_link else None,
@@ -432,6 +499,7 @@ def dashboard_data(window: str = "all", start: str | None = None, end: str | Non
                     "metrics": current,
                     "historical_metrics": historical_metrics,
                     "lifetime_metrics": lifetime_metrics,
+                    "account_metrics": account_metrics,
                     "health": health,
                     "risk_guard": risk_guard,
                     "baseline": baseline,
@@ -463,7 +531,7 @@ def dashboard_data(window: str = "all", start: str | None = None, end: str | Non
     }
     integration = {
         state: sum(1 for item in output if item["link_state"] == state)
-        for state in ("linked", "candidate", "sqx_only", "mt5_only", "catalog_only")
+        for state in ("linked", "candidate", "sqx_catalog", "sqx_only", "mt5_only", "catalog_only")
     }
     return {"generated_at": utcnow(), "window": window, "totals": totals, "integration": integration, "account": dict(account) if account else None, "terminals": terminal_rows, "strategies": output}
 
@@ -591,6 +659,42 @@ def get_strategy(strategy_id: int, window: str = "all", start: str | None = None
     raise HTTPException(404, "Strategy not found")
 
 
+@app.put("/api/strategies/{strategy_id}/note")
+def put_strategy_note(
+    strategy_id: int, payload: StrategyNoteUpdate
+) -> dict[str, Any]:
+    updated_at = utcnow()
+    with session() as conn:
+        result = conn.execute(
+            "UPDATE strategies SET note=?,note_updated_at=? WHERE id=?",
+            (payload.note, updated_at, strategy_id),
+        )
+        if result.rowcount == 0:
+            raise HTTPException(404, "Strategy not found")
+    return {
+        "strategy_id": strategy_id,
+        "note": payload.note,
+        "note_updated_at": updated_at,
+    }
+
+
+@app.put("/api/strategies/{strategy_id}/selection")
+def put_strategy_selection(
+    strategy_id: int, payload: StrategySelectionUpdate
+) -> dict[str, Any]:
+    with session() as conn:
+        result = conn.execute(
+            "UPDATE strategies SET monitoring_selected=? WHERE id=?",
+            (int(payload.selection), strategy_id),
+        )
+        if result.rowcount == 0:
+            raise HTTPException(404, "Strategy not found")
+    return {
+        "strategy_id": strategy_id,
+        "selection": payload.selection,
+    }
+
+
 @app.get("/api/strategies/{strategy_id}/deletion-impact")
 def get_strategy_deletion_impact(strategy_id: int) -> dict[str, Any]:
     try:
@@ -640,6 +744,30 @@ def reconcile_sqx_identity(payload: SQXLinkReconcile) -> dict[str, Any]:
         raise HTTPException(404, exc.args[0]) from exc
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/api/strategy-identities/deployment-suggestions")
+def strategy_deployment_suggestions() -> list[dict[str, Any]]:
+    return strategy_identity.deployment_link_suggestions()
+
+
+@app.post("/api/strategy-identities/link-deployment")
+def link_strategy_deployment(payload: DeploymentIdentityLink) -> dict[str, Any]:
+    try:
+        return strategy_identity.link_deployment_identity(
+            payload.deployment_id,
+            payload.canonical_id,
+            payload.dry_run,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, exc.args[0]) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/strategy-identities/auto-link-deployments")
+def auto_link_strategy_deployments() -> dict[str, Any]:
+    return strategy_identity.auto_link_deployments()
 
 
 @app.post("/api/history/import/tradebuddy")
@@ -923,7 +1051,12 @@ def mapping_suggestions() -> list[dict[str, Any]]:
 
 @app.post("/api/mappings/confirm")
 def mapping_confirm(payload: MappingConfirm) -> dict[str, Any]:
-    return confirm_mapping(payload.model_dump())
+    try:
+        return confirm_mapping(payload.model_dump())
+    except KeyError as exc:
+        raise HTTPException(404, exc.args[0]) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @app.post("/api/mappings/auto-confirm")
@@ -947,7 +1080,9 @@ def sqx_databanks() -> dict[str, Any]:
 @app.post("/api/sqx/sync")
 def sqx_sync(payload: SQXSync) -> dict[str, Any]:
     try:
-        return sqx_connector.sync(payload.project, payload.databank)
+        result = sqx_connector.sync(payload.project, payload.databank)
+        result["deployment_links"] = strategy_identity.auto_link_deployments()
+        return result
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     except sqx_connector.SQXUnavailable as exc:
@@ -1147,10 +1282,22 @@ if FRONTEND_DIST.is_dir():
     assets = FRONTEND_DIST / "assets"
     if assets.is_dir():
         app.mount("/assets", StaticFiles(directory=assets), name="assets")
+    index_headers = {
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+        "Expires": "0",
+    }
 
-    @app.get("/{path:path}", include_in_schema=False)
+    @app.get("/", include_in_schema=False, response_model=None)
+    def spa_root(request: Request) -> FileResponse | RedirectResponse:
+        if not request.url.query:
+            version = int((FRONTEND_DIST / "index.html").stat().st_mtime)
+            return RedirectResponse(f"/?v={version}", headers=index_headers)
+        return FileResponse(FRONTEND_DIST / "index.html", headers=index_headers)
+
+    @app.get("/{path:path}", include_in_schema=False, response_model=None)
     def spa(path: str) -> FileResponse:
         target = FRONTEND_DIST / path
         if path and target.is_file():
             return FileResponse(target)
-        return FileResponse(FRONTEND_DIST / "index.html")
+        return FileResponse(FRONTEND_DIST / "index.html", headers=index_headers)

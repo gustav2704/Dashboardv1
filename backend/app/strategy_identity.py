@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import defaultdict
+from difflib import SequenceMatcher
 from typing import Any, Iterable
 
 from .db import session, utcnow
@@ -200,6 +201,268 @@ def _strategy_payload(row: Any) -> dict[str, Any]:
     }
 
 
+def _decorated_identity_key(value: str) -> str:
+    return normalize(value).replace("wfmatrix", "")
+
+
+def _decorated_name_match(left: str, right: str) -> bool:
+    left_key = _decorated_identity_key(left)
+    right_key = _decorated_identity_key(right)
+    return bool(left_key and left_key == right_key)
+
+
+def deployment_link_suggestions() -> list[dict[str, Any]]:
+    """Find account-specific MT5 rows that can inherit a canonical SQX link."""
+    with session() as conn:
+        canonical_rows = conn.execute(
+            """SELECT s.*,l.strategy_name AS linked_name,l.symbol AS linked_symbol,
+                      l.project,l.databank
+               FROM strategies s
+               JOIN sqx_strategy_links l ON l.strategy_id=s.id
+               WHERE s.retired=0 AND l.missing_from_sqx_at IS NULL"""
+        ).fetchall()
+        deployment_rows = conn.execute(
+            """SELECT s.*
+               FROM strategies s
+               WHERE s.retired=0
+                 AND COALESCE(s.identity_strategy_id,s.id)=s.id
+                 AND NOT EXISTS(
+                   SELECT 1 FROM sqx_strategy_links l WHERE l.strategy_id=s.id
+                 )
+                 AND EXISTS(
+                   SELECT 1 FROM mappings m
+                   WHERE m.strategy_id=s.id AND m.confirmed=1 AND m.role='live'
+                 )"""
+        ).fetchall()
+        aliases: dict[int, list[str]] = defaultdict(list)
+        for row in conn.execute(
+            "SELECT strategy_id,alias FROM strategy_aliases ORDER BY id"
+        ).fetchall():
+            aliases[int(row["strategy_id"])].append(str(row["alias"]))
+
+    suggestions: list[dict[str, Any]] = []
+    for deployment in deployment_rows:
+        deployment_names = [
+            str(deployment["sqx_name"] or ""),
+            str(deployment["mql5_name"] or ""),
+            *aliases.get(int(deployment["id"]), []),
+        ]
+        signature = next(
+            (
+                version_signature(name)
+                for name in deployment_names
+                if version_signature(name)
+            ),
+            (),
+        )
+        if not signature:
+            continue
+        family = symbol_family(str(deployment["symbol"] or ""))
+        candidates = []
+        for canonical in canonical_rows:
+            canonical_id = int(canonical["identity_strategy_id"] or canonical["id"])
+            if canonical_id != int(canonical["id"]):
+                continue
+            canonical_family = symbol_family(
+                str(canonical["linked_symbol"] or canonical["symbol"] or "")
+            )
+            canonical_names = [
+                str(canonical["linked_name"] or ""),
+                str(canonical["sqx_name"] or ""),
+                str(canonical["mql5_name"] or ""),
+                *aliases.get(int(canonical["id"]), []),
+            ]
+            if family != canonical_family:
+                continue
+            if signature not in {
+                version_signature(name) for name in canonical_names if name
+            }:
+                continue
+            ratio = max(
+                SequenceMatcher(None, normalize(left), normalize(right)).ratio()
+                for left in deployment_names
+                for right in canonical_names
+                if left and right
+            )
+            exact_alias = bool(
+                {normalize(name) for name in deployment_names if name}
+                & {normalize(name) for name in canonical_names if name}
+            )
+            score = min(1.0, 0.75 + 0.20 * ratio + (0.05 if exact_alias else 0.0))
+            candidates.append(
+                {
+                    "canonical_id": int(canonical["id"]),
+                    "name": str(canonical["linked_name"]),
+                    "account_login": str(canonical["account_login"] or ""),
+                    "score": round(score, 3),
+                    "evidence": [
+                        "symbol_family",
+                        "version_signature",
+                        *(["exact_alias"] if exact_alias else ["name_similarity"]),
+                    ],
+                }
+            )
+        candidates.sort(key=lambda item: item["score"], reverse=True)
+        runner_up = candidates[1]["score"] if len(candidates) > 1 else 0.0
+        safe = bool(
+            candidates
+            and candidates[0]["score"] >= 0.85
+            and candidates[0]["score"] - runner_up >= 0.05
+        )
+        suggestions.append(
+            {
+                "deployment_id": int(deployment["id"]),
+                "name": str(deployment["mql5_name"] or deployment["sqx_name"]),
+                "account_login": str(deployment["account_login"] or ""),
+                "symbol": str(deployment["symbol"] or ""),
+                "version_signature": list(signature),
+                "safe": safe,
+                "candidates": candidates[:5],
+            }
+        )
+    return suggestions
+
+
+def link_deployment_identity(
+    deployment_id: int,
+    canonical_id: int,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Attach one MT5 deployment to an SQX identity without merging accounts."""
+    with session() as conn:
+        deployment = conn.execute(
+            "SELECT * FROM strategies WHERE id=? AND retired=0",
+            (deployment_id,),
+        ).fetchone()
+        canonical = conn.execute(
+            "SELECT * FROM strategies WHERE id=? AND retired=0",
+            (canonical_id,),
+        ).fetchone()
+        if not deployment or not canonical:
+            raise KeyError("Deployment or canonical strategy not found")
+        root_id = int(canonical["identity_strategy_id"] or canonical["id"])
+        if root_id != canonical_id:
+            raise ValueError("Canonical strategy must be the root identity")
+        current_identity = int(
+            deployment["identity_strategy_id"] or deployment["id"]
+        )
+        if current_identity == canonical_id and deployment_id != canonical_id:
+            return {
+                "deployment_id": deployment_id,
+                "canonical_id": canonical_id,
+                "dry_run": dry_run,
+                "already_linked": True,
+            }
+        if deployment_id == canonical_id:
+            raise ValueError("A deployment cannot be attached to itself")
+        link = conn.execute(
+            """SELECT * FROM sqx_strategy_links
+               WHERE strategy_id=? AND missing_from_sqx_at IS NULL""",
+            (canonical_id,),
+        ).fetchone()
+        if not link:
+            raise ValueError("Canonical strategy does not have a current SQX link")
+        if conn.execute(
+            "SELECT 1 FROM sqx_strategy_links WHERE strategy_id=?",
+            (deployment_id,),
+        ).fetchone():
+            raise ValueError("Deployment already owns an SQX link")
+        deployment_family = symbol_family(str(deployment["symbol"] or ""))
+        canonical_family = symbol_family(
+            str(link["symbol"] or canonical["symbol"] or "")
+        )
+        if not deployment_family or deployment_family != canonical_family:
+            raise ValueError("Deployment and canonical strategy use different symbol families")
+        deployment_signature = next(
+            (
+                version_signature(str(name))
+                for name in (deployment["mql5_name"], deployment["sqx_name"])
+                if name and version_signature(str(name))
+            ),
+            (),
+        )
+        canonical_signature = version_signature(str(link["strategy_name"]))
+        if not deployment_signature or deployment_signature != canonical_signature:
+            raise ValueError("Deployment and canonical strategy have different version signatures")
+        preview = {
+            "deployment_id": deployment_id,
+            "canonical_id": canonical_id,
+            "deployment_account": str(deployment["account_login"] or ""),
+            "deployment_symbol": str(deployment["symbol"] or ""),
+            "canonical_name": str(link["strategy_name"]),
+            "evidence": ["symbol_family", "version_signature"],
+            "dry_run": dry_run,
+            "already_linked": False,
+        }
+        if dry_run:
+            return preview
+        now = utcnow()
+        conn.execute(
+            """UPDATE strategies SET identity_strategy_id=?,origin=?,last_observed_at=COALESCE(last_observed_at,?)
+               WHERE id=?""",
+            (
+                canonical_id,
+                origin_with(str(deployment["origin"] or ""), "mt5", "sqx"),
+                now,
+                deployment_id,
+            ),
+        )
+        conn.execute(
+            "UPDATE strategies SET identity_strategy_id=COALESCE(identity_strategy_id,id) WHERE id=?",
+            (canonical_id,),
+        )
+        for alias in (
+            deployment["sqx_name"],
+            deployment["mql5_name"],
+        ):
+            add_alias(conn, canonical_id, alias, "deployment", now)
+        for alias in (
+            link["strategy_name"],
+            canonical["sqx_name"],
+            canonical["mql5_name"],
+        ):
+            add_alias(conn, deployment_id, alias, "canonical", now)
+        account = str(deployment["account_login"] or "").strip()
+        if account:
+            conn.execute(
+                """INSERT INTO strategy_account_lineage(
+                     strategy_id,account_login,role,source,created_at
+                   ) VALUES(?,?,'current','identity_match',?)
+                   ON CONFLICT(strategy_id,account_login) DO UPDATE SET
+                     role='current',source='identity_match'""",
+                (deployment_id, account, now),
+            )
+        return {**preview, "dry_run": False}
+
+
+def auto_link_deployments() -> dict[str, Any]:
+    linked = 0
+    errors: list[dict[str, Any]] = []
+    suggestions = deployment_link_suggestions()
+    for item in suggestions:
+        if not item["safe"] or not item["candidates"]:
+            continue
+        try:
+            link_deployment_identity(
+                int(item["deployment_id"]),
+                int(item["candidates"][0]["canonical_id"]),
+                dry_run=False,
+            )
+            linked += 1
+        except (KeyError, ValueError) as exc:
+            errors.append(
+                {
+                    "deployment_id": item["deployment_id"],
+                    "reason": str(exc),
+                }
+            )
+    return {
+        "linked": linked,
+        "review_required": sum(not item["safe"] for item in suggestions),
+        "errors": errors,
+    }
+
+
 def conflicts() -> dict[str, Any]:
     with session() as conn:
         strategies = conn.execute(
@@ -357,8 +620,9 @@ def _merge_impact(
             FROM backtest_batches b
             JOIN backtest_batch_items i ON i.batch_id=b.id
             WHERE i.strategy_id IN ({placeholders})
+              AND i.status IN ({','.join('?' for _ in OPEN_BATCH_STATES)})
               AND b.status IN ({','.join('?' for _ in OPEN_BATCH_STATES)})""",
-        (*requested, *sorted(OPEN_BATCH_STATES)),
+        (*requested, *sorted(OPEN_BATCH_STATES), *sorted(OPEN_BATCH_STATES)),
     ).fetchone()[0]
     if active_runs or open_batches:
         raise ValueError("Cannot merge while a related backtest or batch is active")
@@ -849,6 +1113,10 @@ def _reconciliation_evidence(
     source_version = version_signature(str(source_link["strategy_name"]))
     if not canonical_version or canonical_version != source_version:
         raise ValueError("SQX links do not share an exact version signature")
+    decorated_name_match = _decorated_name_match(
+        str(canonical_link["strategy_name"]),
+        str(source_link["strategy_name"]),
+    )
 
     lineage_match = int(
         strategies[source_id]["identity_strategy_id"] or source_id
@@ -873,7 +1141,8 @@ def _reconciliation_evidence(
     expert_hashes_match = bool(
         canonical_hash and source_hash and canonical_hash == source_hash
     )
-    if not lineage_match and not parameters_match:
+    hash_backed_name_match = decorated_name_match and expert_hashes_match
+    if not lineage_match and not parameters_match and not hash_backed_name_match:
         raise ValueError(
             "SQX reconciliation requires an explicit identity lineage or an "
             "identical parameter fingerprint"
@@ -892,6 +1161,7 @@ def _reconciliation_evidence(
         "source_link": dict(source_link),
         "lineage_match": lineage_match,
         "parameters_match": parameters_match,
+        "decorated_name_match": decorated_name_match,
         "expert_hashes_match": expert_hashes_match,
         "parameter_fingerprint": canonical_parameters if parameters_match else None,
         "expert_hash": canonical_hash if expert_hashes_match else None,

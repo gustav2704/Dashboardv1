@@ -41,6 +41,9 @@ CREATE TABLE IF NOT EXISTS strategies (
   retired INTEGER NOT NULL DEFAULT 0,
   catalog_row INTEGER,
   catalog_json TEXT NOT NULL DEFAULT '{}',
+  note TEXT NOT NULL DEFAULT '',
+  note_updated_at TEXT,
+  monitoring_selected INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   UNIQUE(sqx_name, account_login)
 );
@@ -399,6 +402,17 @@ def init_db(path: Path | None = None) -> None:
             conn.execute(
                 """ALTER TABLE strategies
                    ADD COLUMN identity_strategy_id INTEGER REFERENCES strategies(id)"""
+            )
+        if "note" not in strategy_columns:
+            conn.execute(
+                "ALTER TABLE strategies ADD COLUMN note TEXT NOT NULL DEFAULT ''"
+            )
+        if "note_updated_at" not in strategy_columns:
+            conn.execute("ALTER TABLE strategies ADD COLUMN note_updated_at TEXT")
+        if "monitoring_selected" not in strategy_columns:
+            conn.execute(
+                """ALTER TABLE strategies
+                   ADD COLUMN monitoring_selected INTEGER NOT NULL DEFAULT 0"""
             )
         conn.execute(
             "UPDATE strategies SET identity_strategy_id=id WHERE identity_strategy_id IS NULL"

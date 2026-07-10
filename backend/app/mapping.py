@@ -14,20 +14,24 @@ def normalize(value: str) -> str:
 
 def symbol_family(value: str) -> str:
     symbol = normalize(value)
-    if symbol.startswith(("ger40", "de40", "dax", "deuidx")):
-        return "dax"
-    if symbol.startswith(("us100", "nas100", "naq", "ndx", "usatech")):
-        return "naq"
-    if symbol.startswith(("xau", "gold")):
-        return "xau"
-    if symbol.startswith(("us30", "usa30", "dj30", "dow")):
-        return "us30"
+    families = {
+        "dax": ("ger40", "de40", "dax", "deuidx"),
+        "naq": ("us100", "nas100", "naq", "ndx", "usatech"),
+        "xau": ("xau", "gold"),
+        "us30": ("us30", "ws30", "usa30", "dj30", "dow"),
+    }
+    for family, prefixes in families.items():
+        if symbol.startswith(prefixes):
+            return family
     return symbol
 
 
 def version_signature(value: str) -> tuple[int, ...]:
     matches = []
-    for match in re.finditer(r"(?<!\d)(\d+)[._](\d+)[._](\d+)", value):
+    for match in re.finditer(
+        r"(?<![a-zA-Z0-9])(\d+)[._](\d+)[._](\d+)",
+        value,
+    ):
         parts = [int(match.group(1)), int(match.group(2)), int(match.group(3))]
         suffix = value[match.end():]
         while extra := re.match(r"(?:[._](\d+)|\((\d+)\))", suffix):
@@ -50,9 +54,31 @@ def _prefix_score(left: str, right: str) -> float:
     return common / min(len(left), len(right))
 
 
-def _candidate(strategy: Any, item: Any) -> dict[str, Any] | None:
-    if strategy["account_login"] and item["account_login"] and strategy["account_login"] != item["account_login"]:
-        return None
+def _aliases_by_strategy(conn: Any) -> dict[int, list[str]]:
+    identity_by_strategy = {
+        int(row["id"]): int(row["identity_strategy_id"] or row["id"])
+        for row in conn.execute(
+            "SELECT id,identity_strategy_id FROM strategies"
+        ).fetchall()
+    }
+    aliases_by_identity: dict[int, list[str]] = {}
+    for row in conn.execute(
+        "SELECT strategy_id,alias FROM strategy_aliases ORDER BY id"
+    ).fetchall():
+        strategy_id = int(row["strategy_id"])
+        identity_id = identity_by_strategy.get(strategy_id, strategy_id)
+        aliases_by_identity.setdefault(identity_id, []).append(str(row["alias"]))
+    return {
+        strategy_id: aliases_by_identity.get(identity_id, [])
+        for strategy_id, identity_id in identity_by_strategy.items()
+    }
+
+
+def _candidate(
+    strategy: Any,
+    item: Any,
+    aliases: list[str] | tuple[str, ...] = (),
+) -> dict[str, Any] | None:
     if symbol_family(strategy["symbol"] or "") != symbol_family(item["symbol"] or ""):
         return None
 
@@ -65,7 +91,11 @@ def _candidate(strategy: Any, item: Any) -> dict[str, Any] | None:
     observed_signatures = {
         signature for value in observed_names if (signature := version_signature(value))
     }
-    names = [strategy["sqx_name"] or "", strategy["mql5_name"] or ""]
+    names = [
+        strategy["sqx_name"] or "",
+        strategy["mql5_name"] or "",
+        *aliases,
+    ]
     name_signatures = [version_signature(name) for name in names]
     name_score = max(
         SequenceMatcher(None, normalize(name), value).ratio()
@@ -90,11 +120,36 @@ def _candidate(strategy: Any, item: Any) -> dict[str, Any] | None:
         score = max(score, 0.90)
     if score < 0.45:
         return None
+    account_match = bool(
+        strategy["account_login"]
+        and item["account_login"]
+        and strategy["account_login"] == item["account_login"]
+    )
+    identity_strategy_id = (
+        strategy["identity_strategy_id"]
+        if "identity_strategy_id" in strategy.keys()
+        else None
+    )
+    canonical_id = int(identity_strategy_id or strategy["id"])
+    evidence = ["symbol_family"]
+    if comment_signature_match:
+        evidence.append("version_signature")
+    if magic_signature_match:
+        evidence.append("magic_signature")
+    if account_match:
+        evidence.append("account_deployment")
     return {
-        "strategy_id": strategy["id"],
+        "strategy_id": canonical_id,
         "name": strategy["sqx_name"],
         "score": round(min(score, 1.0), 3),
         "signature_match": signature_match,
+        "account_match": account_match,
+        "deployment_required": bool(
+            item["account_login"]
+            and strategy["account_login"]
+            and strategy["account_login"] != item["account_login"]
+        ),
+        "evidence": evidence,
         "expert_name": item.get("expert_names", [None])[0] if item.get("expert_names") else None,
     }
 
@@ -161,6 +216,7 @@ def suggestions() -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     with session() as conn:
         strategies = conn.execute("SELECT * FROM strategies WHERE retired=0").fetchall()
+        aliases = _aliases_by_strategy(conn)
         observed = _observed(conn)
         mapped = conn.execute(
             "SELECT terminal_id,symbol,magic,comment_pattern FROM mappings WHERE confirmed=1 AND role='live'"
@@ -179,11 +235,27 @@ def suggestions() -> list[dict[str, Any]]:
                     terminal_experts.get(item["terminal_id"], []),
                 ),
             }
-            candidates = []
+            candidates_by_identity: dict[int, dict[str, Any]] = {}
             for strategy in strategies:
-                candidate = _candidate(strategy, item_data)
+                candidate = _candidate(
+                    strategy,
+                    item_data,
+                    aliases.get(int(strategy["id"]), []),
+                )
                 if candidate:
-                    candidates.append(candidate)
+                    identity_id = int(candidate["strategy_id"])
+                    current = candidates_by_identity.get(identity_id)
+                    if (
+                        current is None
+                        or candidate["score"] > current["score"]
+                        or (
+                            candidate["score"] == current["score"]
+                            and candidate["account_match"]
+                            and not current["account_match"]
+                        )
+                    ):
+                        candidates_by_identity[identity_id] = candidate
+            candidates = list(candidates_by_identity.values())
             candidates.sort(key=lambda candidate: candidate["score"], reverse=True)
             top = candidates[0] if candidates else None
             runner_up = candidates[1]["score"] if len(candidates) > 1 else 0.0
@@ -229,6 +301,7 @@ def ensure_mt5_strategies() -> dict[str, int]:
             "SELECT terminal_id,symbol,magic,comment_pattern FROM mappings WHERE confirmed=1 AND role='live'"
         ).fetchall()
         strategies = conn.execute("SELECT * FROM strategies WHERE retired=0").fetchall()
+        aliases = _aliases_by_strategy(conn)
         for item in _observed(conn):
             if _is_mapped(item, mappings):
                 conn.execute(
@@ -257,6 +330,10 @@ def ensure_mt5_strategies() -> dict[str, int]:
                 in {
                     normalize(strategy["mql5_name"] or ""),
                     normalize(strategy["sqx_name"] or ""),
+                    *(
+                        normalize(alias)
+                        for alias in aliases.get(int(strategy["id"]), [])
+                    ),
                 }
             ]
             if len(exact) == 1:
@@ -268,6 +345,10 @@ def ensure_mt5_strategies() -> dict[str, int]:
                     (now, strategy_id),
                 )
                 linked += 1
+            elif len(exact) > 1:
+                # A shared alias is not enough evidence to pick an identity.
+                # Leave the observation unmapped for manual review.
+                continue
             else:
                 base_name = observed_name or f"{item['symbol']} Magic {item['magic']}"
                 display_name = base_name
@@ -296,6 +377,7 @@ def ensure_mt5_strategies() -> dict[str, int]:
                 strategies = conn.execute(
                     "SELECT * FROM strategies WHERE retired=0"
                 ).fetchall()
+                aliases = _aliases_by_strategy(conn)
 
             conn.execute(
                 """INSERT OR IGNORE INTO mappings(
@@ -321,26 +403,144 @@ def ensure_mt5_strategies() -> dict[str, int]:
     return {"created": created, "linked": linked, "safe_matches": safe_matches}
 
 
+def _record_alias(
+    conn: Any,
+    strategy_id: int,
+    alias: str,
+    source: str,
+    created_at: str,
+) -> None:
+    text = str(alias or "").strip()
+    normalized = normalize(text)
+    if not normalized:
+        return
+    conn.execute(
+        """INSERT INTO strategy_aliases(
+             strategy_id,alias,normalized_alias,source,created_at
+           ) VALUES(?,?,?,?,?)
+           ON CONFLICT(strategy_id,normalized_alias,source)
+           DO UPDATE SET alias=excluded.alias""",
+        (strategy_id, text, normalized, source, created_at),
+    )
+
+
+def _deployment_for_mapping(
+    conn: Any,
+    strategy_id: int,
+    account_login: str,
+    symbol: str,
+    observed_name: str,
+    now: str,
+) -> tuple[int, int]:
+    selected = conn.execute(
+        "SELECT * FROM strategies WHERE id=? AND retired=0",
+        (strategy_id,),
+    ).fetchone()
+    if not selected:
+        raise KeyError(f"Strategy {strategy_id} not found")
+    canonical_id = int(selected["identity_strategy_id"] or selected["id"])
+    canonical = conn.execute(
+        "SELECT * FROM strategies WHERE id=? AND retired=0",
+        (canonical_id,),
+    ).fetchone()
+    if not canonical:
+        raise KeyError(f"Canonical strategy {canonical_id} not found")
+    if not account_login:
+        return int(selected["id"]), canonical_id
+    deployment = conn.execute(
+        """SELECT * FROM strategies
+           WHERE retired=0 AND account_login=?
+             AND (id=? OR identity_strategy_id=?)
+           ORDER BY CASE WHEN id=? THEN 0 ELSE 1 END,id
+           LIMIT 1""",
+        (account_login, canonical_id, canonical_id, int(selected["id"])),
+    ).fetchone()
+    if deployment:
+        deployment_id = int(deployment["id"])
+    elif str(canonical["account_login"] or "") in ("", account_login):
+        deployment_id = canonical_id
+        conn.execute(
+            """UPDATE strategies SET account_login=COALESCE(NULLIF(account_login,''),?),
+               identity_strategy_id=COALESCE(identity_strategy_id,id)
+               WHERE id=?""",
+            (account_login, canonical_id),
+        )
+    else:
+        deployment_id = int(
+            conn.execute(
+                """INSERT INTO strategies(
+                     identity_strategy_id,symbol,sqx_name,mql5_name,account_login,
+                     origin,last_observed_at,retired,catalog_json,created_at
+                   ) VALUES(?,?,?,?,?,'mt5+sqx',?,0,'{}',?)""",
+                (
+                    canonical_id,
+                    symbol or canonical["symbol"],
+                    canonical["sqx_name"],
+                    observed_name or canonical["mql5_name"],
+                    account_login,
+                    now,
+                    now,
+                ),
+            ).lastrowid
+        )
+    conn.execute(
+        """INSERT INTO strategy_account_lineage(
+             strategy_id,account_login,role,source,created_at
+           ) VALUES(?,?,'current','mapping_match',?)
+           ON CONFLICT(strategy_id,account_login) DO UPDATE SET
+             role='current',source='mapping_match'""",
+        (deployment_id, account_login, now),
+    )
+    return deployment_id, canonical_id
+
+
 def confirm_mapping(payload: dict[str, Any]) -> dict[str, Any]:
     with session() as conn:
+        now = utcnow()
+        observed_name = str(payload.get("comment_pattern", ""))
+        deployment_id, canonical_id = _deployment_for_mapping(
+            conn,
+            int(payload["strategy_id"]),
+            str(payload.get("account_login", "")),
+            str(payload.get("symbol", "")),
+            observed_name,
+            now,
+        )
         conn.execute(
             """INSERT INTO mappings(strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,role,confidence,confirmed,created_at)
                VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(strategy_id,terminal_id,symbol,magic,comment_pattern)
                DO UPDATE SET role='live',confidence=excluded.confidence,confirmed=1""",
             (
-                int(payload["strategy_id"]),
+                deployment_id,
                 int(payload["terminal_id"]),
                 str(payload.get("account_login", "")),
                 str(payload.get("symbol", "")),
                 int(payload.get("magic", 0)),
-                str(payload.get("comment_pattern", "")),
+                observed_name,
                 "live",
                 float(payload.get("confidence", 1.0)),
                 1,
-                utcnow(),
+                now,
             ),
         )
+        conn.execute(
+            """UPDATE strategies SET last_observed_at=?,
+               origin=CASE
+                 WHEN origin='sqx' THEN 'mt5+sqx'
+                 WHEN origin='excel' THEN 'mt5+excel'
+                 ELSE origin
+               END
+               WHERE id=?""",
+            (now, deployment_id),
+        )
+        _record_alias(conn, canonical_id, observed_name, "mt5_comment", now)
+        if deployment_id != canonical_id:
+            _record_alias(conn, deployment_id, observed_name, "mt5_comment", now)
         row = conn.execute("SELECT * FROM mappings WHERE id=last_insert_rowid() OR (strategy_id=? AND terminal_id=? AND symbol=? AND magic=? AND comment_pattern=?) ORDER BY id DESC LIMIT 1", (
-            int(payload["strategy_id"]), int(payload["terminal_id"]), str(payload.get("symbol", "")), int(payload.get("magic", 0)), str(payload.get("comment_pattern", ""))
+            deployment_id, int(payload["terminal_id"]), str(payload.get("symbol", "")), int(payload.get("magic", 0)), observed_name
         )).fetchone()
-    return dict(row)
+    return {
+        **dict(row),
+        "canonical_strategy_id": canonical_id,
+        "deployment_strategy_id": deployment_id,
+    }

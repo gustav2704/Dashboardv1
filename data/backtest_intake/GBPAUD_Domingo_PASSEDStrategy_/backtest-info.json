@@ -1,0 +1,16 @@
+{
+  "strategy_id": 121,
+  "confirm_sqx_identity": "No SQX link; validar por EX5 aportado por el usuario.",
+  "confirm_duplicate": true,
+  "broker": "FPM",
+  "broker_symbol": "GBPAUD",
+  "timeframe": "H1",
+  "from_date": "2016-01-01",
+  "to_date": "2026-07-08",
+  "deposit": 100000,
+  "currency": "USD",
+  "leverage": "1:100",
+  "uses_default_inputs": true,
+  "set_file": "",
+  "notes": "Duplicado intencional confirmado; mismo EX5/hash que GBPAUD_Domingo_2_65_160_REAL; parámetros por defecto."
+}

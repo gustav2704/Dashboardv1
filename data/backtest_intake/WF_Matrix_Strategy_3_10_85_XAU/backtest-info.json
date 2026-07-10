@@ -1,0 +1,16 @@
+{
+  "strategy_id": 119,
+  "confirm_sqx_identity": "No SQX link; validar por EX5 aportado por el usuario.",
+  "confirm_duplicate": "Los IDs 119 y 134 parecen apuntar al mismo EX5; confirmar si se debe validar un solo bot o ambos registros con la misma configuración.",
+  "broker": "FPM",
+  "broker_symbol": "XAUUSD.cyr",
+  "timeframe": "M15",
+  "from_date": "2016-01-01",
+  "to_date": "2026-07-08",
+  "deposit": 100000,
+  "currency": "USD",
+  "leverage": "1:100",
+  "uses_default_inputs": true,
+  "set_file": "",
+  "notes": "Duplicado intencional confirmado para IDs 119 y 134. Timeframe M15. XAU usa XAUUSD.cyr; parámetros por defecto."
+}

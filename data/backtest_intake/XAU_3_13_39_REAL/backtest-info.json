@@ -1,0 +1,16 @@
+{
+  "strategy_id": 136,
+  "confirm_sqx_identity": "Confirmar que XAU_3_13_39_REAL corresponde a XAUWF Matrix - Strategy 3.13.39dwnx.ex5",
+  "confirm_duplicate": false,
+  "broker": "FPM",
+  "broker_symbol": "XAUUSD.cyr",
+  "timeframe": "H1",
+  "from_date": "2016-01-01",
+  "to_date": "2026-07-08",
+  "deposit": 100000,
+  "currency": "USD",
+  "leverage": "1:100",
+  "uses_default_inputs": true,
+  "set_file": "",
+  "notes": "Confirmado por el usuario: XAU usa XAUUSD.cyr en FPM; parámetros por defecto."
+}

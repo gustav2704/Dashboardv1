@@ -192,6 +192,29 @@ def test_dashboard_keeps_historical_mapping_out_of_current_magic_and_metrics(tmp
     assert strategy["lifetime_metrics"]["net_profit"] == 74
     assert strategy["lifetime_metrics"]["max_consecutive_wins"] == 4
     assert strategy["lifetime_metrics"]["max_consecutive_losses"] == 4
+    assert strategy["lifetime_metrics"]["performance_months"] == 1
+    assert strategy["lifetime_metrics"]["performance_trades_per_month"] == 8
+    assert strategy["lifetime_metrics"]["trade_edge"] is not None
+    assert strategy["lifetime_metrics"]["monthly_sqn"] is not None
+    assert set(strategy["account_metrics"]) == {"100121894", "7396577"}
+    assert strategy["account_metrics"]["100121894"]["trades"] == 4
+    assert strategy["account_metrics"]["100121894"]["net_profit"] == 100
+    assert strategy["account_metrics"]["7396577"]["trades"] == 4
+    assert strategy["account_metrics"]["7396577"]["net_profit"] == -26
+
+    recent = next(
+        item for item in dashboard_data("custom", "2026-06-20", "2026-06-30")["strategies"]
+        if item["id"] == strategy_id
+    )
+    assert recent["lifetime_metrics"]["trades"] == 4
+    assert recent["lifetime_metrics"]["net_profit"] == 100
+    assert recent["lifetime_metrics"]["trade_edge"] == recent["metrics"]["trade_edge"]
+    assert recent["lifetime_metrics"]["monthly_sqn"] == recent["metrics"]["monthly_sqn"]
+    assert recent["account_metrics"]["100121894"]["trades"] == 4
+    assert recent["account_metrics"]["100121894"]["net_profit"] == 100
+    assert recent["account_metrics"]["7396577"]["trades"] == 0
+    assert recent["account_metrics"]["7396577"]["trade_edge"] is None
+    assert recent["account_metrics"]["7396577"]["monthly_sqn"] is None
     detail = get_strategy(strategy_id)
     source_accounts = {trade["source_role"]: trade["source_account"] for trade in detail["trades"]}
     assert source_accounts == {"live": "100121894", "historical": "7396577"}
@@ -266,12 +289,41 @@ def test_dashboard_reports_sqx_mt5_integration_states(tmp_path, monkeypatch):
             ("Fixture", str(tmp_path / "terminal"), now),
         ).lastrowid
         strategy_ids = {}
-        for name in ("Linked", "Candidate", "SQX only", "MT5 only", "Catalog only"):
+        fixtures = {
+            "Linked": {"origin": "sqx+excel"},
+            "Candidate": {"origin": "sqx+excel"},
+            "Strategy 5.14.40": {"origin": "sqx", "catalog_row": 23},
+            "SQX + Catalog data": {
+                "origin": "sqx",
+                "catalog_json": '{"SQX original name": "SQX + Catalog data"}',
+            },
+            "SQX + Catalog origin": {"origin": "sqx+excel"},
+            "SQX only": {"origin": "sqx"},
+            "MT5 only": {"origin": "mt5"},
+            "Catalog only": {"origin": "excel"},
+        }
+        for name, fixture in fixtures.items():
             strategy_ids[name] = conn.execute(
-                "INSERT INTO strategies(symbol,sqx_name,origin,created_at) VALUES(?,?,?,?)",
-                ("XAU", name, "mt5" if name == "MT5 only" else "excel", now),
+                """INSERT INTO strategies(
+                     symbol,sqx_name,origin,catalog_row,catalog_json,created_at
+                   ) VALUES(?,?,?,?,?,?)""",
+                (
+                    "XAU",
+                    name,
+                    fixture["origin"],
+                    fixture.get("catalog_row"),
+                    fixture.get("catalog_json", "{}"),
+                    now,
+                ),
             ).lastrowid
-        for name in ("Linked", "Candidate", "SQX only"):
+        for name in (
+            "Linked",
+            "Candidate",
+            "Strategy 5.14.40",
+            "SQX + Catalog data",
+            "SQX + Catalog origin",
+            "SQX only",
+        ):
             conn.execute(
                 """INSERT INTO sqx_strategy_links(
                      strategy_id,project,databank,strategy_name,symbol,timeframe,filter_result,last_synced_at
@@ -297,6 +349,9 @@ def test_dashboard_reports_sqx_mt5_integration_states(tmp_path, monkeypatch):
     assert states == {
         "Linked": "linked",
         "Candidate": "candidate",
+        "Strategy 5.14.40": "sqx_catalog",
+        "SQX + Catalog data": "sqx_catalog",
+        "SQX + Catalog origin": "sqx_catalog",
         "SQX only": "sqx_only",
         "MT5 only": "mt5_only",
         "Catalog only": "catalog_only",
@@ -304,6 +359,7 @@ def test_dashboard_reports_sqx_mt5_integration_states(tmp_path, monkeypatch):
     assert result["integration"] == {
         "linked": 1,
         "candidate": 1,
+        "sqx_catalog": 3,
         "sqx_only": 1,
         "mt5_only": 1,
         "catalog_only": 1,

@@ -1,0 +1,20 @@
+{
+  "generated_for": "Dashboardv1",
+  "broker": "FPM",
+  "default_from_date": "2019-01-01",
+  "default_model": "1 minute OHLC",
+  "bots": [
+    {"strategy_ids": [137], "folder": "GBPAUD_Domingo_2_65_160_REAL", "needs": ["timeframe", "broker_symbol", "dates", "parameters_or_set"]},
+    {"strategy_ids": [121], "folder": "GBPAUD_Domingo_PASSEDStrategy_", "needs": ["ex5", "timeframe", "broker_symbol", "dates", "parameters_or_set"]},
+    {"strategy_ids": [118], "folder": "Strategy_5_26_117_GER40", "needs": ["ex5", "timeframe", "dates", "parameters_or_set"]},
+    {"strategy_ids": [123], "folder": "Strategy_1_64_191_NAS100", "needs": ["ex5", "timeframe", "dates", "parameters_or_set"]},
+    {"strategy_ids": [132], "folder": "PPM_1783033200_NDX", "needs": ["ex5", "timeframe", "dates", "parameters_or_set"]},
+    {"strategy_ids": [124], "folder": "VitalSigns_SPX500", "needs": ["ex5", "broker_symbol", "timeframe", "dates", "parameters_or_set"]},
+    {"strategy_ids": [125], "folder": "Strategy_5_26_117_59-2_US30", "needs": ["ex5", "timeframe", "dates", "parameters_or_set"]},
+    {"strategy_ids": [135], "folder": "3_11_46_REAL", "needs": ["confirm_sqx_identity", "timeframe", "dates", "parameters_or_set"]},
+    {"strategy_ids": [120], "folder": "Aurum_BreakStrike", "needs": ["ex5", "timeframe", "dates", "parameters_or_set"]},
+    {"strategy_ids": [126], "folder": "BreakoutLWMA_EA_v5", "needs": ["timeframe", "dates", "parameters_or_set"]},
+    {"strategy_ids": [119, 134], "folder": "WF_Matrix_Strategy_3_10_85_XAU", "needs": ["confirm_duplicate", "timeframe", "dates", "parameters_or_set"]},
+    {"strategy_ids": [136], "folder": "XAU_3_13_39_REAL", "needs": ["confirm_sqx_identity", "timeframe", "dates", "parameters_or_set"]}
+  ]
+}

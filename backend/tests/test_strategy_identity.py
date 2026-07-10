@@ -505,6 +505,73 @@ def test_merge_reactivates_a_retired_canonical_when_duplicate_is_active(
     assert duplicate_exists is None
 
 
+def test_merge_allows_closed_items_inside_a_paused_batch(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "paused-merge.db")
+    db.init_db()
+    now = db.utcnow()
+    with db.session() as conn:
+        canonical = conn.execute(
+            """INSERT INTO strategies(symbol,sqx_name,origin,created_at)
+               VALUES('XAU','WF Matrix - XAU_Strategy 2.11.36','sqx',?)""",
+            (now,),
+        ).lastrowid
+        duplicate = conn.execute(
+            """INSERT INTO strategies(symbol,sqx_name,origin,created_at)
+               VALUES('XAU','XAU_Strategy 2.11.36','sqx',?)""",
+            (now,),
+        ).lastrowid
+        for strategy_id, name, missing in (
+            (canonical, "WF Matrix - XAU_Strategy 2.11.36", None),
+            (duplicate, "XAU_Strategy 2.11.36", now),
+        ):
+            conn.execute(
+                """INSERT INTO sqx_strategy_links(
+                     strategy_id,project,databank,strategy_name,symbol,
+                     last_synced_at,missing_from_sqx_at
+                   ) VALUES(?,?,?,?,?,?,?)""",
+                (
+                    strategy_id,
+                    "Retester",
+                    "Results",
+                    name,
+                    "XAUUSD",
+                    now,
+                    missing,
+                ),
+            )
+        batch_id = conn.execute(
+            """INSERT INTO backtest_batches(status,created_at)
+               VALUES('paused',?)""",
+            (now,),
+        ).lastrowid
+        for strategy_id in (canonical, duplicate):
+            conn.execute(
+                """INSERT INTO backtest_batch_items(
+                     batch_id,strategy_id,status,created_at,updated_at
+                   ) VALUES(?,?,?,?,?)""",
+                (batch_id, strategy_id, "validation_failed", now, now),
+            )
+
+    preview = strategy_identity.merge_strategies(
+        canonical, [duplicate], dry_run=True
+    )
+    assert preview["counts"]["backtest_batch_items"] == 1
+
+    result = strategy_identity.merge_strategies(
+        canonical, [duplicate], dry_run=False
+    )
+    assert result["collapsed_batch_items"] == 1
+    with db.session() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM strategies WHERE id=?", (duplicate,)
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            """SELECT COUNT(*) FROM backtest_batch_items
+               WHERE batch_id=? AND strategy_id=?""",
+            (batch_id, canonical),
+        ).fetchone()[0] == 1
+
+
 def test_merge_rejects_multiple_sqx_links(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "linked.db")
     db.init_db()
@@ -763,6 +830,67 @@ def test_reconcile_sqx_link_promotes_a_current_lineage_link(
     ]
 
 
+def test_reconcile_sqx_link_accepts_hash_backed_wf_matrix_rename(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "hash-backed-rename.db")
+    db.init_db()
+    now = db.utcnow()
+    with db.session() as conn:
+        missing = conn.execute(
+            """INSERT INTO strategies(symbol,sqx_name,origin,created_at)
+               VALUES('XAU','XAU_Strategy 2.11.36','sqx',?)""",
+            (now,),
+        ).lastrowid
+        current = conn.execute(
+            """INSERT INTO strategies(symbol,sqx_name,mql5_name,origin,created_at)
+               VALUES('XAU','WF Matrix - XAU_Strategy 2.11.36',
+                      'WF Matrix - XAU_Strategy 2.11.36','sqx+excel',?)""",
+            (now,),
+        ).lastrowid
+        for strategy_id, name, missing_at in (
+            (missing, "XAU_Strategy 2.11.36", now),
+            (current, "WF Matrix - XAU_Strategy 2.11.36", None),
+        ):
+            conn.execute(
+                """INSERT INTO sqx_strategy_links(
+                     strategy_id,project,databank,strategy_name,symbol,
+                     last_synced_at,missing_from_sqx_at
+                   ) VALUES(?,?,?,?,?,?,?)""",
+                (
+                    strategy_id,
+                    "Retester",
+                    "Results",
+                    name,
+                    "XAUUSD",
+                    now,
+                    missing_at,
+                ),
+            )
+            conn.execute(
+                """INSERT INTO strategy_expert_links(
+                     strategy_id,expert_path,expert_hash,resolution_method,
+                     confidence,updated_at
+                   ) VALUES(?,?,?,?,?,?)""",
+                (
+                    strategy_id,
+                    "WF Matrix - XAU_Strategy 2.11.36.ex5",
+                    "same-ex5-hash",
+                    "exact_name",
+                    1.0,
+                    now,
+                ),
+            )
+
+    preview = strategy_identity.reconcile_sqx_link(
+        missing, current, dry_run=True
+    )
+    assert preview["mode"] == "merge_duplicate"
+    assert preview["decorated_name_match"] is True
+    assert preview["expert_hashes_match"] is True
+    assert preview["parameters_match"] is False
+
+
 def test_reconcile_sqx_link_rejects_different_parameter_sets(
     tmp_path, monkeypatch
 ):
@@ -806,3 +934,78 @@ def test_reconcile_sqx_link_rejects_different_parameter_sets(
         assert "parameter fingerprint" in str(exc)
     else:
         raise AssertionError("Expected different parameter sets to be rejected")
+
+
+def test_account_deployment_inherits_sqx_link_without_merging_trades(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "account-deployment.db")
+    db.init_db()
+    now = db.utcnow()
+    with db.session() as conn:
+        canonical_id = conn.execute(
+            """INSERT INTO strategies(
+                 symbol,sqx_name,mql5_name,account_login,origin,created_at
+               ) VALUES('US30','Strategy 4.7.21(2)',
+                        'US30_Strategy_4_7_21_2','7396577','mt5+sqx',?)""",
+            (now,),
+        ).lastrowid
+        conn.execute(
+            "UPDATE strategies SET identity_strategy_id=id WHERE id=?",
+            (canonical_id,),
+        )
+        conn.execute(
+            """INSERT INTO sqx_strategy_links(
+                 strategy_id,project,databank,strategy_name,symbol,timeframe,
+                 filter_result,last_synced_at
+               ) VALUES(?,'Retester','Results','Strategy 4.7.21(2)',
+                        'USA30IDXUSD_clonedwnx','H1','PASSED',?)""",
+            (canonical_id, now),
+        )
+        deployment_id = conn.execute(
+            """INSERT INTO strategies(
+                 symbol,sqx_name,mql5_name,account_login,origin,created_at
+               ) VALUES('WS30','US30_4_7_21_2_REAL',
+                        'US30_4_7_21_2_REAL','4000094894','mt5',?)""",
+            (now,),
+        ).lastrowid
+        terminal_id = conn.execute(
+            """INSERT INTO terminals(
+                 name,data_dir,account_login,status,created_at
+               ) VALUES('Real',?,'4000094894','connected',?)""",
+            (str(tmp_path / "terminal"), now),
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO mappings(
+                 strategy_id,terminal_id,account_login,symbol,magic,
+                 comment_pattern,role,confidence,confirmed,created_at
+               ) VALUES(?,?,?,'WS30',472121,'US30_4_7_21_2_REAL',
+                        'live',1,1,?)""",
+            (deployment_id, terminal_id, "4000094894", now),
+        )
+
+    suggestions = strategy_identity.deployment_link_suggestions()
+    match = next(
+        item for item in suggestions if item["deployment_id"] == deployment_id
+    )
+    assert match["safe"] is True, match
+    assert match["candidates"][0]["canonical_id"] == canonical_id
+
+    result = strategy_identity.link_deployment_identity(
+        deployment_id, canonical_id, dry_run=False
+    )
+    assert result["canonical_name"] == "Strategy 4.7.21(2)"
+    with db.session() as conn:
+        deployment = conn.execute(
+            "SELECT * FROM strategies WHERE id=?", (deployment_id,)
+        ).fetchone()
+        assert deployment["identity_strategy_id"] == canonical_id
+        assert deployment["account_login"] == "4000094894"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM mappings WHERE strategy_id=?",
+            (deployment_id,),
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM mappings WHERE strategy_id=?",
+            (canonical_id,),
+        ).fetchone()[0] == 0

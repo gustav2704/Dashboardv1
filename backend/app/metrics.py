@@ -148,6 +148,14 @@ def compute_metrics(
         months = max((last - first) / (1000 * 86400 * 30.4375), 1 / 30.4375)
     mean = statistics.fmean(profits) if profits else 0.0
     stdev = statistics.stdev(profits) if len(profits) > 1 else 0.0
+    trade_edge = mean / stdev if len(profits) > 1 and stdev else None
+    performance_months = max(months, 1.0) if ordered_trades else 0.0
+    performance_trades_per_month = count / performance_months if performance_months else 0.0
+    monthly_sqn = (
+        trade_edge * math.sqrt(performance_trades_per_month)
+        if trade_edge is not None
+        else None
+    )
     today_profits = [
         float(t.get("net_profit", 0))
         for t in ordered_trades
@@ -179,6 +187,10 @@ def compute_metrics(
         "max_consecutive_losses": _max_streak(profits, False),
         "current_consecutive_losses": _current_losing_streak(profits),
         "trades_per_month": count / months if months else 0.0,
+        "trade_edge": trade_edge,
+        "performance_months": performance_months,
+        "performance_trades_per_month": performance_trades_per_month,
+        "monthly_sqn": monthly_sqn,
         "max_drawdown": drawdown,
         "return_dd": sum(profits) / drawdown if drawdown else None,
         "sqn": math.sqrt(count) * mean / stdev if count > 1 and stdev else None,

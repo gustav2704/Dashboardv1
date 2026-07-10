@@ -25,7 +25,8 @@ body {
 }
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 .shell {
@@ -179,6 +180,9 @@ main {
   margin: 0 auto 0 0;
   transition: max-width 180ms ease, padding 180ms ease;
 }
+main.overview-main {
+  max-width: 2040px;
+}
 .collapsed-sidebar main {
   grid-column: 2;
   max-width: none;
@@ -219,7 +223,8 @@ h2 {
 }
 .button,
 select,
-input {
+input,
+textarea {
   border: 1px solid #233746;
   background: #0c1923;
   color: #bed0dc;
@@ -244,6 +249,20 @@ input {
   color: #8ee8d8;
   border-color: #1f665f;
   background: #0b2928;
+}
+.global-account-filter {
+  display: grid;
+  gap: 4px;
+  min-width: 190px;
+}
+.global-account-filter span {
+  color: #60798a;
+  font: 9px Consolas, monospace;
+  letter-spacing: .7px;
+  text-transform: uppercase;
+}
+.global-account-filter select {
+  width: 100%;
 }
 .refresh {
   color: var(--cyan);
@@ -380,6 +399,22 @@ th {
 th.sortable-header {
   padding: 0;
 }
+.selection-column {
+  width: 78px;
+  min-width: 78px;
+  text-align: center;
+}
+td.selection-column input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--cyan);
+  cursor: pointer;
+}
+td.selection-column input:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
 .sort-button {
   width: 100%;
   display: flex;
@@ -491,6 +526,11 @@ td small {
   color: #7dd3fc;
   border-color: #245c75;
   background: #0b2431;
+}
+.link-tag.sqx_catalog {
+  color: #67e8f9;
+  border-color: #277b83;
+  background: #0b3034;
 }
 .link-tag.mt5_only {
   color: #c4b5fd;
@@ -807,6 +847,51 @@ td small {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 9px;
+}
+.strategy-note-detail {
+  grid-column: 1 / -1;
+  padding: 18px 22px;
+}
+.strategy-note-heading,
+.strategy-note-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.strategy-note-heading {
+  margin-bottom: 10px;
+}
+.strategy-note-heading > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.strategy-note-heading small,
+.strategy-note-actions small {
+  color: var(--muted);
+  font-size: 10px;
+}
+.strategy-note textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 100px;
+  line-height: 1.5;
+}
+.strategy-note-actions {
+  margin-top: 10px;
+}
+.strategy-note .button:disabled {
+  cursor: not-allowed;
+  opacity: .45;
+}
+.note-status {
+  color: #49e1bd;
+  font-size: 11px;
+  min-height: 16px;
+}
+.note-status.error {
+  color: #ff728b;
 }
 .equity-box {
   min-height: 144px;
@@ -1491,6 +1576,147 @@ footer {
   color: #fb7185 !important;
   white-space: normal;
 }
+.performance-view {
+  display: grid;
+  gap: 16px;
+}
+.performance-intro {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px 24px;
+  align-items: end;
+  padding: 2px 2px 6px;
+}
+.performance-intro h2 {
+  margin-top: 5px;
+  font-size: 20px;
+}
+.performance-intro p {
+  grid-column: 1 / -1;
+  max-width: 900px;
+  color: #74899a;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.performance-filters {
+  display: flex;
+  align-items: end;
+  gap: 10px;
+  padding: 13px 15px;
+  border: 1px solid var(--line);
+  background: #09151e;
+}
+.performance-filters label {
+  display: grid;
+  gap: 6px;
+}
+.performance-filters label > span {
+  color: #60798a;
+  font: 9px Consolas, monospace;
+  letter-spacing: .7px;
+  text-transform: uppercase;
+}
+.performance-filters select,
+.performance-filters input {
+  min-width: 145px;
+}
+.performance-sample-summary {
+  display: flex;
+  gap: 8px;
+}
+.performance-sample-summary span {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 7px 9px;
+  border: 1px solid #233746;
+  background: #0a1720;
+  color: #74899a;
+  font: 9px Consolas, monospace;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+}
+.performance-sample-summary strong {
+  color: #c6d7e1;
+  font-size: 13px;
+}
+.performance-sample-summary .low {
+  border-color: #5f501c;
+}
+.performance-sample-summary .low strong {
+  color: #fbbf24;
+}
+.performance-panel {
+  min-width: 0;
+}
+.performance-panel .panel-heading {
+  min-height: 70px;
+  border-bottom: 1px solid #14232e;
+}
+.performance-formula {
+  color: #6f8796;
+  font: 10px Consolas, monospace;
+}
+.performance-chart-scroll {
+  max-height: 720px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.performance-ranking-chart {
+  min-width: 660px;
+  padding: 5px 10px 0 0;
+}
+.performance-scatter-chart {
+  height: 470px;
+  min-width: 660px;
+  padding: 4px 12px 4px 0;
+  overflow: hidden;
+}
+.performance-tooltip {
+  min-width: 240px;
+  padding: 13px 14px;
+  border: 1px solid #315064;
+  background: #08141d;
+  box-shadow: 0 12px 30px #0009;
+}
+.performance-tooltip > strong,
+.performance-tooltip > span,
+.performance-tooltip > small {
+  display: block;
+}
+.performance-tooltip > strong {
+  color: #e7f4fa;
+  font-size: 12px;
+}
+.performance-tooltip > span {
+  margin-top: 4px;
+  color: #74899a;
+  font-size: 10px;
+}
+.performance-tooltip dl {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px 18px;
+  margin: 12px 0;
+  font-size: 10px;
+}
+.performance-tooltip dt {
+  color: #74899a;
+}
+.performance-tooltip dd {
+  margin: 0;
+  color: #dce7ee;
+  font: 10px Consolas, monospace;
+}
+.performance-tooltip small {
+  padding-top: 9px;
+  border-top: 1px solid #1d2d3a;
+  color: #9b8a48;
+  font-size: 9px;
+}
+.performance-empty {
+  padding: 70px 24px;
+}
 @media (max-width: 1250px) {
   main {
     padding-left: 24px;
@@ -1501,6 +1727,13 @@ footer {
   }
   .backtest-form {
     grid-template-columns: repeat(4, 1fr);
+  }
+  .performance-intro {
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+  .performance-filters {
+    flex-wrap: wrap;
   }
 }
 @media (max-width: 800px) {
@@ -1563,6 +1796,9 @@ footer {
   .header-actions select {
     flex: 1;
   }
+  .global-account-filter {
+    flex: 1 1 100%;
+  }
   .table-panel .panel-heading {
     align-items: stretch;
     flex-direction: column;
@@ -1591,6 +1827,34 @@ footer {
   .strategy-selector {
     align-items: stretch;
     flex-direction: column;
+  }
+  .performance-sample-summary {
+    width: 100%;
+    overflow-x: auto;
+  }
+  .performance-filters {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    align-items: stretch;
+  }
+  .performance-filters label {
+    min-width: 0;
+    margin-left: 0;
+  }
+  .performance-filters select,
+  .performance-filters input {
+    width: 100%;
+    min-width: 0;
+  }
+  .performance-sample-summary span {
+    flex: 1 0 auto;
+    justify-content: center;
+  }
+  .performance-panel {
+    overflow-x: auto;
+  }
+  .performance-panel .panel-heading {
+    min-width: 660px;
   }
   .strategy-selector select {
     min-width: 0;

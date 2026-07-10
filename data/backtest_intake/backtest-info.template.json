@@ -1,0 +1,16 @@
+{
+  "strategy_id": null,
+  "confirm_sqx_identity": "",
+  "confirm_duplicate": null,
+  "broker": "FPM",
+  "broker_symbol": "",
+  "timeframe": "",
+  "from_date": "2019-01-01",
+  "to_date": "",
+  "deposit": 100000,
+  "currency": "USD",
+  "leverage": "1:100",
+  "uses_default_inputs": true,
+  "set_file": "",
+  "notes": ""
+}

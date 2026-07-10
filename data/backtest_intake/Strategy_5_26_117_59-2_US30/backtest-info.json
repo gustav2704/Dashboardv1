@@ -1,0 +1,16 @@
+{
+  "strategy_id": 125,
+  "confirm_sqx_identity": "No SQX link; validar por EX5 aportado por el usuario.",
+  "confirm_duplicate": true,
+  "broker": "FPM",
+  "broker_symbol": "US30",
+  "timeframe": "M15",
+  "from_date": "2016-01-01",
+  "to_date": "2026-07-08",
+  "deposit": 100000,
+  "currency": "USD",
+  "leverage": "1:100",
+  "uses_default_inputs": true,
+  "set_file": "",
+  "notes": "Duplicado intencional confirmado. Timeframe M15; mismo GER30_optimiza.ex5/hash que Strategy_5_26_117_GER40; parámetros por defecto."
+}

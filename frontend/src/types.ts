@@ -6,6 +6,7 @@ export type Metrics = {
   avg_duration_seconds: number; median_duration_seconds: number; avg_win: number; avg_loss: number;
   best_trade: number | null; worst_trade: number | null; today_profit: number; today_trades: number;
   max_consecutive_wins: number; max_consecutive_losses: number; current_consecutive_losses: number; trades_per_month: number;
+  trade_edge: number | null; performance_months: number; performance_trades_per_month: number; monthly_sqn: number | null;
   max_drawdown: number; return_dd: number | null; sqn: number | null; commissions: number; swaps: number;
 }
 export type RiskStatus = 'green' | 'yellow' | 'red' | 'gray'
@@ -51,9 +52,9 @@ export type BacktestSummary = {
 export type Strategy = {
   id: number; identity_strategy_id: number; symbol: string; sqx_name: string; mql5_name: string; account_login: string;
   lineage_accounts: { current: string[]; predecessor: string[] };
-  origin: string; last_observed_at?: string;
-  state: string; link_state: 'linked' | 'candidate' | 'sqx_only' | 'mt5_only' | 'catalog_only';
-  sqx: SQXInfo | null; sqx_analytics: SQXAnalytics | null; metrics: Metrics; historical_metrics: Metrics; lifetime_metrics: Metrics; health: Health; risk_guard: RiskGuard; baseline: Baseline | null; baselines: Baseline[];
+  origin: string; last_observed_at?: string; note: string; note_updated_at: string | null; selection: boolean;
+  state: string; link_state: 'linked' | 'candidate' | 'sqx_catalog' | 'sqx_only' | 'mt5_only' | 'catalog_only';
+  sqx: SQXInfo | null; sqx_analytics: SQXAnalytics | null; metrics: Metrics; historical_metrics: Metrics; lifetime_metrics: Metrics; account_metrics: Record<string, Metrics>; health: Health; risk_guard: RiskGuard; baseline: Baseline | null; baselines: Baseline[];
   backtest: BacktestSummary; mapping_count: number; historical_mapping_count: number;
   magic_numbers: number[];
 }
@@ -69,7 +70,7 @@ export type Terminal = { id: number; name: string; data_dir: string; account_log
 export type Dashboard = {
   generated_at: string; window: string;
   totals: { strategies: number; active: number; net_profit: number; floating_profit: number; trades: number; red: number };
-  integration: { linked: number; candidate: number; sqx_only: number; mt5_only: number; catalog_only: number };
+  integration: { linked: number; candidate: number; sqx_catalog: number; sqx_only: number; mt5_only: number; catalog_only: number };
   terminals: Terminal[]; strategies: Strategy[];
 }
 

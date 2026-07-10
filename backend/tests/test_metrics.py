@@ -1,4 +1,6 @@
-from datetime import date, datetime
+import math
+import statistics
+from datetime import date, datetime, timezone
 
 from app.metrics import compute_metrics, health_status, pick_baseline, reconstruct_trades, risk_guard_status
 
@@ -53,6 +55,67 @@ def test_metrics_streak_drawdown_and_sqn():
     assert metrics["best_trade"] == 10
     assert metrics["worst_trade"] == -4
     assert metrics["sqn"] is not None
+
+
+def performance_trades(profits, days=60):
+    start = int(datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
+    step = int(days * 86_400_000 / max(len(profits) - 1, 1))
+    return [
+        {
+            "net_profit": value,
+            "open_time_msc": start + i * step,
+            "close_time_msc": start + i * step + 1000,
+            "commission": 0,
+            "swap": 0,
+        }
+        for i, value in enumerate(profits)
+    ]
+
+
+def test_normalized_performance_metrics_use_a_one_month_floor():
+    profits = [12, -5, 8, -3]
+    metrics = compute_metrics(performance_trades(profits, days=10))
+    expected_edge = statistics.fmean(profits) / statistics.stdev(profits)
+
+    assert metrics["performance_months"] == 1
+    assert metrics["performance_trades_per_month"] == 4
+    assert math.isclose(metrics["trade_edge"], expected_edge)
+    assert math.isclose(metrics["monthly_sqn"], expected_edge * math.sqrt(4))
+
+
+def test_normalized_performance_metrics_use_observed_months_and_preserve_sign():
+    profits = [-12, 5, -8, 3]
+    metrics = compute_metrics(performance_trades(profits, days=91.3125))
+
+    assert math.isclose(metrics["performance_months"], 3, rel_tol=1e-4)
+    assert math.isclose(metrics["performance_trades_per_month"], 4 / 3, rel_tol=1e-4)
+    assert metrics["trade_edge"] < 0
+    assert metrics["monthly_sqn"] < 0
+
+
+def test_normalized_performance_metrics_are_invariant_to_uniform_position_scaling():
+    profits = [12, -5, 8, -3, 4]
+    original = compute_metrics(performance_trades(profits))
+    scaled = compute_metrics(performance_trades([value * 7.5 for value in profits]))
+
+    assert math.isclose(original["trade_edge"], scaled["trade_edge"])
+    assert math.isclose(original["monthly_sqn"], scaled["monthly_sqn"])
+    assert original["performance_months"] == scaled["performance_months"]
+    assert original["performance_trades_per_month"] == scaled["performance_trades_per_month"]
+
+
+def test_normalized_performance_metrics_are_unavailable_without_variance():
+    empty = compute_metrics([])
+    single = compute_metrics(performance_trades([5]))
+    flat = compute_metrics(performance_trades([5, 5, 5]))
+
+    assert empty["trade_edge"] is None
+    assert empty["monthly_sqn"] is None
+    assert empty["performance_months"] == 0
+    assert single["trade_edge"] is None
+    assert single["monthly_sqn"] is None
+    assert flat["trade_edge"] is None
+    assert flat["monthly_sqn"] is None
 
 
 def test_winning_and_losing_streaks_are_interrupted_by_breakeven_trades():
