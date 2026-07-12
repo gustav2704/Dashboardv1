@@ -42,6 +42,28 @@ def test_dashboard_returns_sorted_unique_magic_numbers(tmp_path, monkeypatch):
     assert strategies["Many magics"]["magic_numbers"] == [100, 900]
 
 
+def test_dashboard_terminal_strip_shows_only_connected_non_imported_accounts(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "terminals.db")
+    monkeypatch.setattr(main, "suggestions", lambda: [])
+    db.init_db()
+    now = db.utcnow()
+
+    with db.session() as conn:
+        conn.executemany(
+            """INSERT INTO terminals(name,data_dir,account_login,status,created_at)
+               VALUES(?,?,?,?,?)""",
+            [
+                ("Active", str(tmp_path / "active"), "100121894", "connected", now),
+                ("Offline current", str(tmp_path / "offline"), "4000094894", "disconnected", now),
+                ("Imported history", "import://tradebuddy/FPM/7396582", "7396582", "disconnected", now),
+            ],
+        )
+
+    terminals = dashboard_data()["terminals"]
+
+    assert [terminal["account_login"] for terminal in terminals] == ["100121894"]
+
+
 def test_dashboard_derives_account_from_unique_confirmed_live_mapping(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "mapped-accounts.db")
     monkeypatch.setattr(main, "suggestions", lambda: [])

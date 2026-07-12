@@ -333,7 +333,16 @@ def dashboard_data(window: str = "all", start: str | None = None, end: str | Non
     except Exception:
         pending_candidates = set()
     with session() as conn:
+        # Import-only terminals exist solely to attach a previous account's trades
+        # to the strategy lineage.  They are not running MT5 accounts and must not
+        # be presented as broker accounts in the dashboard's terminal strip.
         terminal_rows = rows(conn.execute("SELECT * FROM terminals ORDER BY name"))
+        visible_terminal_rows = [
+            terminal
+            for terminal in terminal_rows
+            if terminal["status"] == "connected"
+            and not str(terminal.get("data_dir") or "").startswith("import://")
+        ]
         strategies = conn.execute("SELECT * FROM strategies ORDER BY symbol,sqx_name").fetchall()
         deals = rows(conn.execute("SELECT * FROM deals ORDER BY time_msc,ticket"))
         trades_all = reconstruct_trades(deals)
@@ -533,7 +542,7 @@ def dashboard_data(window: str = "all", start: str | None = None, end: str | Non
         state: sum(1 for item in output if item["link_state"] == state)
         for state in ("linked", "candidate", "sqx_catalog", "sqx_only", "mt5_only", "catalog_only")
     }
-    return {"generated_at": utcnow(), "window": window, "totals": totals, "integration": integration, "account": dict(account) if account else None, "terminals": terminal_rows, "strategies": output}
+    return {"generated_at": utcnow(), "window": window, "totals": totals, "integration": integration, "account": dict(account) if account else None, "terminals": visible_terminal_rows, "strategies": output}
 
 
 def _worker(stop_event: threading.Event) -> None:
