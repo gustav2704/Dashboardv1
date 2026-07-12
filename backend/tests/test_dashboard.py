@@ -3,6 +3,7 @@ from datetime import datetime
 
 from app import db
 from app import main
+from app.display_names import seed_manual_display_names
 from app.main import dashboard_data, get_strategy
 
 
@@ -38,8 +39,101 @@ def test_dashboard_returns_sorted_unique_magic_numbers(tmp_path, monkeypatch):
     strategies = {item["sqx_name"]: item for item in dashboard_data()["strategies"]}
 
     assert strategies["No magic"]["magic_numbers"] == []
+    assert strategies["No magic"]["primary_magic_number"] is None
     assert strategies["One magic"]["magic_numbers"] == [77]
+    assert strategies["One magic"]["primary_magic_number"] == 77
     assert strategies["Many magics"]["magic_numbers"] == [100, 900]
+    assert strategies["Many magics"]["primary_magic_number"] == 100
+
+
+def test_dashboard_uses_manual_display_names_only_for_exact_account_mappings(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "display-names.db")
+    monkeypatch.setattr(main, "suggestions", lambda: [])
+    db.init_db()
+    now = db.utcnow()
+
+    with db.session() as conn:
+        terminal_id = conn.execute(
+            """INSERT INTO terminals(name,data_dir,account_login,status,created_at)
+               VALUES(?,?,?,?,?)""",
+            ("Darwinex", str(tmp_path / "darwinex"), "3000097316", "connected", now),
+        ).lastrowid
+        other_terminal_id = conn.execute(
+            """INSERT INTO terminals(name,data_dir,account_login,status,created_at)
+               VALUES(?,?,?,?,?)""",
+            ("Other", str(tmp_path / "other"), "4000000000", "connected", now),
+        ).lastrowid
+        specs = [
+            ("GBPUSD", "ST+RSI Buy", 1, "EA_SuperTrend"),
+            ("GBPUSD", "ST+RSI Sell", 1, "ST+RSI Sell"),
+            ("NDX", "ORB", 4, "ORB_American_EMA9"),
+            ("NDX", "PPM", 6, "ParabolicPivot"),
+            ("GBPUSD", "ST+RSI Buy", 1, "ST+RSI Buy other account"),
+        ]
+        strategy_ids = []
+        for index, (symbol, technical_name, _, _) in enumerate(specs):
+            strategy_ids.append(conn.execute(
+                """INSERT INTO strategies(symbol,sqx_name,mql5_name,account_login,created_at)
+                   VALUES(?,?,?,?,?)""",
+                (symbol, technical_name, technical_name, "4000000000" if index == 4 else "3000097316", now),
+            ).lastrowid)
+        for index, (symbol, comment, magic, _) in enumerate(specs):
+            account = "4000000000" if index == 4 else "3000097316"
+            conn.execute(
+                """INSERT INTO mappings(
+                     strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,role,confirmed,created_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?)""",
+                (strategy_ids[index], other_terminal_id if index == 4 else terminal_id, account, symbol, magic, comment, "live", 1, now),
+            )
+        seed_manual_display_names(conn, now)
+
+    strategies = {
+        (item["account_login"], item["mql5_name"]): item
+        for item in dashboard_data()["strategies"]
+    }
+
+    assert strategies[("3000097316", "ST+RSI Buy")]["display_name"] == "EA_SuperTrend"
+    assert strategies[("3000097316", "ORB")]["display_name"] == "ORB_American_EMA9"
+    assert strategies[("3000097316", "PPM")]["display_name"] == "ParabolicPivot"
+    assert strategies[("3000097316", "ST+RSI Sell")]["display_name"] == "ST+RSI Sell"
+    assert strategies[("4000000000", "ST+RSI Buy")]["display_name"] == "ST+RSI Buy"
+    assert strategies[("3000097316", "ST+RSI Buy")]["mql5_name"] == "ST+RSI Buy"
+
+
+def test_dashboard_uses_historical_magic_as_primary_when_no_live_mapping_exists(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "historical-magic.db")
+    monkeypatch.setattr(main, "suggestions", lambda: [])
+    db.init_db()
+    now = db.utcnow()
+
+    with db.session() as conn:
+        terminal_id = conn.execute(
+            """INSERT INTO terminals(name,data_dir,account_login,status,created_at)
+               VALUES(?,?,?,?,?)""",
+            ("Previous account", str(tmp_path / "previous"), "old-account", "disconnected", now),
+        ).lastrowid
+        strategy_id = conn.execute(
+            """INSERT INTO strategies(symbol,sqx_name,account_login,created_at)
+               VALUES(?,?,?,?)""",
+            ("XAUUSD", "Historical only", "current-account", now),
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO strategy_account_lineage(strategy_id,account_login,role,source,created_at)
+               VALUES(?,?,?,?,?)""",
+            (strategy_id, "old-account", "predecessor", "test", now),
+        )
+        conn.execute(
+            """INSERT INTO mappings(
+                 strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,role,confirmed,created_at
+               ) VALUES(?,?,?,?,?,?,?,?,?)""",
+            (strategy_id, terminal_id, "old-account", "XAUUSD", 71, "Legacy bot", "historical", 1, now),
+        )
+
+    strategy = next(item for item in dashboard_data()["strategies"] if item["id"] == strategy_id)
+
+    assert strategy["magic_numbers"] == []
+    assert strategy["historical_magic_numbers"] == [71]
+    assert strategy["primary_magic_number"] == 71
 
 
 def test_dashboard_terminal_strip_shows_only_connected_non_imported_accounts(tmp_path, monkeypatch):
@@ -62,6 +156,37 @@ def test_dashboard_terminal_strip_shows_only_connected_non_imported_accounts(tmp
     terminals = dashboard_data()["terminals"]
 
     assert [terminal["account_login"] for terminal in terminals] == ["100121894"]
+
+
+def test_dashboard_filters_multiple_accounts_and_unassigned_strategies(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "account-filter.db")
+    monkeypatch.setattr(main, "suggestions", lambda: [])
+    db.init_db()
+    now = db.utcnow()
+
+    with db.session() as conn:
+        conn.executemany(
+            "INSERT INTO strategies(symbol,sqx_name,account_login,created_at) VALUES(?,?,?,?)",
+            [
+                ("XAU", "Account A", "A", now),
+                ("NAS", "Account B", "B", now),
+                ("GER", "Unassigned", "", now),
+            ],
+        )
+
+    only_a = dashboard_data(selected_accounts={"A"}, include_unassigned=False)
+    assert [item["sqx_name"] for item in only_a["strategies"]] == ["Account A"]
+    assert only_a["broker_accounts"] == ["A", "B"]
+    assert only_a["has_unassigned_broker_account"] is True
+
+    a_and_unassigned = dashboard_data(selected_accounts={"A"}, include_unassigned=True)
+    assert {item["sqx_name"] for item in a_and_unassigned["strategies"]} == {"Account A", "Unassigned"}
+
+    all_accounts = dashboard_data(selected_accounts={"A", "B"}, include_unassigned=True)
+    assert {item["sqx_name"] for item in all_accounts["strategies"]} == {"Account A", "Account B", "Unassigned"}
+
+    none_selected = dashboard_data(selected_accounts=set(), include_unassigned=False)
+    assert none_selected["strategies"] == []
 
 
 def test_dashboard_derives_account_from_unique_confirmed_live_mapping(tmp_path, monkeypatch):
@@ -201,6 +326,8 @@ def test_dashboard_keeps_historical_mapping_out_of_current_magic_and_metrics(tmp
 
     assert strategy["link_state"] == "linked"
     assert strategy["magic_numbers"] == [1]
+    assert strategy["historical_magic_numbers"] == [31414]
+    assert strategy["primary_magic_number"] == 1
     assert strategy["mapping_count"] == 1
     assert strategy["historical_mapping_count"] == 1
     assert strategy["metrics"]["trades"] == 4
@@ -240,6 +367,23 @@ def test_dashboard_keeps_historical_mapping_out_of_current_magic_and_metrics(tmp
     detail = get_strategy(strategy_id)
     source_accounts = {trade["source_role"]: trade["source_account"] for trade in detail["trades"]}
     assert source_accounts == {"live": "100121894", "historical": "7396577"}
+
+    journal = main.journal_analysis_data()
+    assert len(journal["trades"]) == 8
+    assert {trade["source_role"] for trade in journal["trades"]} == {"live", "historical"}
+    assert len({(trade["strategy_id"], trade["close_time_msc"], trade["net_profit"]) for trade in journal["trades"]}) == 8
+
+    current_account = main.journal_analysis_data(account="100121894")
+    assert len(current_account["trades"]) == 4
+    assert {trade["account"] for trade in current_account["trades"]} == {"100121894"}
+
+    selected_history = main.journal_analysis_data(selected_accounts={"7396577"})
+    assert len(selected_history["trades"]) == 4
+    assert {trade["account"] for trade in selected_history["trades"]} == {"7396577"}
+
+    recent_journal = main.journal_analysis_data("custom", "2026-06-20", "2026-06-30")
+    assert len(recent_journal["trades"]) == 4
+    assert sum(trade["net_profit"] for trade in recent_journal["trades"]) == 100
 
 
 def test_strategy_detail_respects_window_and_returns_equity_curve(tmp_path, monkeypatch):

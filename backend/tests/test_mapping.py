@@ -5,10 +5,17 @@ from app.mapping import (
     ensure_mt5_strategies,
     normalize,
     suggestions,
+    stable_comment,
     symbol_family,
     version_signature,
 )
 from app.strategy_identity import add_alias
+
+
+def test_stable_comment_collapses_timestamped_live_identifiers():
+    assert stable_comment("ORB|1783707900|BUY", 4) == "ORB"
+    assert stable_comment("PPM|1783033200", 6) == "PPM"
+    assert stable_comment("VWAP|1783396800", 9) == "VWAP"
 
 
 def test_name_normalization_handles_sqx_punctuation():

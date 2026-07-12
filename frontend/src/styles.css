@@ -264,6 +264,63 @@ textarea {
 .global-account-filter select {
   width: 100%;
 }
+.account-filter {
+  position: relative;
+  min-width: 190px;
+}
+.account-filter-label {
+  display: block;
+  margin-bottom: 4px;
+  color: #60798a;
+  font: 9px Consolas, monospace;
+  letter-spacing: .7px;
+  text-transform: uppercase;
+}
+.account-filter-trigger {
+  width: 100%;
+  min-height: 35px;
+  padding: 8px 10px;
+  border: 1px solid #233746;
+  border-radius: 5px;
+  background: #0c1923;
+  color: #bed0dc;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+  text-align: left;
+}
+.account-filter-trigger:hover { border-color: #396078; }
+.account-filter-menu {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 5px);
+  right: 0;
+  width: max-content;
+  min-width: 220px;
+  max-width: 290px;
+  padding: 6px;
+  border: 1px solid #294557;
+  border-radius: 6px;
+  background: #0b1721;
+  box-shadow: 0 14px 28px #0009;
+}
+.account-filter-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 4px 6px;
+  color: #c8d8e2;
+  cursor: pointer;
+}
+.account-filter-option:hover { background: #122838; }
+.account-filter-option input { accent-color: #38bdf8; }
+.account-filter-option small { margin-left: auto; color: #7190a2; }
+.account-filter-option.all { color: #8ee8d8; font-weight: 600; }
+.account-filter-divider { height: 1px; margin: 4px 2px; background: #203645; }
+.account-filter.compact { min-width: 150px; }
+.account-filter.compact .account-filter-menu { left: 0; right: auto; }
 .refresh {
   color: var(--cyan);
 }
@@ -570,6 +627,34 @@ td small {
   grid-column: 1 / -1;
   color: #fb7185;
 }
+.archive-strategy-notice {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 6px 16px;
+  margin-top: 10px;
+  padding: 11px 12px;
+  border: 1px solid #48586b;
+  background: #18212c;
+}
+.archive-strategy-notice strong,
+.archive-strategy-notice span {
+  display: block;
+}
+.archive-strategy-notice strong {
+  color: #bfdbfe;
+  font-size: 11px;
+}
+.archive-strategy-notice span,
+.archive-strategy-notice small,
+.archive-error {
+  color: #9fb3c8;
+  font-size: 9px;
+  margin-top: 3px;
+}
+.archive-strategy-notice small {
+  grid-column: 1 / -1;
+}
 .button.danger {
   display: inline-flex;
   align-items: center;
@@ -614,6 +699,41 @@ td small {
 .magic-numbers {
   font-family: Consolas, monospace;
   white-space: nowrap;
+}
+.magic-numbers-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.magic-numbers-heading h2 {
+  margin: 3px 0 0;
+  font-size: 15px;
+}
+.magic-number-list {
+  display: grid;
+  gap: 7px;
+}
+.magic-number-entry {
+  display: grid;
+  grid-template-columns: minmax(48px, auto) minmax(88px, auto) 1fr;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid #233744;
+  background: #0c1720;
+}
+.magic-number-entry > strong {
+  color: #e2f5ff;
+  font-family: Consolas, monospace;
+}
+.magic-number-entry > span {
+  color: #7dd3fc;
+  font-size: 10px;
+  text-transform: uppercase;
+}
+.magic-number-entry > small {
+  color: #90a4b8;
+  overflow-wrap: anywhere;
 }
 .value-good {
   color: #5eead4;
@@ -1717,6 +1837,125 @@ footer {
 .performance-empty {
   padding: 70px 24px;
 }
+.top-ten-section,
+.journal-view {
+  display: grid;
+  gap: 16px;
+}
+.top-ten-section {
+  margin-top: 10px;
+  padding-top: 22px;
+  border-top: 1px solid #203441;
+}
+.top-ten-heading h2 {
+  margin-top: 5px;
+  font-size: 20px;
+}
+.top-ten-grid,
+.journal-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.top-ten-grid .journal-chart:last-child {
+  grid-column: 1 / -1;
+}
+.journal-chart {
+  min-width: 0;
+  overflow: hidden;
+}
+.journal-chart.wide {
+  grid-column: 1 / -1;
+}
+.journal-chart-title {
+  min-height: 58px;
+  padding: 18px 20px;
+  border-bottom: 1px solid #14232e;
+  color: #c9d8e1;
+  font-size: 12px;
+  font-weight: 600;
+}
+.journal-chart-body {
+  height: 320px;
+  min-width: 520px;
+  padding: 14px 12px 8px 0;
+}
+.journal-tooltip {
+  min-width: 150px;
+  padding: 10px 12px;
+  border: 1px solid #315064;
+  background: #08141d;
+  box-shadow: 0 10px 24px #0009;
+}
+.journal-tooltip div {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  color: #74899a;
+  font-size: 10px;
+}
+.journal-tooltip strong { color: #dce7ee; }
+.journal-calendar { padding: 0 18px 20px; }
+.journal-calendar-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 20px;
+  padding: 18px 0;
+  border-bottom: 1px solid #14232e;
+}
+.journal-calendar-head h2 { margin-top: 5px; }
+.calendar-controls { display: flex; align-items: center; gap: 4px; }
+.calendar-controls button {
+  padding: 7px 9px;
+  border: 1px solid #263b49;
+  background: #0a1720;
+  color: #78909f;
+  cursor: pointer;
+}
+.calendar-controls button.active { border-color: #2b7482; color: #67e8f9; background: #0c2830; }
+.calendar-controls strong { min-width: 86px; text-align: center; color: #cbd9e1; font: 10px Consolas; }
+.calendar-year-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding-top: 16px; }
+.calendar-month-card {
+  display: flex;
+  min-height: 112px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 7px;
+  border: 1px solid #1b3040;
+  border-radius: 9px;
+  background: #09151e;
+  color: #7991a0;
+  cursor: pointer;
+  transition: border-color .15s, background .15s, transform .15s;
+}
+.calendar-month-card:hover { border-color: #4f7488; background: #0c1b26; transform: translateY(-1px); }
+.calendar-month-card.positive { border-color: #206955; background: #0b2724; }
+.calendar-month-card.negative { border-color: #7d3547; background: #2b131b; }
+.calendar-month-card > span { color: #7690a0; font: 10px Consolas, monospace; letter-spacing: 1.4px; text-transform: uppercase; }
+.calendar-month-card > strong { color: #d4e3ea; font-size: 22px; font-variant-numeric: tabular-nums; }
+.calendar-month-card.positive > strong { color: #5eead4; }
+.calendar-month-card.negative > strong { color: #fb7185; }
+.calendar-month-card > small { color: #718998; font-size: 10px; }
+.calendar-months { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; padding-top: 16px; }
+.calendar-months.month { grid-template-columns: minmax(0, 1fr); }
+.calendar-months.month .calendar-month { padding: 18px; }
+.calendar-months.month .calendar-month > strong { margin-bottom: 16px; font-size: 13px; }
+.calendar-months.month .calendar-weekdays { gap: 6px; }
+.calendar-months.month .calendar-weekdays span { padding: 7px 0; font-size: 10px; }
+.calendar-months.month .calendar-days { gap: 6px; }
+.calendar-months.month .calendar-days > span { min-height: 92px; padding: 8px; font-size: 11px; }
+.calendar-months.month .calendar-days small { font-size: 10px; }
+.calendar-months.month .calendar-days b { font-size: 10px; }
+.calendar-month { padding: 12px; border: 1px solid #172b38; background: #08131b; }
+.calendar-month > strong { display:block; margin-bottom:10px; color:#a8bdca; font-size:11px; }
+.calendar-weekdays,.calendar-days { display:grid; grid-template-columns:repeat(7,1fr); gap:3px; }
+.calendar-weekdays span { padding:3px 0; text-align:center; color:#506b7b; font:8px Consolas; }
+.calendar-days > span { display:flex; min-height:38px; padding:3px; flex-direction:column; justify-content:space-between; border:1px solid #12232e; color:#526c7b; font-size:8px; }
+.calendar-days span.positive { background:#0d302d; border-color:#18564f; }
+.calendar-days span.negative { background:#33171f; border-color:#63293a; }
+.calendar-days small { font-size:8px; }.calendar-days b { color:#d2e1e8; font:7px Consolas; overflow:hidden; }
 @media (max-width: 1250px) {
   main {
     padding-left: 24px;
@@ -1735,6 +1974,8 @@ footer {
   .performance-filters {
     flex-wrap: wrap;
   }
+  .calendar-months { grid-template-columns: repeat(2, 1fr); }
+  .calendar-year-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 800px) {
   body {
@@ -1952,4 +2193,11 @@ footer {
   .backtest-history .table-scroll {
     max-width: calc(100vw - 28px);
   }
+  .top-ten-grid,.journal-grid { grid-template-columns: 1fr; }
+  .top-ten-grid .journal-chart:last-child,.journal-chart.wide { grid-column: auto; }
+  .journal-calendar-head { align-items:flex-start; flex-direction:column; }
+  .calendar-controls { flex-wrap:wrap; }
+  .calendar-months { grid-template-columns:1fr; }
+  .calendar-year-grid { grid-template-columns: 1fr; }
+  .journal-chart-body { overflow-x:auto; }
 }

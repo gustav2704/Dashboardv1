@@ -39,6 +39,8 @@ CREATE TABLE IF NOT EXISTS strategies (
   origin TEXT NOT NULL DEFAULT 'excel',
   last_observed_at TEXT,
   retired INTEGER NOT NULL DEFAULT 0,
+  archived_at TEXT,
+  archive_reason TEXT,
   catalog_row INTEGER,
   catalog_json TEXT NOT NULL DEFAULT '{}',
   note TEXT NOT NULL DEFAULT '',
@@ -73,6 +75,20 @@ CREATE TABLE IF NOT EXISTS strategy_aliases (
 
 CREATE INDEX IF NOT EXISTS idx_strategy_alias_lookup
 ON strategy_aliases(normalized_alias);
+
+CREATE TABLE IF NOT EXISTS strategy_display_names (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  strategy_id INTEGER NOT NULL REFERENCES strategies(id) ON DELETE CASCADE,
+  account_login TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'manual_registry',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(strategy_id, account_login)
+);
+
+CREATE INDEX IF NOT EXISTS idx_strategy_display_names_lookup
+ON strategy_display_names(strategy_id, account_login);
 
 CREATE TABLE IF NOT EXISTS mappings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -414,6 +430,10 @@ def init_db(path: Path | None = None) -> None:
                 """ALTER TABLE strategies
                    ADD COLUMN monitoring_selected INTEGER NOT NULL DEFAULT 0"""
             )
+        if "archived_at" not in strategy_columns:
+            conn.execute("ALTER TABLE strategies ADD COLUMN archived_at TEXT")
+        if "archive_reason" not in strategy_columns:
+            conn.execute("ALTER TABLE strategies ADD COLUMN archive_reason TEXT")
         conn.execute(
             "UPDATE strategies SET identity_strategy_id=id WHERE identity_strategy_id IS NULL"
         )
@@ -468,6 +488,9 @@ def init_db(path: Path | None = None) -> None:
             "INSERT OR IGNORE INTO settings(key,value_json,updated_at) VALUES(?,?,?)",
             ("alert_defaults", json.dumps(DEFAULT_ALERTS), utcnow()),
         )
+        from .display_names import seed_manual_display_names
+
+        seed_manual_display_names(conn, utcnow())
         conn.execute(
             """INSERT OR IGNORE INTO symbol_mappings(
                  broker,source_symbol,target_symbol,created_at

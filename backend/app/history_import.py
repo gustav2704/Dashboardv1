@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import csv
 import re
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .db import rows, session, utcnow
-from .mapping import normalize, symbol_family, version_signature
+from .mapping import normalize, stable_comment, symbol_family, version_signature
 from .metrics import compute_metrics
 
 
@@ -22,6 +23,15 @@ COMMENT_NAME_HINTS = {
     "WF_Matrix_Strategy_5_12_48": "XAU_B_bar17-WF_6_22_Strategy 5.12.48",
     "WF_Matrix_Strategy_3_5_57": "XAU_B_Ichi_Strategy 3.5.57",
 }
+
+
+def comment_family(comment: str, magic: int) -> str:
+    """Return the stable EA identity embedded in a TradeBuddy comment."""
+    value = str(comment or "").strip()
+    if not value:
+        return f"Magic {int(magic)}"
+    value = stable_comment(value, magic)
+    return value.strip(" |:") or f"Magic {int(magic)}"
 
 
 def _msc(value: str) -> int:
@@ -109,25 +119,142 @@ def _find_strategy(conn: Any, comment: str, symbol: str, account_login: str) -> 
         for strategy in strategies
         if symbol_family(strategy["symbol"] or "") == symbol_family(symbol)
     ]
-    scored = [item for item in scored if item[0][0] and (item[0][1] or item[0][2])]
+    scored = [
+        item for item in scored
+        if item[0][0] and (item[0][1] or item[0][2] or item[0][4])
+    ]
     if not scored:
         return None
     scored.sort(reverse=True)
     return scored[0][1]
 
 
-def _group_key(trade: dict[str, Any]) -> tuple[str, int, str]:
-    return (symbol_family(trade["symbol"]), int(trade["magic"]), str(trade["comment"]))
+def _group_key(trade: dict[str, Any]) -> tuple[str, int]:
+    """TradeBuddy identity: a broker symbol and magic number, never its comment."""
+    return (str(trade["symbol"] or "").strip().casefold(), int(trade["magic"]))
 
 
-def import_tradebuddy_history(path: Path, account_login: str, broker: str) -> dict[str, Any]:
+def _preferred_family(trades: list[dict[str, Any]], symbol: str, magic: int) -> str:
+    names = [
+        comment_family(str(trade["comment"]), magic)
+        for trade in trades
+        if str(trade["comment"] or "").strip()
+    ]
+    if not names:
+        return f"{symbol} Magic {magic}"
+    counts = Counter(names)
+    return sorted(counts, key=lambda name: (-counts[name], name.casefold()))[0]
+
+
+def _create_history_strategy(
+    conn: Any,
+    symbol: str,
+    family: str,
+    current_account: str,
+    now: str,
+) -> int:
+    display_name = family
+    suffix = 2
+    while conn.execute(
+        "SELECT 1 FROM strategies WHERE sqx_name=? AND account_login=?",
+        (display_name, current_account),
+    ).fetchone():
+        display_name = f"{family} [{symbol} {suffix}]"
+        suffix += 1
+    return int(
+        conn.execute(
+            """INSERT INTO strategies(
+                 symbol,sqx_name,mql5_name,account_login,origin,last_observed_at,created_at
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (symbol, display_name, family, current_account, "history_import", now, now),
+        ).lastrowid
+    )
+
+
+def _group_candidates(
+    conn: Any, source_account: str, current_account: str, symbol: str, magic: int
+) -> tuple[list[int], list[int]]:
+    historical = conn.execute(
+        """SELECT DISTINCT m.strategy_id FROM mappings m JOIN strategies s ON s.id=m.strategy_id
+           WHERE m.account_login=? AND m.role='historical' AND LOWER(m.symbol)=LOWER(?)
+             AND m.magic=? AND s.account_login=? AND s.retired=0 ORDER BY m.strategy_id""",
+        (source_account, symbol, magic, current_account),
+    ).fetchall()
+    live = conn.execute(
+        """SELECT DISTINCT m.strategy_id FROM mappings m JOIN strategies s ON s.id=m.strategy_id
+           WHERE m.account_login=? AND m.role='live' AND LOWER(m.symbol)=LOWER(?)
+             AND m.magic=? AND s.account_login=? AND s.retired=0 ORDER BY m.strategy_id""",
+        (current_account, symbol, magic, current_account),
+    ).fetchall()
+    return ([int(row["strategy_id"]) for row in historical],
+            [int(row["strategy_id"]) for row in live])
+
+
+def _canonical_group_strategy(
+    conn: Any,
+    source_account: str,
+    current_account: str,
+    symbol: str,
+    magic: int,
+    family: str,
+    now: str,
+    create_missing: bool,
+) -> tuple[int | None, list[int]]:
+    historical_ids, live_ids = _group_candidates(
+        conn, source_account, current_account, symbol, magic
+    )
+    if live_ids:
+        return live_ids[0], historical_ids
+    for strategy_id in historical_ids:
+        row = conn.execute(
+            "SELECT sqx_name,mql5_name FROM strategies WHERE id=?", (strategy_id,)
+        ).fetchone()
+        if row and normalize(family) in {
+            normalize(str(row["sqx_name"] or "")), normalize(str(row["mql5_name"] or ""))
+        }:
+            return strategy_id, historical_ids
+    if historical_ids:
+        return historical_ids[0], historical_ids
+    matched = _find_strategy(conn, family, symbol, current_account)
+    if not matched and current_account == source_account:
+        matched = _find_strategy(conn, family, symbol, "100121894")
+    matched = matched or _find_strategy(conn, family, symbol, source_account)
+    if matched:
+        return matched, []
+    if create_missing:
+        return _create_history_strategy(conn, symbol, family, current_account, now), []
+    return None, []
+
+
+def _retire_empty_history_strategies(conn: Any, strategy_ids: list[int]) -> None:
+    for strategy_id in set(strategy_ids):
+        row = conn.execute(
+            "SELECT origin FROM strategies WHERE id=?", (strategy_id,)
+        ).fetchone()
+        if not row or str(row["origin"] or "") != "history_import":
+            continue
+        used = conn.execute(
+            "SELECT 1 FROM mappings WHERE strategy_id=? LIMIT 1", (strategy_id,)
+        ).fetchone()
+        if not used:
+            conn.execute("UPDATE strategies SET retired=1 WHERE id=?", (strategy_id,))
+
+
+def import_tradebuddy_history(
+    path: Path,
+    account_login: str,
+    broker: str,
+    *,
+    current_account: str | None = None,
+    create_missing: bool = False,
+) -> dict[str, Any]:
     if not path.is_file():
         raise FileNotFoundError(str(path))
     source_account = str(account_login)
     source_file = path.name
     parsed = parse_tradebuddy(path)
     now = utcnow()
-    grouped: dict[tuple[str, int, str], list[dict[str, Any]]] = {}
+    grouped: dict[tuple[str, int], list[dict[str, Any]]] = {}
     for trade in parsed:
         grouped.setdefault(_group_key(trade), []).append(trade)
 
@@ -175,14 +302,18 @@ def import_tradebuddy_history(path: Path, account_login: str, broker: str) -> di
 
         mapping_count = 0
         summaries = []
-        for (_, magic, comment), trades in grouped.items():
+        for (_, magic), trades in grouped.items():
             symbol = trades[0]["symbol"]
-            strategy_id = _find_strategy(conn, comment, symbol, "100121894") or _find_strategy(conn, comment, symbol, source_account)
+            target_account = str(current_account or source_account)
+            family = _preferred_family(trades, symbol, magic)
+            strategy_id, duplicate_ids = _canonical_group_strategy(
+                conn, source_account, target_account, symbol, magic, family, now, create_missing
+            )
             net_profit = round(sum(float(trade["profit"]) for trade in trades), 2)
             item = {
                 "symbol": symbol,
                 "magic": magic,
-                "comment": comment,
+                "comment": family,
                 "trades": len(trades),
                 "profit": net_profit,
                 "strategy_id": strategy_id,
@@ -207,6 +338,21 @@ def import_tradebuddy_history(path: Path, account_login: str, broker: str) -> di
                             now,
                         ),
                     )
+                if current_account:
+                    conn.execute(
+                        """INSERT INTO strategy_account_lineage(
+                             strategy_id,account_login,role,source,created_at
+                           ) VALUES(?,?,?,?,?)
+                           ON CONFLICT(strategy_id,account_login) DO UPDATE SET
+                             role='current',source=excluded.source""",
+                        (strategy_id, target_account, "current", "dashboard", now),
+                    )
+                # A group owns every comment variant for its symbol + magic.
+                conn.execute(
+                    """DELETE FROM mappings WHERE account_login=? AND role='historical'
+                       AND LOWER(symbol)=LOWER(?) AND magic=?""",
+                    (source_account, symbol, magic),
+                )
                 conn.execute(
                     """INSERT INTO mappings(
                          strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,role,
@@ -220,13 +366,14 @@ def import_tradebuddy_history(path: Path, account_login: str, broker: str) -> di
                         source_account,
                         symbol,
                         magic,
-                        comment,
+                        "",
                         "historical",
                         0.95,
                         1,
                         now,
                     ),
                 )
+                _retire_empty_history_strategies(conn, duplicate_ids)
                 mapping_count += 1
             summaries.append(item)
         after = int(conn.execute("SELECT COUNT(*) FROM imported_history_trades").fetchone()[0])

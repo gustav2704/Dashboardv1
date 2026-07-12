@@ -2,7 +2,55 @@ import json
 from pathlib import Path
 
 from app import db
-from app.mt5_bridge import BRIDGE_RELATIVE, ingest_responses, register_terminal
+from app.mt5_bridge import (
+    BRIDGE_RELATIVE,
+    ingest_responses,
+    register_terminal,
+    reuse_terminal_for_account,
+)
+
+
+def test_reusing_data_dir_archives_old_account_rows(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "reuse.db")
+    db.init_db()
+    data_dir = tmp_path / "terminal"
+    (data_dir / "MQL5").mkdir(parents=True)
+    (data_dir / "origin.txt").write_text("C:\\MT5", encoding="utf-8")
+    terminal = register_terminal("Darwinex Live", str(data_dir))
+    now = db.utcnow()
+    with db.session() as conn:
+        conn.execute(
+            "UPDATE terminals SET account_login='4000094894',server='Darwinex-Live' WHERE id=?",
+            (terminal["id"],),
+        )
+        strategy_id = conn.execute(
+            "INSERT INTO strategies(sqx_name,account_login,created_at) VALUES(?,?,?)",
+            ("Old bot", "4000094894", now),
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO mappings(strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,created_at)
+               VALUES(?,?,?,?,?,?,?)""",
+            (strategy_id, terminal["id"], "4000094894", "XAUUSD", 1, "Old", now),
+        )
+        conn.execute(
+            """INSERT INTO positions(terminal_id,ticket,position_id,symbol,direction,time_msc,volume,
+               open_price,current_price,magic,comment,raw_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (terminal["id"], 1, 1, "XAUUSD", "Long", 1, .1, 1, 1, 1, "Old", "{}"),
+        )
+    result = reuse_terminal_for_account(
+        terminal["id"], "3000097316", "Darwinex-Demo", "dwnx demo"
+    )
+    with db.session() as conn:
+        current = conn.execute("SELECT * FROM terminals WHERE id=?", (terminal["id"],)).fetchone()
+        assert (current["name"], current["account_login"], current["cursor_msc"]) == (
+            "dwnx demo", "3000097316", 0
+        )
+        assert conn.execute(
+            "SELECT terminal_id FROM positions WHERE ticket=1"
+        ).fetchone()[0] == result["archive_terminal_id"]
+        assert conn.execute(
+            "SELECT terminal_id FROM mappings WHERE strategy_id=?", (strategy_id,)
+        ).fetchone()[0] == result["archive_terminal_id"]
 
 
 def test_sync_response_is_ingested_and_deduplicated(tmp_path, monkeypatch):

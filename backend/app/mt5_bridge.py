@@ -15,6 +15,59 @@ from .db import session, utcnow
 BRIDGE_RELATIVE = Path("MQL5") / "Files" / "Dashboardv1"
 
 
+def reuse_terminal_for_account(
+    terminal_id: int,
+    new_account: str,
+    new_server: str,
+    new_name: str,
+) -> dict[str, Any]:
+    """Archive account-scoped rows before a DataDir logs into another account."""
+    with session() as conn:
+        terminal = conn.execute("SELECT * FROM terminals WHERE id=?", (terminal_id,)).fetchone()
+        if not terminal:
+            raise KeyError("Terminal not found")
+        old_account = str(terminal["account_login"] or "")
+        archive_id = None
+        if old_account and old_account != str(new_account):
+            archive_dir = f"archive://terminal/{terminal_id}/{old_account}"
+            archived = conn.execute("SELECT id FROM terminals WHERE data_dir=?", (archive_dir,)).fetchone()
+            if archived:
+                archive_id = int(archived["id"])
+            else:
+                archive_id = int(conn.execute(
+                    """INSERT INTO terminals(
+                         name,data_dir,account_login,server,status,last_seen,last_sync,
+                         last_error,cursor_msc,created_at
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        f"Archived {terminal['name']} {old_account}", archive_dir,
+                        old_account, terminal["server"], "history", terminal["last_seen"],
+                        terminal["last_sync"], None, terminal["cursor_msc"], utcnow(),
+                    ),
+                ).lastrowid)
+            for table in ("deals", "positions", "pending_orders", "account_snapshots"):
+                conn.execute(
+                    f"UPDATE {table} SET terminal_id=? WHERE terminal_id=?",
+                    (archive_id, terminal_id),
+                )
+            conn.execute(
+                """UPDATE mappings SET terminal_id=?
+                   WHERE terminal_id=? AND account_login=?""",
+                (archive_id, terminal_id, old_account),
+            )
+        conn.execute(
+            """UPDATE terminals SET name=?,account_login=?,server=?,status='connecting',
+               last_seen=NULL,last_sync=NULL,last_error=NULL,cursor_msc=0 WHERE id=?""",
+            (new_name, str(new_account), new_server, terminal_id),
+        )
+    return {
+        "terminal_id": terminal_id,
+        "archive_terminal_id": archive_id,
+        "old_account": old_account,
+        "new_account": str(new_account),
+    }
+
+
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=path.name, suffix=".tmp", dir=path.parent)

@@ -1,0 +1,7 @@
+generated_utc,account_login,server,chart_id,symbol,timeframe,ex5_name,magic_number,expected_comment,observed_comments,attached,terminal_connected,algo_trading_global,account_trade_allowed,status,trade_status,entry_deals,first_trade,last_trade,warnings
+"2026-07-12T20:11:10Z","7396577","FirstPrudentialMarkets-Demo","134253021437125659","US30","H1","WF Matrix - Strategy 3.8.23(1)(1).ex5","","","","SI","SI","SI","SI","ACTIVO","MN_DESCONOCIDO","0","","","MN_DESCONOCIDO"
+"2026-07-12T20:11:10Z","7396577","FirstPrudentialMarkets-Demo","134253021450412133","US30","H1","WF Matrix - Strategy 3.8.23(1).ex5","","","","SI","SI","SI","SI","ACTIVO","MN_DESCONOCIDO","0","","","MN_DESCONOCIDO"
+"2026-07-12T20:11:10Z","7396577","FirstPrudentialMarkets-Demo","134253021464002323","US30","H1","WF Matrix - Strategy 4.7.21(2).ex5","","","","SI","SI","SI","SI","ACTIVO","MN_DESCONOCIDO","0","","","MN_DESCONOCIDO"
+"2026-07-12T20:11:10Z","7396577","FirstPrudentialMarkets-Demo","134253021476975059","US30","H1","WF Matrix - Strategy 5.1.22(1)(1).ex5","","","","SI","SI","SI","SI","ACTIVO","MN_DESCONOCIDO","0","","","MN_DESCONOCIDO"
+"2026-07-12T20:11:10Z","7396577","FirstPrudentialMarkets-Demo","134253024154341691","US30","H1","WF Matrix - Strategy 5.1.22(1).ex5","","","","SI","SI","SI","SI","ACTIVO","MN_DESCONOCIDO","0","","","MN_DESCONOCIDO"
+"2026-07-12T20:11:10Z","7396577","FirstPrudentialMarkets-Demo","134283602132185488","BTCUSD","H1",".ex5","","","","SI","SI","SI","SI","ACTIVO","MN_DESCONOCIDO","0","","","MN_DESCONOCIDO"

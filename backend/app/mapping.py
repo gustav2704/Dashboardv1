@@ -43,6 +43,19 @@ def version_signature(value: str) -> tuple[int, ...]:
     return matches[-1]
 
 
+def stable_comment(comment: str, magic: int = 0) -> str:
+    """Collapse per-trade timestamps while preserving the EA family name."""
+    value = str(comment or "").strip()
+    if not value:
+        return ""
+    value = re.sub(r"\|bar=\d+$", "", value, flags=re.IGNORECASE)
+    value = re.sub(
+        r"[|:]\d+(?:[|:]\d+)*(?:\|(BUY|SELL))?$", "", value,
+        flags=re.IGNORECASE,
+    )
+    return value.strip(" |:")
+
+
 def _prefix_score(left: str, right: str) -> float:
     if not left or not right:
         return 0.0
@@ -155,23 +168,39 @@ def _candidate(
 
 
 def _observed(conn: Any) -> list[Any]:
-    return conn.execute(
+    observed = conn.execute(
         """WITH identities AS (
-             SELECT d.terminal_id,t.account_login,d.symbol,d.magic,d.comment,1 deal_count
+             SELECT d.terminal_id,t.account_login,d.symbol,d.magic,d.comment,1 deal_count,0 position_count
              FROM deals d JOIN terminals t ON t.id=d.terminal_id
              WHERE UPPER(d.entry_type) IN ('IN','INOUT')
            UNION ALL
-             SELECT p.terminal_id,t.account_login,p.symbol,p.magic,p.comment,0 deal_count
+             SELECT p.terminal_id,t.account_login,p.symbol,p.magic,p.comment,0 deal_count,1 position_count
              FROM positions p JOIN terminals t ON t.id=p.terminal_id
              UNION ALL
-             SELECT o.terminal_id,t.account_login,o.symbol,o.magic,o.comment,0 deal_count
+             SELECT o.terminal_id,t.account_login,o.symbol,o.magic,o.comment,0 deal_count,0 position_count
              FROM pending_orders o JOIN terminals t ON t.id=o.terminal_id
            )
-           SELECT terminal_id,account_login,symbol,magic,comment,SUM(deal_count) deal_count
+           SELECT terminal_id,account_login,symbol,magic,comment,SUM(deal_count) deal_count,
+                  SUM(position_count) position_count
            FROM identities
            GROUP BY terminal_id,account_login,symbol,magic,comment
            ORDER BY terminal_id,symbol,magic,comment"""
     ).fetchall()
+    grouped: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for row in observed:
+        comment = stable_comment(str(row["comment"] or ""), int(row["magic"] or 0))
+        key = (
+            row["terminal_id"], row["account_login"], row["symbol"],
+            int(row["magic"] or 0), comment,
+        )
+        item = grouped.setdefault(key, {
+            "terminal_id": row["terminal_id"], "account_login": row["account_login"],
+            "symbol": row["symbol"], "magic": int(row["magic"] or 0),
+            "comment": comment, "deal_count": 0, "position_count": 0,
+        })
+        item["deal_count"] += int(row["deal_count"] or 0)
+        item["position_count"] += int(row["position_count"] or 0)
+    return list(grouped.values())
 
 
 def _is_mapped(item: Any, mappings: list[Any]) -> bool:
@@ -215,7 +244,9 @@ def _matching_experts(comment: str, expert_names: list[str]) -> list[str]:
 def suggestions() -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     with session() as conn:
-        strategies = conn.execute("SELECT * FROM strategies WHERE retired=0").fetchall()
+        strategies = conn.execute(
+            "SELECT * FROM strategies WHERE retired=0 AND archived_at IS NULL"
+        ).fetchall()
         aliases = _aliases_by_strategy(conn)
         observed = _observed(conn)
         mapped = conn.execute(
@@ -300,18 +331,22 @@ def ensure_mt5_strategies() -> dict[str, int]:
         mappings = conn.execute(
             "SELECT terminal_id,symbol,magic,comment_pattern FROM mappings WHERE confirmed=1 AND role='live'"
         ).fetchall()
+        # Archived strategies stay in identity matching so MT5 activity can
+        # reactivate the existing row instead of creating a duplicate.
         strategies = conn.execute("SELECT * FROM strategies WHERE retired=0").fetchall()
         aliases = _aliases_by_strategy(conn)
         for item in _observed(conn):
             if _is_mapped(item, mappings):
                 conn.execute(
                     """UPDATE strategies SET last_observed_at=?,
+                       archived_at=CASE WHEN ? THEN NULL ELSE archived_at END,
+                       archive_reason=CASE WHEN ? THEN NULL ELSE archive_reason END,
                        origin=CASE WHEN origin='excel' THEN 'mt5+excel' ELSE origin END
                        WHERE id IN (
                          SELECT strategy_id FROM mappings
                          WHERE confirmed=1 AND role='live' AND terminal_id=? AND LOWER(symbol)=LOWER(?) AND magic=?
                        )""",
-                    (now, item["terminal_id"], item["symbol"], item["magic"]),
+                    (now, bool(item["deal_count"] or item["position_count"]), bool(item["deal_count"] or item["position_count"]), item["terminal_id"], item["symbol"], item["magic"]),
                 )
                 continue
 
@@ -340,9 +375,11 @@ def ensure_mt5_strategies() -> dict[str, int]:
                 strategy_id = exact[0]["id"]
                 conn.execute(
                     """UPDATE strategies SET last_observed_at=?,
+                       archived_at=CASE WHEN ? THEN NULL ELSE archived_at END,
+                       archive_reason=CASE WHEN ? THEN NULL ELSE archive_reason END,
                        origin=CASE WHEN origin='excel' THEN 'mt5+excel' ELSE origin END
                        WHERE id=?""",
-                    (now, strategy_id),
+                    (now, bool(item["deal_count"] or item["position_count"]), bool(item["deal_count"] or item["position_count"]), strategy_id),
                 )
                 linked += 1
             elif len(exact) > 1:

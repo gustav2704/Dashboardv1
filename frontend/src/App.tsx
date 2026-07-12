@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Activity, CandlestickChart, FlaskConical, LayoutDashboard, Pause, Play, RefreshCw, RotateCcw, Settings as SettingsIcon, Square, TrendingUp, Trash2 } from 'lucide-react'
+import { Activity, Archive, BookOpen, CandlestickChart, FlaskConical, LayoutDashboard, Pause, Play, RefreshCw, RotateCcw, Settings as SettingsIcon, Square, TrendingUp, Trash2 } from 'lucide-react'
 import { Bar, BarChart, CartesianGrid, Cell, ReferenceLine, ResponsiveContainer, Scatter, ScatterChart, Tooltip, XAxis, YAxis, ZAxis } from 'recharts'
 import { api } from './api'
 import ChartPanel from './ChartPanel'
-import type { BacktestBatch, BacktestCandidates, BacktestDefaults, BacktestRun, BacktestSummary, Baseline, Dashboard, Metrics, RiskCheck, RiskGuard, Strategy, StrategyDeletionImpact, StrategyDetails } from './types'
+import JournalAnalysis, { TopTenCharts } from './JournalAnalysis'
+import type { BacktestBatch, BacktestCandidates, BacktestDefaults, BacktestRun, BacktestSummary, Baseline, Dashboard, JournalAnalysisData, Metrics, RiskCheck, RiskGuard, Strategy, StrategyArchiveImpact, StrategyDeletionImpact, StrategyDetails } from './types'
 
-type Tab = 'overview' | 'performance' | 'detail' | 'chart' | 'backtests' | 'settings'
+type Tab = 'overview' | 'performance' | 'journal' | 'detail' | 'chart' | 'backtests' | 'settings'
 type SortKey = 'state' | 'source' | 'backtest' | 'edge' | 'egt' | 'strategy' | 'symbol' | 'account' | 'magic' | 'net_profit' | 'trades' | 'win_rate' | 'profit_factor' | 'max_drawdown' | 'avg_wl' | 'best_trade' | 'today_profit' | 'history'
 type SortDirection = 'ascending' | 'descending'
 type SortState = { key: SortKey; direction: SortDirection } | null
@@ -36,11 +37,16 @@ function duration(seconds: number) {
 function tradeDuration(openTime: number, closeTime: number) {
   return duration(Math.max(0, closeTime - openTime) / 1000)
 }
-function buildDashboardQuery(windowName: string, customStart: string, customEnd: string) {
+function buildDashboardQuery(windowName: string, customStart: string, customEnd: string, selectedAccounts: Set<string> | null) {
   const params = new URLSearchParams({ window: windowName })
   if (windowName === 'custom' && customStart && customEnd) {
     params.set('start', customStart)
     params.set('end', customEnd)
+  }
+  if (selectedAccounts !== null) {
+    params.set('filter_accounts', 'true')
+    params.set('include_unassigned', String(selectedAccounts.has(UNASSIGNED_ACCOUNT)))
+    for (const account of selectedAccounts) if (account !== UNASSIGNED_ACCOUNT) params.append('accounts', account)
   }
   return params.toString()
 }
@@ -56,31 +62,53 @@ const accountAliases: Record<string, string> = {
   '7396577': 'Demo FP master',
   '4000094894': 'Live Dwnx',
   '100121894': 'Demo FP experimental',
+  '3000097316': 'dwnx demo',
 }
 function accountAlias(account: string | null | undefined) {
   return accountAliases[String(account || '').trim()] || ''
 }
-function addBrokerAccount(accounts: Set<string>, account: string | null | undefined) {
-  const normalized = String(account || '').trim()
-  if (normalized) accounts.add(normalized)
+type AccountFilterProps = {
+  accounts: string[]
+  hasUnassigned: boolean
+  selected: Set<string> | null
+  onChange: (selected: Set<string>) => void
+  compact?: boolean
 }
-function strategyBrokerAccounts(strategy: Strategy) {
-  const accounts = new Set<string>()
-  addBrokerAccount(accounts, strategy.account_login)
-  for (const account of strategy.lineage_accounts?.current || []) addBrokerAccount(accounts, account)
-  for (const account of strategy.lineage_accounts?.predecessor || []) addBrokerAccount(accounts, account)
-  for (const account of Object.keys(strategy.account_metrics || {})) addBrokerAccount(accounts, account)
-  return accounts
-}
-function strategyMatchesBrokerAccount(strategy: Strategy, selectedAccount: string) {
-  if (!selectedAccount) return true
-  const accounts = strategyBrokerAccounts(strategy)
-  if (selectedAccount === UNASSIGNED_ACCOUNT) return accounts.size === 0
-  return accounts.has(selectedAccount)
-}
-function brokerMetric(strategy: Strategy, selectedAccount: string) {
-  if (selectedAccount && selectedAccount !== UNASSIGNED_ACCOUNT) return strategy.account_metrics?.[selectedAccount] || null
-  return performanceMetrics(strategy)
+
+function AccountFilter({ accounts, hasUnassigned, selected, onChange, compact = false }: AccountFilterProps) {
+  const [open, setOpen] = useState(false)
+  const root = useRef<HTMLDivElement>(null)
+  const values = [...accounts, ...(hasUnassigned ? [UNASSIGNED_ACCOUNT] : [])]
+  const active = selected ?? new Set(values)
+  const allSelected = values.length > 0 && values.every(account => active.has(account))
+  const selectedCount = values.filter(account => active.has(account)).length
+  const label = allSelected ? 'Todas las cuentas' : selectedCount ? `${selectedCount} cuenta${selectedCount === 1 ? '' : 's'}` : 'Sin cuentas'
+
+  useEffect(() => {
+    const close = (event: MouseEvent) => { if (root.current && !root.current.contains(event.target as Node)) setOpen(false) }
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setOpen(false) }
+    document.addEventListener('mousedown', close)
+    document.addEventListener('keydown', onKeyDown)
+    return () => { document.removeEventListener('mousedown', close); document.removeEventListener('keydown', onKeyDown) }
+  }, [])
+
+  function setValue(value: string, checked: boolean) {
+    const next = new Set(active)
+    if (checked) next.add(value); else next.delete(value)
+    onChange(next)
+  }
+  function toggleAll(checked: boolean) { onChange(checked ? new Set(values) : new Set()) }
+
+  return <div ref={root} className={`account-filter${compact ? ' compact' : ''}`}>
+    {!compact && <span className="account-filter-label">Cuentas de broker</span>}
+    <button type="button" className="account-filter-trigger" aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen(current => !current)}>{label}<span aria-hidden="true">⌄</span></button>
+    {open && <div className="account-filter-menu" role="listbox" aria-label="Cuentas de broker" aria-multiselectable="true">
+      <label className="account-filter-option all"><input type="checkbox" checked={allSelected} onChange={event => toggleAll(event.target.checked)} />Todas las cuentas</label>
+      <div className="account-filter-divider" />
+      {accounts.map(account => <label key={account} className="account-filter-option"><input type="checkbox" checked={active.has(account)} onChange={event => setValue(account, event.target.checked)} />{accountAlias(account) ? <><strong>{account}</strong><small>{accountAlias(account)}</small></> : account}</label>)}
+      {hasUnassigned && <label className="account-filter-option"><input type="checkbox" checked={active.has(UNASSIGNED_ACCOUNT)} onChange={event => setValue(UNASSIGNED_ACCOUNT, event.target.checked)} />Sin asignar</label>}
+    </div>}
+  </div>
 }
 function healthLabel(status: string) {
   return status === 'gray' ? 'Not evaluated' : status === 'green' ? 'In range' : status === 'yellow' ? 'Attention' : 'Deviation'
@@ -137,6 +165,14 @@ function SortableHeader({ label, sortKey, sort, onSort }: { label: string; sortK
 
 const strategyCollator = new Intl.Collator('es-MX', { numeric: true, sensitivity: 'base' })
 
+function displayName(strategy: Pick<Strategy, 'display_name' | 'mql5_name' | 'sqx_name'>) {
+  return strategy.display_name || strategy.mql5_name || strategy.sqx_name
+}
+
+function primaryMagicLabel(strategy: Pick<Strategy, 'primary_magic_number'>) {
+  return strategy.primary_magic_number == null ? '—' : String(strategy.primary_magic_number)
+}
+
 function sortValue(strategy: Strategy, key: SortKey): string | number | null {
   switch (key) {
     case 'state': return stateLabels[strategy.state] || strategy.state
@@ -144,10 +180,10 @@ function sortValue(strategy: Strategy, key: SortKey): string | number | null {
     case 'backtest': return backtestLabels[strategy.backtest.state]
     case 'edge': return strategy.sqx_analytics?.edge.available ? strategy.sqx_analytics.edge.score ?? null : null
     case 'egt': return strategy.sqx_analytics?.egt.available ? strategy.sqx_analytics.egt.total ?? null : null
-    case 'strategy': return strategy.mql5_name || strategy.sqx_name
+    case 'strategy': return displayName(strategy)
     case 'symbol': return strategy.symbol || null
     case 'account': return strategy.account_login || null
-    case 'magic': return strategy.magic_numbers?.[0] ?? null
+    case 'magic': return strategy.primary_magic_number
     case 'net_profit': return performanceMetrics(strategy).net_profit
     case 'trades': return performanceMetrics(strategy).trades
     case 'win_rate': return performanceMetrics(strategy).win_rate
@@ -321,6 +357,44 @@ type PerformancePoint = {
   confidence: 'low' | 'established'
 }
 
+function ArchiveStrategyNotice({ strategy, onArchived }: { strategy: Strategy; onArchived: (strategyId: number) => void }) {
+  const [impact, setImpact] = useState<StrategyArchiveImpact | null>(null)
+  const [archiving, setArchiving] = useState(false)
+  const [error, setError] = useState('')
+  useEffect(() => {
+    let cancelled = false
+    setImpact(null)
+    setError('')
+    api<StrategyArchiveImpact>(`/api/strategies/${strategy.id}/archive-impact`)
+      .then(value => { if (!cancelled) setImpact(value) })
+      .catch(err => { if (!cancelled) setError(err instanceof Error ? err.message : 'Could not check archive eligibility') })
+    return () => { cancelled = true }
+  }, [strategy.id])
+  if (!impact?.allowed) return error ? <small className="archive-error">{error}</small> : null
+  const archiveImpact = impact
+  async function archive() {
+    setArchiving(true)
+    setError('')
+    try {
+      const labels: Record<string, string> = { sin_mn: 'no live magic number', sin_trades: 'no lifetime trades' }
+      const reason = archiveImpact.reasons.map(value => labels[value] || value).join(' and ')
+      if (!window.confirm(`Archive "${archiveImpact.name}" from the dashboard?\n\nIt is eligible because it has ${reason}. All its data will be preserved and it will return automatically if MT5 detects a position or trade.`)) return
+      await api(`/api/strategies/${strategy.id}/archive`, { method: 'POST' })
+      onArchived(strategy.id)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not archive strategy')
+    } finally {
+      setArchiving(false)
+    }
+  }
+  const reasonLabel = archiveImpact.reasons.map(value => value === 'sin_mn' ? 'No live MN' : 'No lifetime trades').join(' · ')
+  return <div className="archive-strategy-notice">
+    <div><strong>Archive candidate</strong><span>{reasonLabel}. Data will be retained.</span></div>
+    <button className="button" type="button" disabled={archiving} onClick={archive}><Archive size={14}/>{archiving ? 'Archiving…' : 'Archive'}</button>
+    {error && <small>{error}</small>}
+  </div>
+}
+
 function performanceColor(value: number) {
   if (value > 0) return '#2dd4bf'
   if (value < 0) return '#fb7185'
@@ -348,32 +422,32 @@ function PerformanceTooltip({ active, payload }: { active?: boolean; payload?: A
 type PerformanceProps = {
   strategies: Strategy[]
   onSelect: (strategyId: number) => void
-  selectedAccount: string
   windowName: string
   onWindowChange: (windowName: string) => void
   customStart: string
   onCustomStartChange: (value: string) => void
   customEnd: string
   onCustomEndChange: (value: string) => void
+  journalData: JournalAnalysisData | null
+  accountLabel: string
 }
 
 function Performance({
   strategies,
   onSelect,
-  selectedAccount,
   windowName,
   onWindowChange,
   customStart,
   onCustomStartChange,
   customEnd,
   onCustomEndChange,
+  journalData,
+  accountLabel,
 }: PerformanceProps) {
-  const candidates = selectedAccount
-    ? strategies.filter(strategy => selectedAccount === UNASSIGNED_ACCOUNT || strategy.account_metrics?.[selectedAccount] != null)
-    : strategies
+  const candidates = strategies
   const available = candidates
     .map(strategy => {
-      const metrics = brokerMetric(strategy, selectedAccount)
+      const metrics = performanceMetrics(strategy)
       if (!metrics) return null
       if (
         metrics.trades < 10
@@ -384,8 +458,8 @@ function Performance({
       ) return null
       return {
         id: strategy.id,
-        name: strategy.mql5_name || strategy.sqx_name,
-        accountLabel: selectedAccount && selectedAccount !== UNASSIGNED_ACCOUNT ? `Account ${selectedAccount}` : 'Lifetime lineage',
+        name: displayName(strategy),
+        accountLabel: 'Selected broker accounts',
         symbol: strategy.symbol,
         tradeEdge: metrics.trade_edge,
         monthlySqn: metrics.monthly_sqn,
@@ -464,6 +538,7 @@ function Performance({
         </div>
       </section>
     </>}
+    <TopTenCharts data={journalData} accountLabel={accountLabel}/>
   </div>
 }
 
@@ -511,6 +586,30 @@ function StrategyNoteEditor({ strategy, onSaved, placement }: { strategy: Strate
   </section>
 }
 
+function MagicNumbersPanel({ strategy, mappings, placement = 'detail' }: {
+  strategy: Strategy; mappings?: StrategyDetails['mappings']; placement?: 'detail' | 'drawer'
+}) {
+  const fallback = [
+    ...strategy.magic_numbers.map(magic => ({ magic, roles: ['Live'], mappings: [] as StrategyDetails['mappings'] })),
+    ...strategy.historical_magic_numbers.map(magic => ({ magic, roles: ['Historical'], mappings: [] as StrategyDetails['mappings'] })),
+  ]
+  const grouped = new Map<number, { magic: number; roles: string[]; mappings: StrategyDetails['mappings'] }>()
+  for (const mapping of mappings || fallback.flatMap(item => item.mappings.length ? item.mappings : [{ magic: item.magic, role: item.roles[0].toLowerCase() } as StrategyDetails['mappings'][number]])) {
+    if (mapping.magic == null) continue
+    const current = grouped.get(mapping.magic) || { magic: mapping.magic, roles: [], mappings: [] }
+    const role = mapping.role === 'historical' ? 'Historical' : 'Live'
+    if (!current.roles.includes(role)) current.roles.push(role)
+    if (mappings) current.mappings.push(mapping)
+    grouped.set(mapping.magic, current)
+  }
+  const entries = [...grouped.values()].sort((left, right) => left.magic - right.magic)
+  const className = placement === 'drawer' ? 'drawer-section magic-numbers-panel' : 'panel magic-numbers-panel'
+  return <section className={className}>
+    <div className="magic-numbers-heading"><div><span className="eyebrow">MAGIC NUMBERS</span><h2>{entries.length ? `${entries.length} registered` : 'No registered MN'}</h2></div></div>
+    {entries.length ? <div className="magic-number-list">{entries.map(entry => <div className="magic-number-entry" key={entry.magic}><strong>{entry.magic}</strong><span>{entry.roles.join(' + ')}</span>{entry.mappings.length ? <small>{entry.mappings.map(mapping => [mapping.symbol, mapping.account_login, mapping.comment_pattern || 'No comment'].filter(Boolean).join(' · ')).join(' / ')}</small> : null}</div>)}</div> : <div className="drawer-empty">No live or historical mappings have a Magic Number.</div>}
+  </section>
+}
+
 function StrategyDetail({ strategy, onDeleted, onNoteSaved }: { strategy: Strategy; onDeleted: (strategyId: number) => void; onNoteSaved: NoteSavedHandler }) {
   const m = strategy.metrics
   const lifetime = strategy.lifetime_metrics
@@ -519,8 +618,9 @@ function StrategyDetail({ strategy, onDeleted, onNoteSaved }: { strategy: Strate
   const b = strategy.baselines.find(item => `${item.source}:${item.sample_type}:${item.synced_at}` === baselineId) || strategy.baseline
   return <div className="detail-grid">
     <section className="panel strategy-hero">
-      <div className="strategy-title"><div><span className="symbol-pill">{strategy.symbol}</span><h2>{strategy.mql5_name || strategy.sqx_name}</h2><p>{strategy.sqx_name}{strategy.sqx ? ` · ${strategy.sqx.project} / ${strategy.sqx.databank} · ${strategy.sqx.timeframe}` : ''}</p></div><div className={`health-badge ${strategy.health.status}`}><HealthDot status={strategy.health.status}/>{healthLabel(strategy.health.status)}</div></div>
+      <div className="strategy-title"><div><span className="symbol-pill">{strategy.symbol}</span><h2>{displayName(strategy)}</h2><p>{strategy.sqx_name}{strategy.sqx ? ` · ${strategy.sqx.project} / ${strategy.sqx.databank} · ${strategy.sqx.timeframe}` : ''}</p></div><div className={`health-badge ${strategy.health.status}`}><HealthDot status={strategy.health.status}/>{healthLabel(strategy.health.status)}</div></div>
       <MissingSqxNotice strategy={strategy} onDeleted={onDeleted} />
+      <ArchiveStrategyNotice strategy={strategy} onArchived={onDeleted} />
       <div className="hero-stats"><div><span>Realized P/L</span><strong>{money(m.net_profit)}</strong></div><div><span>Floating P/L</span><strong>{money(m.floating_profit)}</strong></div><div><span>Trades</span><strong>{m.trades}</strong></div><div><span>Positions</span><strong>{m.open_positions}</strong></div></div>
       <div className="reason-list">{strategy.health.reasons.map(reason => <span key={reason}>{reason}</span>)}{!strategy.health.reasons.length && <span>No active alerts</span>}</div>
     </section>
@@ -534,6 +634,7 @@ function StrategyDetail({ strategy, onDeleted, onNoteSaved }: { strategy: Strate
       <Comparison label="Trades / month" current={m.trades_per_month} baseline={baselineValue(b, 'AvgTradesPerMonth')} />
       <Comparison label="Max drawdown" current={m.max_drawdown} baseline={baselineValue(b, 'MaxDD', 'Drawdown')} format={money} />
     </section>
+    <MagicNumbersPanel strategy={strategy} />
     <StrategyNoteEditor strategy={strategy} onSaved={onNoteSaved} placement="detail" />
     <section className="panel compact-metrics"><div><span>Win rate</span><strong>{(m.win_rate * 100).toFixed(1)}%</strong></div><div><span>Average duration</span><strong>{duration(m.avg_duration_seconds)}</strong></div><div><StreakPair metrics={lifetime} /></div><div><span>Average win</span><strong>{money(m.avg_win)}</strong></div><div><span>Average loss</span><strong>{money(m.avg_loss)}</strong></div><div><span>Commission + swap</span><strong>{money(m.commissions + m.swaps)}</strong></div></section>
     <SQXAnalyticsPanel strategy={strategy} />
@@ -595,17 +696,19 @@ function StrategySidePanel({ strategy, query, onClose, onDeleted, onNoteSaved }:
   const history = detail ? [...detail.trades].reverse().slice(0, 80) : []
   return <aside className="strategy-drawer" aria-label="Quick strategy statistics">
     <div className="drawer-header">
-      <div><strong>{active.mql5_name || active.sqx_name}</strong><span>{active.symbol || 'No symbol'} · {m.trades} trades in history</span></div>
+      <div><strong>{displayName(active)}</strong><span>{active.symbol || 'No symbol'} · {m.trades} trades in history</span></div>
       <button className="drawer-close" type="button" onClick={onClose}>Close</button>
     </div>
     <div className="drawer-body">
       {error && <div className="drawer-error">{error}</div>}
       {!detail && !error && <div className="drawer-loading">Loading details…</div>}
       <MissingSqxNotice strategy={active} onDeleted={onDeleted} />
+      <ArchiveStrategyNotice strategy={active} onArchived={onDeleted} />
       <StrategyNoteEditor strategy={active} placement="drawer" onSaved={(strategyId, note, noteUpdatedAt) => {
         setDetail(current => current ? { ...current, note, note_updated_at: noteUpdatedAt } : current)
         onNoteSaved(strategyId, note, noteUpdatedAt)
       }} />
+      {detail && <MagicNumbersPanel strategy={active} mappings={detail.mappings} placement="drawer" />}
       <div className="drawer-stat-grid">
         <DrawerMetric label="Lifetime P/L" value={signedMoney(lifetime.net_profit)} detail={`${lifetime.trades} total trades`} tone={lifetime.net_profit >= 0 ? 'positive' : 'negative'} />
         <DrawerMetric label="Current P/L" value={signedMoney(m.net_profit)} detail={`${m.trades} live-account trades | Exp ${money(m.expectancy)}`} tone={m.net_profit >= 0 ? 'positive' : 'negative'} />
@@ -813,7 +916,7 @@ function Backtests({ strategies, initialStrategyId, onCompleted }: { strategies:
         </div>
       </div>
       <div className="backtest-form">
-        <label className="wide">Strategy<select value={strategyId} disabled={!strategies.length} onChange={event => setStrategyId(Number(event.target.value))}>{strategies.length ? strategies.map(strategy => <option key={strategy.id} value={strategy.id}>{strategy.symbol} - {strategy.mql5_name || strategy.sqx_name}</option>) : <option value={0}>No strategies for selected account</option>}</select></label>
+        <label className="wide">Strategy<select value={strategyId} disabled={!strategies.length} onChange={event => setStrategyId(Number(event.target.value))}>{strategies.length ? strategies.map(strategy => <option key={strategy.id} value={strategy.id}>{strategy.symbol} - {displayName(strategy)}</option>) : <option value={0}>No strategies for selected account</option>}</select></label>
         <label>Broker<input value={form?.broker || ''} readOnly /></label>
         <label>Symbol<input value={form?.symbol || ''} onChange={event => update('symbol', event.target.value)} /></label>
         <label>Timeframe<select value={form?.timeframe || 'H1'} onChange={event => update('timeframe', event.target.value)}>{['M15','M30','H1','H4','D1'].map(value => <option key={value}>{value}</option>)}</select></label>
@@ -953,11 +1056,12 @@ function Settings({ reload }: { reload: () => void }) {
 
 export default function App() {
   const [data, setData] = useState<Dashboard | null>(null)
+  const [journalData, setJournalData] = useState<JournalAnalysisData | null>(null)
   const [tab, setTab] = useState<Tab>('overview')
   const [windowName, setWindowName] = useState('all')
   const [customStart, setCustomStart] = useState('')
   const [customEnd, setCustomEnd] = useState('')
-  const [brokerAccountFilter, setBrokerAccountFilter] = useState('')
+  const [brokerAccounts, setBrokerAccounts] = useState<Set<string> | null>(null)
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [panelStrategyId, setPanelStrategyId] = useState<number | null>(null)
   const [query, setQuery] = useState('')
@@ -973,9 +1077,19 @@ export default function App() {
   const overviewTableRef = useRef<HTMLTableElement>(null)
   const [overviewScrollWidth, setOverviewScrollWidth] = useState(0)
   const [overviewHasOverflow, setOverviewHasOverflow] = useState(false)
-  const dashboardQuery = useMemo(() => buildDashboardQuery(windowName, customStart, customEnd), [windowName, customStart, customEnd])
+  const dashboardQuery = useMemo(() => buildDashboardQuery(windowName, customStart, customEnd, brokerAccounts), [windowName, customStart, customEnd, brokerAccounts])
   async function load() {
-    try { const payload = await api<Dashboard>(`/api/dashboard?${dashboardQuery}`); setData(payload); setSelectedId(current => current ?? payload.strategies[0]?.id ?? null); setError('') }
+    try {
+      const [payload, journalPayload] = await Promise.all([
+        api<Dashboard>(`/api/dashboard?${dashboardQuery}`),
+        api<JournalAnalysisData>(`/api/journal-analysis?${dashboardQuery}`),
+      ])
+      setData(payload)
+      setJournalData(journalPayload)
+      setBrokerAccounts(current => current ?? new Set([...payload.broker_accounts, ...(payload.has_unassigned_broker_account ? [UNASSIGNED_ACCOUNT] : [])]))
+      setSelectedId(current => current ?? payload.strategies[0]?.id ?? null)
+      setError('')
+    }
     catch (err) { setError(err instanceof Error ? err.message : 'Could not connect to the backend') }
   }
   async function handleDeleted() {
@@ -1021,23 +1135,15 @@ export default function App() {
       })
     }
   }
-  useEffect(() => { if (windowName !== 'custom' || (customStart && customEnd)) load(); const timer = setInterval(load, 300_000); return () => clearInterval(timer) }, [windowName, customStart, customEnd])
+  useEffect(() => { if (windowName !== 'custom' || (customStart && customEnd)) load(); const timer = setInterval(load, 300_000); return () => clearInterval(timer) }, [windowName, customStart, customEnd, brokerAccounts])
   const allStrategies = data?.strategies || []
-  const brokerAccountOptions = useMemo(() => {
-    const accounts = new Set<string>()
-    let hasUnassigned = false
-    for (const strategy of allStrategies) {
-      const strategyAccounts = strategyBrokerAccounts(strategy)
-      if (strategyAccounts.size) {
-        for (const account of strategyAccounts) accounts.add(account)
-      } else {
-        hasUnassigned = true
-      }
-    }
-    const options = [...accounts].sort(strategyCollator.compare)
-    return hasUnassigned ? [...options, UNASSIGNED_ACCOUNT] : options
-  }, [allStrategies])
-  const brokerFilteredStrategies = useMemo(() => allStrategies.filter(strategy => strategyMatchesBrokerAccount(strategy, brokerAccountFilter)), [allStrategies, brokerAccountFilter])
+  const brokerAccountOptions = data?.broker_accounts || []
+  const activeAccountLabel = brokerAccounts === null
+    ? 'Todos los brokers'
+    : brokerAccounts.size === 1
+      ? ([...brokerAccounts][0] === UNASSIGNED_ACCOUNT ? 'Unassigned' : `Account ${[...brokerAccounts][0]}`)
+      : `${brokerAccounts.size} broker accounts`
+  const brokerFilteredStrategies = allStrategies
   useEffect(() => {
     if (!data) return
     setSelectedId(current => current && brokerFilteredStrategies.some(strategy => strategy.id === current)
@@ -1050,21 +1156,12 @@ export default function App() {
   const selected = brokerFilteredStrategies.find(strategy => strategy.id === selectedId) || null
   const panelStrategy = brokerFilteredStrategies.find(strategy => strategy.id === panelStrategyId) || null
   const visibleTotals = useMemo(() => {
-    if (!data) return null
-    if (!brokerAccountFilter) return data.totals
-    return {
-      strategies: brokerFilteredStrategies.length,
-      active: brokerFilteredStrategies.filter(strategy => strategy.state === 'active').length,
-      net_profit: brokerFilteredStrategies.reduce((total, strategy) => total + (brokerMetric(strategy, brokerAccountFilter)?.net_profit || 0), 0),
-      floating_profit: brokerFilteredStrategies.reduce((total, strategy) => total + (brokerMetric(strategy, brokerAccountFilter)?.floating_profit || 0), 0),
-      trades: brokerFilteredStrategies.reduce((total, strategy) => total + (brokerMetric(strategy, brokerAccountFilter)?.trades || 0), 0),
-      red: brokerFilteredStrategies.filter(strategy => strategy.health.status === 'red').length,
-    }
-  }, [data, brokerAccountFilter, brokerFilteredStrategies])
+    return data?.totals || null
+  }, [data])
   const filtered = useMemo(() => brokerFilteredStrategies.filter(strategy => {
-    const matchesText = `${strategy.symbol} ${strategy.sqx_name} ${strategy.mql5_name}`.toLowerCase().includes(query.toLowerCase())
+    const matchesText = `${strategy.symbol} ${strategy.display_name} ${strategy.sqx_name} ${strategy.mql5_name}`.toLowerCase().includes(query.toLowerCase())
     const normalizedMagic = magicQuery.trim()
-    const matchesMagic = !normalizedMagic || strategy.magic_numbers?.some(magic => String(magic).includes(normalizedMagic))
+    const matchesMagic = !normalizedMagic || [...strategy.magic_numbers, ...strategy.historical_magic_numbers].some(magic => String(magic).includes(normalizedMagic))
     return matchesText && matchesMagic
       && (statusFilter === 'all' || strategy.state === statusFilter)
       && (linkFilter === 'all' || strategy.link_state === linkFilter)
@@ -1114,10 +1211,10 @@ export default function App() {
   return <div className={sidebarCollapsed ? 'shell collapsed-sidebar' : 'shell'}>
     <button className="sidebar-toggle" type="button" aria-label={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'} onClick={toggleSidebar}>{sidebarCollapsed ? '›' : '‹'}</button>
     <aside className="sidebar"><Logo/><nav>{([
-      ['overview','Overview',LayoutDashboard],['performance','Performance',TrendingUp],['detail','Strategy',Activity],['chart','Chart',CandlestickChart],
+      ['overview','Overview',LayoutDashboard],['performance','Performance',TrendingUp],['journal','Journal analysis',BookOpen],['detail','Strategy',Activity],['chart','Chart',CandlestickChart],
       ['backtests','Backtests',FlaskConical],['settings','Settings',SettingsIcon],
     ] as const).map(([key,label,Icon]) => <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}><Icon size={15}/>{label}</button>)}</nav><div className="sidebar-footer"><div className="pulse"/><div><strong>Local system</strong><small>Refresh every 5 min</small></div></div></aside>
-    <main className={tab === 'overview' ? 'overview-main' : undefined}><header><div><span className="eyebrow">STRATEGY PORTFOLIO</span><h1>{tab === 'overview' ? 'Operational status' : tab === 'performance' ? 'Normalized performance' : tab === 'detail' ? 'Strategy detail' : tab === 'chart' ? 'Market trades' : tab === 'backtests' ? 'MT5 backtests' : 'Settings'}</h1></div><div className="header-actions"><label className="global-account-filter"><span>Broker account</span><select value={brokerAccountFilter} onChange={e => setBrokerAccountFilter(e.target.value)}><option value="">All broker accounts</option>{brokerAccountOptions.map(account => <option key={account} value={account}>{account === UNASSIGNED_ACCOUNT ? 'Unassigned' : account}</option>)}</select></label><select value={windowName} onChange={e => setWindowName(e.target.value)}><option value="30d">30 days</option><option value="90d">90 days</option><option value="all">All</option><option value="custom">Custom</option></select>{windowName === 'custom' && <><input aria-label="Start date" type="date" value={customStart} onChange={e => setCustomStart(e.target.value)}/><input aria-label="End date" type="date" value={customEnd} onChange={e => setCustomEnd(e.target.value)}/></>}<button className="button refresh icon-command" onClick={load}><RefreshCw size={14}/>Refresh</button></div></header>
+    <main className={tab === 'overview' ? 'overview-main' : undefined}><header><div><span className="eyebrow">STRATEGY PORTFOLIO</span><h1>{tab === 'overview' ? 'Operational status' : tab === 'performance' ? 'Normalized performance' : tab === 'journal' ? 'Journal analysis' : tab === 'detail' ? 'Strategy detail' : tab === 'chart' ? 'Market trades' : tab === 'backtests' ? 'MT5 backtests' : 'Settings'}</h1></div><div className="header-actions"><AccountFilter accounts={brokerAccountOptions} hasUnassigned={data?.has_unassigned_broker_account || false} selected={brokerAccounts} onChange={setBrokerAccounts}/><select value={windowName} onChange={e => setWindowName(e.target.value)}><option value="30d">30 days</option><option value="90d">90 days</option><option value="all">All</option><option value="custom">Custom</option></select>{windowName === 'custom' && <><input aria-label="Start date" type="date" value={customStart} onChange={e => setCustomStart(e.target.value)}/><input aria-label="End date" type="date" value={customEnd} onChange={e => setCustomEnd(e.target.value)}/></>}<button className="button refresh icon-command" onClick={load}><RefreshCw size={14}/>Refresh</button></div></header>
       {error && <div className="error-banner">{error}</div>}
       {tab === 'overview' && <>
         <section className="metrics-grid"><MetricCard label="Realized P/L" value={money(t?.net_profit)} detail={`${t?.trades || 0} closed trades`} tone={(t?.net_profit || 0) >= 0 ? 'positive' : 'negative'}/><MetricCard label="Floating P/L" value={money(t?.floating_profit)} detail="Open positions"/><MetricCard label="Active strategies" value={`${t?.active || 0} / ${t?.strategies || 0}`} detail="Full catalog"/><MetricCard label="Critical alerts" value={`${t?.red || 0}`} detail="Red deviations" tone={t?.red ? 'negative' : 'positive'}/></section>
@@ -1125,7 +1222,7 @@ export default function App() {
         <section className="panel table-panel">
           <div className="panel-heading">
             <div><span className="eyebrow">MONITORING</span><h2>All bots</h2></div>
-            <div className="filters"><input aria-label="Search strategies" placeholder="Search strategy or symbol…" value={query} onChange={e => setQuery(e.target.value)}/><input className="magic-filter" aria-label="Search MN" placeholder="Search MN…" value={magicQuery} onChange={e => setMagicQuery(e.target.value.replace(/\D/g, ''))}/><select aria-label="Broker account" value={brokerAccountFilter} onChange={e => setBrokerAccountFilter(e.target.value)}><option value="">All broker accounts</option>{brokerAccountOptions.map(account => <option key={account} value={account}>{account === UNASSIGNED_ACCOUNT ? 'Unassigned' : account}</option>)}</select><select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}><option value="all">All states</option>{Object.entries(stateLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select><select value={linkFilter} onChange={e => setLinkFilter(e.target.value)}><option value="all">All sources</option>{Object.entries(linkLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select></div>
+            <div className="filters"><input aria-label="Search strategies" placeholder="Search strategy or symbol…" value={query} onChange={e => setQuery(e.target.value)}/><input className="magic-filter" aria-label="Search MN" placeholder="Search MN…" value={magicQuery} onChange={e => setMagicQuery(e.target.value.replace(/\D/g, ''))}/><AccountFilter compact accounts={brokerAccountOptions} hasUnassigned={data?.has_unassigned_broker_account || false} selected={brokerAccounts} onChange={setBrokerAccounts}/><select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}><option value="all">All states</option>{Object.entries(stateLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select><select value={linkFilter} onChange={e => setLinkFilter(e.target.value)}><option value="all">All sources</option>{Object.entries(linkLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select></div>
           </div>
           <div ref={overviewTopScrollRef} className={`table-scroll-top${overviewHasOverflow ? '' : ' hidden'}`} aria-label="Horizontal table scroll" tabIndex={overviewHasOverflow ? 0 : -1} onScroll={() => syncOverviewScroll('top')}>
             <div className="table-scroll-top-spacer" style={{ width: overviewScrollWidth }}/>
@@ -1137,7 +1234,7 @@ export default function App() {
                 const p = performanceMetrics(strategy)
                 const h = strategy.historical_metrics
                 const alias = accountAlias(strategy.account_login)
-                return <tr key={strategy.id} className={panelStrategyId === strategy.id ? 'selected-row' : ''} onClick={() => { setSelectedId(strategy.id); setPanelStrategyId(strategy.id) }}><td className="selection-column"><input type="checkbox" aria-label={`Select ${strategy.mql5_name || strategy.sqx_name} for monitoring`} checked={strategy.selection} disabled={selectionSaving.has(strategy.id)} onClick={event => event.stopPropagation()} onChange={event => updateStrategySelection(strategy.id, event.target.checked)}/></td><td><span className={`state-tag ${strategy.state}`}><HealthDot status={strategy.health.status}/>{stateLabels[strategy.state] || strategy.state}</span></td><td><span className={`link-tag ${strategy.link_state}`}>{linkLabels[strategy.link_state] || strategy.link_state}</span>{strategy.sqx?.missing_from_sqx_at && <small className="sqx-missing">MISSING FROM SQX</small>}</td><td className="backtest-cell"><BacktestBadge summary={strategy.backtest}/></td><td><SQXAnalyticsBadge strategy={strategy} kind="edge"/></td><td><SQXAnalyticsBadge strategy={strategy} kind="egt"/></td><td><strong>{strategy.mql5_name || strategy.sqx_name}</strong><small>{strategy.sqx_name}</small></td><td>{strategy.symbol || '—'}</td><td>{strategy.account_login ? <><strong>{strategy.account_login}</strong>{alias && <small>{alias}</small>}</> : '—'}</td><td className="magic-numbers">{strategy.magic_numbers?.length ? strategy.magic_numbers.join(', ') : '—'}</td><td className={p.net_profit >= 0 ? 'value-good' : 'value-bad'}>{money(p.net_profit)}</td><td>{p.trades}</td><td>{(p.win_rate * 100).toFixed(1)}%</td><td>{money(p.avg_win)} / {money(p.avg_loss)}</td><td className={(p.best_trade || 0) >= 0 ? 'value-good' : 'value-bad'}>{money(p.best_trade)}</td><td className={strategy.metrics.today_profit >= 0 ? 'value-good' : 'value-bad'}>{money(strategy.metrics.today_profit)}</td><td>{number(p.profit_factor)}</td><td>{money(p.max_drawdown)}</td><td>{h.trades ? <span className={h.net_profit >= 0 ? 'history-badge positive' : 'history-badge negative'}>{h.trades} / {signedMoney(h.net_profit)}</span> : '—'}</td><td className="row-action">›</td></tr>
+                return <tr key={strategy.id} className={panelStrategyId === strategy.id ? 'selected-row' : ''} onClick={() => { setSelectedId(strategy.id); setPanelStrategyId(strategy.id) }}><td className="selection-column"><input type="checkbox" aria-label={`Select ${displayName(strategy)} for monitoring`} checked={strategy.selection} disabled={selectionSaving.has(strategy.id)} onClick={event => event.stopPropagation()} onChange={event => updateStrategySelection(strategy.id, event.target.checked)}/></td><td><span className={`state-tag ${strategy.state}`}><HealthDot status={strategy.health.status}/>{stateLabels[strategy.state] || strategy.state}</span></td><td><span className={`link-tag ${strategy.link_state}`}>{linkLabels[strategy.link_state] || strategy.link_state}</span>{strategy.sqx?.missing_from_sqx_at && <small className="sqx-missing">MISSING FROM SQX</small>}</td><td className="backtest-cell"><BacktestBadge summary={strategy.backtest}/></td><td><SQXAnalyticsBadge strategy={strategy} kind="edge"/></td><td><SQXAnalyticsBadge strategy={strategy} kind="egt"/></td><td><strong>{displayName(strategy)}</strong><small>{strategy.sqx_name}</small></td><td>{strategy.symbol || '—'}</td><td>{strategy.account_login ? <><strong>{strategy.account_login}</strong>{alias && <small>{alias}</small>}</> : '—'}</td><td className="magic-numbers">{primaryMagicLabel(strategy)}</td><td className={p.net_profit >= 0 ? 'value-good' : 'value-bad'}>{money(p.net_profit)}</td><td>{p.trades}</td><td>{(p.win_rate * 100).toFixed(1)}%</td><td>{money(p.avg_win)} / {money(p.avg_loss)}</td><td className={(p.best_trade || 0) >= 0 ? 'value-good' : 'value-bad'}>{money(p.best_trade)}</td><td className={strategy.metrics.today_profit >= 0 ? 'value-good' : 'value-bad'}>{money(strategy.metrics.today_profit)}</td><td>{number(p.profit_factor)}</td><td>{money(p.max_drawdown)}</td><td>{h.trades ? <span className={h.net_profit >= 0 ? 'history-badge positive' : 'history-badge negative'}>{h.trades} / {signedMoney(h.net_profit)}</span> : '—'}</td><td className="row-action">›</td></tr>
               })}</tbody>
             </table>
           </div>
@@ -1147,16 +1244,18 @@ export default function App() {
       {tab === 'performance' && <Performance
         strategies={brokerFilteredStrategies}
         onSelect={strategyId => { setSelectedId(strategyId); setTab('detail') }}
-        selectedAccount={brokerAccountFilter}
         windowName={windowName}
         onWindowChange={setWindowName}
         customStart={customStart}
         onCustomStartChange={setCustomStart}
         customEnd={customEnd}
         onCustomEndChange={setCustomEnd}
+        journalData={journalData}
+        accountLabel={activeAccountLabel}
       />}
-      {tab === 'detail' && <><div className="strategy-selector"><label>Strategy</label><select value={selectedId || ''} disabled={!brokerFilteredStrategies.length} onChange={e => setSelectedId(Number(e.target.value))}>{brokerFilteredStrategies.map(strategy => <option key={strategy.id} value={strategy.id}>{strategy.symbol} — {strategy.mql5_name || strategy.sqx_name}</option>)}</select></div>{selected ? <StrategyDetail strategy={selected} onDeleted={handleDeleted} onNoteSaved={handleNoteSaved}/> : <div className="empty-state">No strategy selected for this broker account.</div>}</>}
-      {tab === 'chart' && <><div className="strategy-selector"><label>Strategy</label><select value={selectedId || ''} disabled={!brokerFilteredStrategies.length} onChange={e => setSelectedId(Number(e.target.value))}>{brokerFilteredStrategies.map(strategy => <option key={strategy.id} value={strategy.id}>{strategy.symbol} — {strategy.mql5_name || strategy.sqx_name}</option>)}</select></div>{selected ? <ChartPanel strategyId={selected.id}/> : <div className="empty-state">Select a strategy for this broker account.</div>}</>}
+      {tab === 'journal' && <JournalAnalysis data={journalData}/>}
+      {tab === 'detail' && <><div className="strategy-selector"><label>Strategy</label><select value={selectedId || ''} disabled={!brokerFilteredStrategies.length} onChange={e => setSelectedId(Number(e.target.value))}>{brokerFilteredStrategies.map(strategy => <option key={strategy.id} value={strategy.id}>{strategy.symbol} — {displayName(strategy)}</option>)}</select></div>{selected ? <StrategyDetail strategy={selected} onDeleted={handleDeleted} onNoteSaved={handleNoteSaved}/> : <div className="empty-state">No strategy selected for this broker account.</div>}</>}
+      {tab === 'chart' && <><div className="strategy-selector"><label>Strategy</label><select value={selectedId || ''} disabled={!brokerFilteredStrategies.length} onChange={e => setSelectedId(Number(e.target.value))}>{brokerFilteredStrategies.map(strategy => <option key={strategy.id} value={strategy.id}>{strategy.symbol} — {displayName(strategy)}</option>)}</select></div>{selected ? <ChartPanel strategyId={selected.id} accountQuery={dashboardQuery}/> : <div className="empty-state">Select a strategy for the selected broker accounts.</div>}</>}
       {tab === 'backtests' && <Backtests strategies={brokerFilteredStrategies} initialStrategyId={selectedId} onCompleted={load}/>}
       {tab === 'settings' && <Settings reload={load}/>}<footer>EA Observatory · Local data · {data ? `Updated ${new Date(data.generated_at).toLocaleTimeString('en-US')}` : 'Connecting…'}</footer>
     </main>

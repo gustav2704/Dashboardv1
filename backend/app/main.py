@@ -25,6 +25,7 @@ from . import backtest_batches
 from . import mt5_backtests
 from . import sqx_connector
 from . import strategy_deletion
+from . import strategy_archival
 from . import strategy_identity
 
 
@@ -215,6 +216,14 @@ def _window_bounds(window: str, start: str | None = None, end: str | None = None
     return start_msc, end_msc
 
 
+def _account_is_selected(account: str | None, selected_accounts: set[str] | None, include_unassigned: bool) -> bool:
+    """Return whether an account belongs to the optional dashboard account scope."""
+    if selected_accounts is None:
+        return True
+    normalized = str(account or "").strip()
+    return normalized in selected_accounts if normalized else include_unassigned
+
+
 def _latest_baselines(conn: Any, strategy_id: int) -> list[dict[str, Any]]:
     snapshots = conn.execute(
         """SELECT * FROM baseline_snapshots WHERE strategy_id=?
@@ -322,7 +331,13 @@ def _backtest_summaries(conn: Any) -> dict[int, dict[str, Any]]:
     return result
 
 
-def dashboard_data(window: str = "all", start: str | None = None, end: str | None = None) -> dict[str, Any]:
+def dashboard_data(
+    window: str = "all",
+    start: str | None = None,
+    end: str | None = None,
+    selected_accounts: set[str] | None = None,
+    include_unassigned: bool = True,
+) -> dict[str, Any]:
     start_msc, end_msc = _window_bounds(window, start, end)
     try:
         pending_candidates = {
@@ -343,12 +358,16 @@ def dashboard_data(window: str = "all", start: str | None = None, end: str | Non
             if terminal["status"] == "connected"
             and not str(terminal.get("data_dir") or "").startswith("import://")
         ]
-        strategies = conn.execute("SELECT * FROM strategies ORDER BY symbol,sqx_name").fetchall()
+        strategies = conn.execute(
+            "SELECT * FROM strategies WHERE archived_at IS NULL ORDER BY symbol,sqx_name"
+        ).fetchall()
         deals = rows(conn.execute("SELECT * FROM deals ORDER BY time_msc,ticket"))
         trades_all = reconstruct_trades(deals)
         positions_all = rows(conn.execute("SELECT * FROM positions"))
         backtest_summaries = _backtest_summaries(conn)
         output = []
+        available_accounts: set[str] = set()
+        has_unassigned = False
         for strategy in strategies:
             strategy_id = int(strategy["id"])
             identity_id = _identity_strategy_id(strategy)
@@ -374,6 +393,15 @@ def dashboard_data(window: str = "all", start: str | None = None, end: str | Non
                 current_account
                 or (next(iter(mapped_accounts)) if len(mapped_accounts) == 1 else "")
             )
+            display_name_row = conn.execute(
+                """SELECT display_name FROM strategy_display_names
+                   WHERE strategy_id=? AND account_login=?""",
+                (strategy_id, effective_account),
+            ).fetchone()
+            display_name = (
+                str(display_name_row["display_name"])
+                if display_name_row else strategy["mql5_name"] or strategy["sqx_name"]
+            )
             historical_mappings = [
                 mapping for mapping in mappings
                 if str(mapping["role"] or "live") == "historical"
@@ -386,6 +414,16 @@ def dashboard_data(window: str = "all", start: str | None = None, end: str | Non
                 (identity_id,),
             ).fetchone()
             magic_numbers = sorted({int(mapping["magic"]) for mapping in live_mappings if mapping["magic"] is not None})
+            historical_magic_numbers = sorted({
+                int(mapping["magic"])
+                for mapping in historical_mappings
+                if mapping["magic"] is not None
+            })
+            primary_magic_number = (
+                magic_numbers[0] if magic_numbers
+                else historical_magic_numbers[0] if historical_magic_numbers
+                else None
+            )
             strategy_trades = sorted(
                 [
                     _annotate_trade_source(t, mapping, "live", effective_account)
@@ -417,6 +455,7 @@ def dashboard_data(window: str = "all", start: str | None = None, end: str | Non
             ]
             positions = [p for p in positions_all if any(_matches(m, p) for m in live_mappings)]
             current = compute_metrics(trades, positions)
+            health_current = current
             historical_metrics = compute_metrics(historical_trades)
             lifetime_metrics = compute_metrics(trades + historical_trades, positions)
             known_accounts = {
@@ -425,9 +464,12 @@ def dashboard_data(window: str = "all", start: str | None = None, end: str | Non
                     [effective_account]
                     + lineage_accounts["current"]
                     + lineage_accounts["predecessor"]
+                    + [str(mapping["account_login"] or "") for mapping in mappings]
                 )
                 if str(account).strip()
             }
+            available_accounts.update(known_accounts)
+            has_unassigned = has_unassigned or not known_accounts
             account_trades = {
                 account: [
                     trade
@@ -443,12 +485,37 @@ def dashboard_data(window: str = "all", start: str | None = None, end: str | Non
                 )
                 for account in sorted(known_accounts)
             }
+            if selected_accounts is not None:
+                if not known_accounts:
+                    if not include_unassigned:
+                        continue
+                elif not known_accounts.intersection(selected_accounts):
+                    continue
+                trades = [
+                    trade for trade in trades
+                    if _account_is_selected(trade.get("source_account"), selected_accounts, include_unassigned)
+                ]
+                historical_trades = [
+                    trade for trade in historical_trades
+                    if _account_is_selected(trade.get("source_account"), selected_accounts, include_unassigned)
+                ]
+                positions = [
+                    position for position in positions
+                    if any(
+                        _matches(mapping, position)
+                        and _account_is_selected(mapping["account_login"], selected_accounts, include_unassigned)
+                        for mapping in live_mappings
+                    )
+                ]
+                current = compute_metrics(trades, positions)
+                historical_metrics = compute_metrics(historical_trades)
+                lifetime_metrics = compute_metrics(trades + historical_trades, positions)
             baselines = _latest_baselines(conn, identity_id)
             sqx_analytics = _latest_sqx_analytics(conn, identity_id)
             baseline = pick_baseline(baselines)
             rules = _load_rules(conn, identity_id)
             risk_guard = risk_guard_status(compute_metrics(strategy_trades), baselines, rules)
-            health = health_status(current, baseline, rules, risk_guard)
+            health = health_status(health_current, baseline, rules, risk_guard)
             relevant_terminals = [
                 terminal for terminal in terminal_rows
                 if not effective_account or terminal.get("account_login") == effective_account
@@ -495,6 +562,7 @@ def dashboard_data(window: str = "all", start: str | None = None, end: str | Non
                     "symbol": strategy["symbol"],
                     "sqx_name": strategy["sqx_name"],
                     "mql5_name": strategy["mql5_name"],
+                    "display_name": display_name,
                     "account_login": effective_account,
                     "origin": strategy["origin"],
                     "last_observed_at": strategy["last_observed_at"],
@@ -527,6 +595,8 @@ def dashboard_data(window: str = "all", start: str | None = None, end: str | Non
                     "mapping_count": len(live_mappings),
                     "historical_mapping_count": len(historical_mappings),
                     "magic_numbers": magic_numbers,
+                    "historical_magic_numbers": historical_magic_numbers,
+                    "primary_magic_number": primary_magic_number,
                 }
             )
         account = conn.execute("SELECT balance,equity,captured_at FROM account_snapshots ORDER BY captured_at DESC LIMIT 1").fetchone()
@@ -542,7 +612,85 @@ def dashboard_data(window: str = "all", start: str | None = None, end: str | Non
         state: sum(1 for item in output if item["link_state"] == state)
         for state in ("linked", "candidate", "sqx_catalog", "sqx_only", "mt5_only", "catalog_only")
     }
-    return {"generated_at": utcnow(), "window": window, "totals": totals, "integration": integration, "account": dict(account) if account else None, "terminals": visible_terminal_rows, "strategies": output}
+    return {
+        "generated_at": utcnow(), "window": window, "totals": totals,
+        "integration": integration, "account": dict(account) if account else None,
+        "terminals": visible_terminal_rows, "strategies": output,
+        "broker_accounts": sorted(available_accounts), "has_unassigned_broker_account": has_unassigned,
+    }
+
+
+def journal_analysis_data(
+    window: str = "all", start: str | None = None, end: str | None = None,
+    account: str | None = None, selected_accounts: set[str] | None = None,
+    include_unassigned: bool = True,
+) -> dict[str, Any]:
+    """Return closed, strategy-attributed trades for portfolio journal charts."""
+    start_msc, end_msc = _window_bounds(window, start, end)
+    selected_account = str(account or "").strip()
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[int, int, int, int, str]] = set()
+    with session() as conn:
+        strategies = conn.execute(
+            "SELECT * FROM strategies WHERE archived_at IS NULL ORDER BY symbol,sqx_name"
+        ).fetchall()
+        trades_all = reconstruct_trades(rows(conn.execute("SELECT * FROM deals ORDER BY time_msc,ticket")))
+        for strategy in strategies:
+            strategy_id = int(strategy["id"])
+            lineage_accounts = _lineage_accounts(conn, strategy_id)
+            current_account = str(strategy["account_login"] or "")
+            predecessor_accounts = set(lineage_accounts["predecessor"])
+            mappings = conn.execute("SELECT * FROM mappings WHERE strategy_id=? AND confirmed=1", (strategy_id,)).fetchall()
+            live_mappings = [m for m in mappings if str(m["role"] or "live") == "live" and (not current_account or not str(m["account_login"] or "") or str(m["account_login"] or "") == current_account)]
+            mapped_accounts = {str(m["account_login"]).strip() for m in live_mappings if str(m["account_login"] or "").strip()}
+            effective_account = current_account or (next(iter(mapped_accounts)) if len(mapped_accounts) == 1 else "")
+            display_name_row = conn.execute(
+                """SELECT display_name FROM strategy_display_names
+                   WHERE strategy_id=? AND account_login=?""",
+                (strategy_id, effective_account),
+            ).fetchone()
+            display_name = (
+                str(display_name_row["display_name"])
+                if display_name_row else strategy["mql5_name"] or strategy["sqx_name"]
+            )
+            historical_mappings = [m for m in mappings if str(m["role"] or "live") == "historical" and str(m["account_login"] or "") in predecessor_accounts]
+            attributed = [_annotate_trade_source(t, m, "live", effective_account) for t in trades_all if (m := _matching_mapping(live_mappings, t))]
+            attributed.extend(_annotate_trade_source(t, m, "historical") for t in trades_all if (m := _matching_mapping(historical_mappings, t)))
+            attributed.extend(imported_history_trades(conn, historical_mappings))
+            for trade in attributed:
+                close_msc = int(trade.get("close_time_msc") or 0)
+                source_account = str(trade.get("source_account") or "")
+                account_allowed = (
+                    selected_accounts is None
+                    or source_account in selected_accounts
+                    or (not source_account and include_unassigned)
+                )
+                if not start_msc <= close_msc <= end_msc or (selected_account and source_account != selected_account) or not account_allowed:
+                    continue
+                key = (strategy_id, int(trade.get("terminal_id") or 0), int(trade.get("position_id") or 0), int(trade.get("deal_ticket") or 0), str(trade.get("source_role") or ""))
+                if key in seen:
+                    continue
+                seen.add(key)
+                result.append({
+                    "strategy_id": strategy_id, "strategy_name": display_name,
+                    "symbol": trade.get("symbol") or strategy["symbol"] or "", "account": source_account,
+                    "source_role": trade.get("source_role") or "live", "close_time_msc": close_msc,
+                    "volume": float(trade.get("volume") or 0), "profit": float(trade.get("profit") or 0),
+                    "commission": float(trade.get("commission") or 0), "swap": float(trade.get("swap") or 0),
+                    "net_profit": float(trade.get("net_profit") or 0),
+                })
+        balance_rows = conn.execute(
+            """SELECT t.account_login,s.balance FROM account_snapshots s JOIN terminals t ON t.id=s.terminal_id
+               JOIN (SELECT terminal_id,MAX(id) AS latest_id FROM account_snapshots GROUP BY terminal_id) latest ON latest.latest_id=s.id
+               WHERE t.account_login IS NOT NULL AND t.account_login<>''"""
+        ).fetchall()
+        balances: dict[str, float] = {}
+        for row in balance_rows:
+            login = str(row["account_login"])
+            if (not selected_account or login == selected_account) and (selected_accounts is None or login in selected_accounts):
+                balances[login] = balances.get(login, 0.0) + float(row["balance"] or 0)
+    result.sort(key=lambda trade: (trade["close_time_msc"], trade["strategy_id"]))
+    return {"generated_at": utcnow(), "window": window, "account": selected_account or None, "balances": balances, "trades": result}
 
 
 def _worker(stop_event: threading.Event) -> None:
@@ -588,13 +736,44 @@ def health() -> dict[str, Any]:
 
 
 @app.get("/api/dashboard")
-def get_dashboard(window: str = Query("all", pattern="^(30d|90d|all|custom)$"), start: str | None = None, end: str | None = None) -> dict[str, Any]:
-    return dashboard_data(window, start, end)
+def get_dashboard(
+    window: str = Query("all", pattern="^(30d|90d|all|custom)$"),
+    start: str | None = None,
+    end: str | None = None,
+    accounts: list[str] = Query(default=[]),
+    include_unassigned: bool = True,
+    filter_accounts: bool = False,
+) -> dict[str, Any]:
+    selected_accounts = {account.strip() for account in accounts if account.strip()} if filter_accounts else None
+    return dashboard_data(window, start, end, selected_accounts, include_unassigned)
+
+
+@app.get("/api/journal-analysis")
+def get_journal_analysis(
+    window: str = Query("all", pattern="^(30d|90d|all|custom)$"),
+    start: str | None = None,
+    end: str | None = None,
+    account: str | None = None,
+    accounts: list[str] = Query(default=[]),
+    include_unassigned: bool = True,
+    filter_accounts: bool = False,
+) -> dict[str, Any]:
+    selected_accounts = {value.strip() for value in accounts if value.strip()} if filter_accounts else None
+    return journal_analysis_data(window, start, end, account, selected_accounts, include_unassigned)
 
 
 @app.get("/api/strategies/{strategy_id}")
-def get_strategy(strategy_id: int, window: str = "all", start: str | None = None, end: str | None = None) -> dict[str, Any]:
-    data = dashboard_data(window, start, end)
+def get_strategy(
+    strategy_id: int,
+    window: str = "all",
+    start: str | None = None,
+    end: str | None = None,
+    accounts: list[str] = Query(default=[]),
+    include_unassigned: bool = True,
+    filter_accounts: bool = False,
+) -> dict[str, Any]:
+    selected_accounts = {account.strip() for account in accounts if account.strip()} if filter_accounts else None
+    data = dashboard_data(window, start, end, selected_accounts, include_unassigned)
     start_msc, end_msc = _window_bounds(window, start, end)
     for strategy in data["strategies"]:
         if strategy["id"] == strategy_id:
@@ -642,6 +821,15 @@ def get_strategy(strategy_id: int, window: str = "all", start: str | None = None
                     historical_mt5 + historical_imported,
                     key=lambda trade: (int(trade.get("close_time_msc", 0)), int(trade.get("deal_ticket", 0))),
                 )
+                if selected_accounts is not None:
+                    current_trades = [
+                        trade for trade in current_trades
+                        if _account_is_selected(trade.get("source_account"), selected_accounts, include_unassigned)
+                    ]
+                    historical_trades = [
+                        trade for trade in historical_trades
+                        if _account_is_selected(trade.get("source_account"), selected_accounts, include_unassigned)
+                    ]
                 trades = sorted(
                     current_trades + historical_trades,
                     key=lambda trade: (int(trade.get("close_time_msc", 0)), int(trade.get("deal_ticket", 0))),
@@ -693,7 +881,7 @@ def put_strategy_selection(
 ) -> dict[str, Any]:
     with session() as conn:
         result = conn.execute(
-            "UPDATE strategies SET monitoring_selected=? WHERE id=?",
+            "UPDATE strategies SET monitoring_selected=? WHERE id=? AND archived_at IS NULL",
             (int(payload.selection), strategy_id),
         )
         if result.rowcount == 0:
@@ -716,6 +904,39 @@ def get_strategy_deletion_impact(strategy_id: int) -> dict[str, Any]:
 def delete_strategy(strategy_id: int) -> dict[str, Any]:
     try:
         return strategy_deletion.delete_strategy(strategy_id)
+    except KeyError as exc:
+        raise HTTPException(404, exc.args[0]) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/api/archived-strategies")
+def get_archived_strategies() -> list[dict[str, Any]]:
+    return strategy_archival.archived_strategies()
+
+
+@app.get("/api/strategies/{strategy_id}/archive-impact")
+def get_strategy_archive_impact(strategy_id: int) -> dict[str, Any]:
+    try:
+        return strategy_archival.archive_impact(strategy_id)
+    except KeyError as exc:
+        raise HTTPException(404, exc.args[0]) from exc
+
+
+@app.post("/api/strategies/{strategy_id}/archive")
+def archive_strategy(strategy_id: int) -> dict[str, Any]:
+    try:
+        return strategy_archival.archive_strategy(strategy_id)
+    except KeyError as exc:
+        raise HTTPException(404, exc.args[0]) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/strategies/{strategy_id}/restore")
+def restore_strategy(strategy_id: int) -> dict[str, Any]:
+    try:
+        return strategy_archival.restore_strategy(strategy_id)
     except KeyError as exc:
         raise HTTPException(404, exc.args[0]) from exc
     except ValueError as exc:
@@ -1254,17 +1475,28 @@ def get_chart(
     start: int = 0,
     end: int = 2**31 - 1,
     refresh: bool = False,
+    accounts: list[str] = Query(default=[]),
+    include_unassigned: bool = True,
+    filter_accounts: bool = False,
 ) -> dict[str, Any]:
+    selected_accounts = {account.strip() for account in accounts if account.strip()} if filter_accounts else None
     with session() as conn:
         strategy = conn.execute("SELECT * FROM strategies WHERE id=?", (strategy_id,)).fetchone()
-        mapping = conn.execute(
+        mappings = conn.execute(
             """SELECT * FROM mappings
                WHERE strategy_id=? AND confirmed=1 AND role='live'
-               ORDER BY id LIMIT 1""",
+               ORDER BY id""",
             (strategy_id,),
-        ).fetchone()
+        ).fetchall()
         if not strategy:
             raise HTTPException(404, "Strategy not found")
+        mapping = next(
+            (
+                item for item in mappings
+                if _account_is_selected(item["account_login"], selected_accounts, include_unassigned)
+            ),
+            None,
+        )
         chart_symbol = (mapping["symbol"] if mapping else None) or strategy["symbol"]
         if refresh and mapping:
             request_chart(mapping["terminal_id"], chart_symbol, timeframe, start, end)

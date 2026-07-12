@@ -145,7 +145,7 @@ def discover_candidates() -> dict[str, Any]:
                FROM strategies s
                LEFT JOIN sqx_strategy_links l
                  ON l.strategy_id=COALESCE(s.identity_strategy_id,s.id)
-               WHERE s.retired=0 ORDER BY s.symbol,s.sqx_name"""
+               WHERE s.retired=0 AND s.archived_at IS NULL ORDER BY s.symbol,s.sqx_name"""
         ))
         validated = {
             int(row["strategy_id"])

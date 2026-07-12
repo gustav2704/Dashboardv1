@@ -8,7 +8,7 @@ type ChartPayload = {
   markers: Array<{ time: number; position: 'aboveBar' | 'belowBar'; color: string; shape: 'arrowUp' | 'arrowDown' | 'circle'; text: string }>;
 }
 
-export default function ChartPanel({ strategyId }: { strategyId: number }) {
+export default function ChartPanel({ strategyId, accountQuery }: { strategyId: number; accountQuery: string }) {
   const host = useRef<HTMLDivElement>(null)
   const chart = useRef<IChartApi | null>(null)
   const [timeframe, setTimeframe] = useState('H1')
@@ -19,13 +19,18 @@ export default function ChartPanel({ strategyId }: { strategyId: number }) {
     const end = Math.floor(Date.now() / 1000)
     const start = end - 90 * 86400
     try {
-      const payload = await api<ChartPayload>(`/api/chart/${strategyId}?timeframe=${timeframe}&start=${start}&end=${end}&refresh=${refresh}`)
+      const params = new URLSearchParams(accountQuery)
+      params.set('timeframe', timeframe)
+      params.set('start', String(start))
+      params.set('end', String(end))
+      params.set('refresh', String(refresh))
+      const payload = await api<ChartPayload>(`/api/chart/${strategyId}?${params}`)
       setData(payload)
       setMessage(payload.message || (payload.candles.length ? '' : refresh ? 'Request sent to MT5. Refresh again in a few seconds.' : 'No candles in cache yet.'))
     } catch (error) { setMessage(error instanceof Error ? error.message : 'Could not load the chart') }
   }
 
-  useEffect(() => { load(false) }, [strategyId, timeframe])
+  useEffect(() => { load(false) }, [strategyId, timeframe, accountQuery])
   useEffect(() => {
     if (!host.current || !data?.candles.length) return
     chart.current?.remove()
