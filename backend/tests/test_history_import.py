@@ -21,6 +21,10 @@ def test_tradebuddy_import_is_idempotent_and_creates_historical_mappings(tmp_pat
         encoding="utf-8",
     )
     with db.session() as conn:
+        terminal_id = conn.execute(
+            "INSERT INTO terminals(name,data_dir,account_login,status,created_at) VALUES(?,?,?,?,?)",
+            ("Infinox", "fixture://infinox", "100121894", "connected", now),
+        ).lastrowid
         adx_id = conn.execute(
             "INSERT INTO strategies(symbol,sqx_name,mql5_name,account_login,origin,created_at) VALUES(?,?,?,?,?,?)",
             ("NAQ", "NAQ WF Matrix - Strategy 3.14.14dwnx", "NAQ_B_Adx_3.14.14dwnx", "100121894", "mt5+excel", now),
@@ -29,11 +33,19 @@ def test_tradebuddy_import_is_idempotent_and_creates_historical_mappings(tmp_pat
             "INSERT INTO strategies(symbol,sqx_name,mql5_name,account_login,origin,created_at) VALUES(?,?,?,?,?,?)",
             ("NAQ", "NAQ WF Matrix - Strategy 3.3.15(1)dwnx", "NAQ_MACD_B_Strategy 3.3.15(1)dwnx", "100121894", "mt5+excel", now),
         ).lastrowid
+        conn.executemany(
+            """INSERT INTO mappings(strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,role,confirmed,created_at)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
+            [
+                (adx_id, terminal_id, "100121894", "NAS100", 99, "WF_Matrix_NAQStrategy_3_14_14d", "live", 1, now),
+                (macd_id, terminal_id, "100121894", "NAS100", 98, "WF_Matrix_NAQStrategy_3_3_15_1", "live", 1, now),
+            ],
+        )
 
     assert len(parse_tradebuddy(export)) == 3
 
-    first = import_tradebuddy_history(export, "7396582", "FirstPrudentialMarkets-Demo")
-    second = import_tradebuddy_history(export, "7396582", "FirstPrudentialMarkets-Demo")
+    first = import_tradebuddy_history(export, "7396582", "FirstPrudentialMarkets-Demo", current_account="100121894")
+    second = import_tradebuddy_history(export, "7396582", "FirstPrudentialMarkets-Demo", current_account="100121894")
 
     assert first["parsed"] == 3
     assert first["inserted"] == 3
@@ -43,7 +55,7 @@ def test_tradebuddy_import_is_idempotent_and_creates_historical_mappings(tmp_pat
     with db.session() as conn:
         assert conn.execute("SELECT COUNT(*) FROM imported_history_trades").fetchone()[0] == 3
         mappings = conn.execute(
-            "SELECT strategy_id,account_login,magic,role FROM mappings ORDER BY magic"
+            "SELECT strategy_id,account_login,magic,role FROM mappings WHERE role='historical' ORDER BY magic"
         ).fetchall()
         assert [tuple(row) for row in mappings] == [
             (adx_id, "7396582", 1, "historical"),
@@ -58,7 +70,7 @@ def test_comment_family_removes_trade_timestamps():
     assert comment_family("", 3) == "Magic 3"
 
 
-def test_import_can_create_all_missing_families_for_a_new_account(tmp_path, monkeypatch):
+def test_import_keeps_missing_family_on_its_source_account_without_live_proof(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "families.db")
     db.init_db()
     export = tmp_path / "TradeBuddy_axi.txt"
@@ -78,16 +90,14 @@ def test_import_can_create_all_missing_families_for_a_new_account(tmp_path, monk
     with db.session() as conn:
         strategy = conn.execute("SELECT * FROM strategies").fetchone()
         assert strategy["sqx_name"] == "TemaEA_V2"
-        assert strategy["account_login"] == "3000097316"
+        assert strategy["account_login"] == "10025867"
         lineage = conn.execute(
             "SELECT account_login,role FROM strategy_account_lineage ORDER BY role"
         ).fetchall()
-        assert {tuple(row) for row in lineage} == {
-            ("10025867", "predecessor"), ("3000097316", "current")
-        }
+        assert [tuple(row) for row in lineage] == []
 
 
-def test_import_groups_comment_variants_by_exact_symbol_and_magic(tmp_path, monkeypatch):
+def test_import_requires_same_comment_and_asset_but_allows_changed_magic(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "magic-groups.db")
     db.init_db()
     now = db.utcnow()
@@ -119,13 +129,19 @@ def test_import_groups_comment_variants_by_exact_symbol_and_magic(tmp_path, monk
         export, "10025867", "Axi-Demo",
         current_account="3000097316", create_missing=True,
     )
-    assert result["groups"] == 2
+    assert result["groups"] == 3
     with db.session() as conn:
         xau = conn.execute(
-            """SELECT strategy_id,comment_pattern FROM mappings
-               WHERE account_login='10025867' AND symbol='XAUUSD' AND magic=2"""
+            """SELECT strategy_id,comment_pattern,historical_magic_flexible FROM mappings
+               WHERE account_login='10025867' AND symbol='XAUUSD' AND magic=2
+               ORDER BY strategy_id"""
         ).fetchall()
-        assert [tuple(row) for row in xau] == [(live_id, "")]
+        assert (live_id, "Keltnerv2_XAU", 1) in [tuple(row) for row in xau]
+        # The similarly named Altisima history has no active XAUUSD successor,
+        # so it remains independent instead of claiming the Keltnerv live EA.
+        assert conn.execute(
+            "SELECT account_login FROM strategies WHERE sqx_name='AltisimaPrecision'"
+        ).fetchone()[0] == "10025867"
         assert conn.execute(
             "SELECT COUNT(*) FROM imported_history_trades WHERE source_account='10025867'"
         ).fetchone()[0] == 3

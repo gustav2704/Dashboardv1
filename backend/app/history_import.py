@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .db import rows, session, utcnow
-from .mapping import normalize, stable_comment, symbol_family, version_signature
+from .mapping import asset_key, normalize, stable_comment, symbol_family, version_signature
 from .metrics import compute_metrics
 
 
@@ -129,9 +129,16 @@ def _find_strategy(conn: Any, comment: str, symbol: str, account_login: str) -> 
     return scored[0][1]
 
 
-def _group_key(trade: dict[str, Any]) -> tuple[str, int]:
-    """TradeBuddy identity: a broker symbol and magic number, never its comment."""
-    return (str(trade["symbol"] or "").strip().casefold(), int(trade["magic"]))
+def _group_key(trade: dict[str, Any]) -> tuple[str, str]:
+    """Group history by durable EA evidence rather than its broker magic.
+
+    Magic may change after a migration.  The comment family identifies the EA
+    and the broker symbol prevents same-named EAs on different assets merging.
+    """
+    return (
+        str(trade["symbol"] or "").strip().casefold(),
+        comment_family(str(trade["comment"] or ""), int(trade["magic"])),
+    )
 
 
 def _preferred_family(trades: list[dict[str, Any]], symbol: str, magic: int) -> str:
@@ -144,6 +151,35 @@ def _preferred_family(trades: list[dict[str, Any]], symbol: str, magic: int) -> 
         return f"{symbol} Magic {magic}"
     counts = Counter(names)
     return sorted(counts, key=lambda name: (-counts[name], name.casefold()))[0]
+
+
+def _verified_live_strategy(
+    conn: Any, current_account: str, symbol: str, family: str
+) -> int | None:
+    """Return the single live successor proven by account, asset and comment.
+
+    A matching EA name on another asset is intentionally insufficient; it
+    must not claim historical trades merely because it has the same name.
+    """
+    expected = normalize(family)
+    if not expected or family.casefold().startswith("magic "):
+        return None
+    candidates: set[int] = set()
+    for row in conn.execute(
+        """SELECT m.strategy_id,m.symbol,m.comment_pattern,t.account_login,t.data_dir
+           FROM mappings m JOIN terminals t ON t.id=m.terminal_id
+           WHERE m.account_login=? AND m.role='live' AND m.confirmed=1""",
+        (current_account,),
+    ):
+        if str(row["account_login"] or "") != str(current_account):
+            continue
+        if str(row["data_dir"] or "").startswith("import://"):
+            continue
+        if asset_key(str(row["symbol"] or "")) != asset_key(symbol):
+            continue
+        if normalize(str(row["comment_pattern"] or "")) == expected:
+            candidates.add(int(row["strategy_id"]))
+    return next(iter(candidates)) if len(candidates) == 1 else None
 
 
 def _create_history_strategy(
@@ -200,6 +236,13 @@ def _canonical_group_strategy(
     now: str,
     create_missing: bool,
 ) -> tuple[int | None, list[int]]:
+    verified = _verified_live_strategy(conn, current_account, symbol, family)
+    if verified is not None:
+        return verified, []
+    # Selecting an account in the import UI is not proof of a migration.  If
+    # no live mapping proves this exact EA, retain the history at its source.
+    if current_account != source_account:
+        current_account = source_account
     historical_ids, live_ids = _group_candidates(
         conn, source_account, current_account, symbol, magic
     )
@@ -216,8 +259,6 @@ def _canonical_group_strategy(
     if historical_ids:
         return historical_ids[0], historical_ids
     matched = _find_strategy(conn, family, symbol, current_account)
-    if not matched and current_account == source_account:
-        matched = _find_strategy(conn, family, symbol, "100121894")
     matched = matched or _find_strategy(conn, family, symbol, source_account)
     if matched:
         return matched, []
@@ -254,7 +295,7 @@ def import_tradebuddy_history(
     source_file = path.name
     parsed = parse_tradebuddy(path)
     now = utcnow()
-    grouped: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for trade in parsed:
         grouped.setdefault(_group_key(trade), []).append(trade)
 
@@ -302,10 +343,11 @@ def import_tradebuddy_history(
 
         mapping_count = 0
         summaries = []
-        for (_, magic), trades in grouped.items():
+        for (_, family), trades in grouped.items():
             symbol = trades[0]["symbol"]
-            target_account = str(current_account or source_account)
-            family = _preferred_family(trades, symbol, magic)
+            magic = int(trades[0]["magic"])
+            requested_account = str(current_account or source_account)
+            target_account = requested_account
             strategy_id, duplicate_ids = _canonical_group_strategy(
                 conn, source_account, target_account, symbol, magic, family, now, create_missing
             )
@@ -338,7 +380,12 @@ def import_tradebuddy_history(
                             now,
                         ),
                     )
-                if current_account:
+                verified_current = (
+                    bool(current_account)
+                    and str(strategy["account_login"] or "") == requested_account
+                    and _verified_live_strategy(conn, requested_account, symbol, family) == strategy_id
+                )
+                if verified_current:
                     conn.execute(
                         """INSERT INTO strategy_account_lineage(
                              strategy_id,account_login,role,source,created_at
@@ -347,27 +394,22 @@ def import_tradebuddy_history(
                              role='current',source=excluded.source""",
                         (strategy_id, target_account, "current", "dashboard", now),
                     )
-                # A group owns every comment variant for its symbol + magic.
-                conn.execute(
-                    """DELETE FROM mappings WHERE account_login=? AND role='historical'
-                       AND LOWER(symbol)=LOWER(?) AND magic=?""",
-                    (source_account, symbol, magic),
-                )
                 conn.execute(
                     """INSERT INTO mappings(
                          strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,role,
-                         confidence,confirmed,created_at
-                       ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                         historical_magic_flexible,confidence,confirmed,created_at
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
                        ON CONFLICT(strategy_id,terminal_id,symbol,magic,comment_pattern)
-                       DO UPDATE SET role='historical',confirmed=1,confidence=MAX(confidence,excluded.confidence)""",
+                       DO UPDATE SET role='historical',historical_magic_flexible=MAX(historical_magic_flexible,excluded.historical_magic_flexible),confirmed=1,confidence=MAX(confidence,excluded.confidence)""",
                     (
                         strategy_id,
                         terminal_id,
                         source_account,
                         symbol,
                         magic,
-                        "",
+                        "" if family.casefold().startswith("magic ") else family,
                         "historical",
+                        int(verified_current),
                         0.95,
                         1,
                         now,
@@ -396,16 +438,27 @@ def imported_history_trades(conn: Any, mappings: list[Any]) -> list[dict[str, An
         return []
     clauses = []
     params: list[Any] = []
+    eligible_mappings: list[Any] = []
     for mapping in mappings:
-        clauses.append("(source_account=? AND LOWER(symbol)=LOWER(?) AND magic=? AND LOWER(comment) LIKE ?)")
+        comment = str(mapping["comment_pattern"] or "").casefold().strip()
+        # Blank comments are never identity evidence.  Historical mappings can
+        # explicitly accept a changed magic only when their comment proves the
+        # bot identity across accounts.
+        if not comment:
+            continue
+        flexible = bool(mapping.get("historical_magic_flexible", 0)) if isinstance(mapping, dict) else bool(mapping["historical_magic_flexible"] if "historical_magic_flexible" in mapping.keys() else 0)
+        identity = "source_account=? AND LOWER(comment) LIKE ?"
+        values: list[Any] = [str(mapping["account_login"] or ""), f"%{comment}%"]
+        if not flexible:
+            identity += " AND magic=?"
+            values.append(int(mapping["magic"] or 0))
+        clauses.append(f"({identity})")
         params.extend(
-            [
-                str(mapping["account_login"] or ""),
-                str(mapping["symbol"] or ""),
-                int(mapping["magic"] or 0),
-                f"%{str(mapping['comment_pattern'] or '').lower()}%",
-            ]
+            values
         )
+        eligible_mappings.append(mapping)
+    if not clauses:
+        return []
     history = rows(
         conn.execute(
             f"""SELECT * FROM imported_history_trades WHERE {' OR '.join(clauses)}
@@ -413,6 +466,17 @@ def imported_history_trades(conn: Any, mappings: list[Any]) -> list[dict[str, An
             params,
         )
     )
+    def matches_identity(row: dict[str, Any], mapping: Any) -> bool:
+        pattern = str(mapping["comment_pattern"] or "").casefold().strip()
+        flexible = bool(mapping.get("historical_magic_flexible", 0)) if isinstance(mapping, dict) else bool(mapping["historical_magic_flexible"] if "historical_magic_flexible" in mapping.keys() else 0)
+        return (
+            str(row["source_account"] or "") == str(mapping["account_login"] or "")
+            and asset_key(str(row["symbol"] or "")) == asset_key(str(mapping["symbol"] or ""))
+            and bool(pattern)
+            and pattern in str(row["comment"] or "").casefold()
+            and (flexible or int(row["magic"] or 0) == int(mapping["magic"] or 0))
+        )
+    history = [row for row in history if any(matches_identity(row, mapping) for mapping in eligible_mappings)]
     result = []
     for row in history:
         result.append(

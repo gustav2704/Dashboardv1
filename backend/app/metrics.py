@@ -258,10 +258,10 @@ def risk_guard_status(
     yellow: list[str] = []
     for sample_type in ("is", "oos"):
         drawdown_limit, drawdown_source = _baseline_limit(
-            baselines, sample_type, "MaxDD", "Drawdown", "MaxDrawdown"
+            baselines, sample_type, "MaxDD", "Drawdown", "MaxDrawdown", "max_drawdown"
         )
         streak_limit, streak_source = _baseline_limit(
-            baselines, sample_type, "MaxConsecLoss", "MaxConsecutiveLosses"
+            baselines, sample_type, "MaxConsecLoss", "MaxConsecutiveLosses", "max_consecutive_losses"
         )
         drawdown = _risk_check(
             float(live["max_drawdown"]),
@@ -353,10 +353,10 @@ def health_status(
     red: list[str] = risk_red
     yellow: list[str] = risk_yellow
     comparisons = [
-        ("profit_factor", ("ProfitFactor",)),
-        ("expectancy", ("Expectancy",)),
-        ("return_dd", ("ReturnDDRatio", "RetDD")),
-        ("sqn", ("SQN",)),
+        ("profit_factor", ("ProfitFactor", "profit_factor")),
+        ("expectancy", ("Expectancy", "expectancy")),
+        ("return_dd", ("ReturnDDRatio", "RetDD", "return_dd")),
+        ("sqn", ("SQN", "sqn")),
     ]
     for current_key, baseline_keys in comparisons:
         actual = current.get(current_key)
@@ -368,7 +368,7 @@ def health_status(
             red.append(current_key)
         elif ratio < rules["performance_yellow"]:
             yellow.append(current_key)
-    expected_frequency = _number(metrics, "AvgTradesPerMonth", "TradesPerMonth")
+    expected_frequency = _number(metrics, "AvgTradesPerMonth", "TradesPerMonth", "trades_per_month")
     if expected_frequency and expected_frequency > 0:
         ratio = current["trades_per_month"] / expected_frequency
         if ratio < rules["frequency_red_low"] or ratio > rules["frequency_red_high"]:

@@ -25,6 +25,14 @@ La primera ejecución crea `.venv`, instala dependencias y compila el frontend. 
 - SQX: sincronización read-only cuando SQX está abierto; los snapshots quedan persistidos.
 - Refresco: 5 minutos. Una terminal queda desconectada tras 10 minutos sin respuesta.
 
+## Inventarios de VPS
+
+Los CSV principales generados por `BotInventoryReport` en una terminal real se
+copian en `data\imports\bot_inventory\vps\<cuenta>`. El Dashboard los importa al
+arrancar y en cada refresco. Los inventarios prueban que un EA está adjunto, pero
+un despliegue sin Magic Number requiere confirmación manual en `Settings` y no se
+usa para atribuir operaciones hasta conocer un magic fiable.
+
 ## API
 
 - `GET /api/dashboard`, `GET /api/strategies/{id}`

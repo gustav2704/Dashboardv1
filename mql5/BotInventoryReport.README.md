@@ -3,8 +3,9 @@
 Script MQL5 de solo lectura que inventaria los EAs adjuntos a todos los charts
 abiertos del perfil actual y cruza sus nombres con Magic Numbers catalogados.
 
-Si no hay coincidencia exacta en el catalogo, intenta asociar el EA con el
-historial por simbolo y por la firma numerica del nombre/comentario, por ejemplo
+Si no hay coincidencia exacta en el catalogo, intenta asociar el EA primero con
+deals ejecutados y despues con ordenes historicas o pendientes actuales, siempre
+por simbolo y firma numerica del nombre/comentario. Por ejemplo,
 `Strategy 4.7.21(2)` contra `US30_Strategy_4_7_21_2`.
 
 ## Instalacion
@@ -26,7 +27,8 @@ Los archivos se crean en `<DataDir>\MQL5\Files\BotInventoryReport`.
 
 - `BotInventory_<cuenta>_<fecha>.csv`: inventario principal por chart/EA/MN.
 - `BotInventory_<cuenta>_<fecha>.html`: reporte visual con diagnostico.
-- `BotInventory_<cuenta>_<fecha>_History.csv`: historial agrupado por simbolo y MN.
+- `BotInventory_<cuenta>_<fecha>_History.csv`: entradas y ordenes agrupadas por
+  simbolo y MN, incluyendo fechas, comentarios y estados de orden.
 - `BotInventory_<cuenta>_<fecha>_CatalogPending.csv`: sugerencias para completar
   el catalogo cuando hubo asociacion automatica o MN desconocido.
 - `BotInventory_<cuenta>_<fecha>_Diagnostics.csv`: ruta del catalogo, filas leidas
@@ -38,14 +40,17 @@ Los archivos se crean en `<DataDir>\MQL5\Files\BotInventoryReport`.
   habilitado y la cuenta permite operar mediante EAs.
 - `INACTIVO`: el EA esta adjunto pero falla al menos una de esas condiciones.
 - `NUNCA_OPERO`: el Magic Number catalogado no tiene entradas BUY/SELL en todo
-  el historial disponible de la cuenta actual.
+  el historial disponible de la cuenta actual. Puede haber colocado ordenes.
+- `CON_ENTRADAS`: existe al menos una entrada BUY/SELL ejecutada.
+- `SOLO_ORDENES`: el EA coloco una orden historica o mantiene una pendiente,
+  pero no existe ninguna entrada BUY/SELL ejecutada en el historial disponible.
+- `SIN_ACTIVIDAD`: el MN se conoce por catalogo, pero no hay deals ni ordenes.
+- `NO_DETERMINABLE`: no se conoce un MN fiable para clasificar la actividad.
 - `MN_DESCONOCIDO`: el EA no coincide con ninguna fila del catalogo; no se
   concluye si opero o no.
-- `HISTORIAL_AUTO`: el catalogo no coincidio, pero el historial tenia un unico MN
-  compatible por simbolo y firma de estrategia. Revisar y, si es correcto, pasar
-  esa fila desde `CatalogPending.csv` al catalogo oficial.
-- `NO_DETERMINABLE`: no hay MN fiable para ese EA; por tanto no se puede afirmar
-  que nunca opero.
+- `HISTORIAL_DEALS_AUTO`: asociacion automatica mediante una entrada ejecutada.
+- `HISTORIAL_ORDENES_AUTO`: asociacion automatica mediante una orden historica
+  o pendiente actual. Revisar y pasar la fila sugerida al catalogo oficial.
 
 El estado de Algo Trading se obtiene a nivel global. MQL5 no permite que un
 script inspeccione los parametros internos ni el permiso individual de otro EA.

@@ -4,7 +4,7 @@
 //| MetaTrader 5 profile. It never sends or modifies trading orders. |
 //+------------------------------------------------------------------+
 #property copyright "Dashboardv1"
-#property version   "2.00"
+#property version   "3.00"
 #property script_show_inputs
 
 input string CatalogFile = "BotInventoryReport\\BotInventoryCatalog.csv";
@@ -28,7 +28,12 @@ struct MagicStats
    int      entries;
    datetime first_trade;
    datetime last_trade;
-   string   comments;
+   string   deal_comments;
+   int      orders;
+   datetime first_order;
+   datetime last_order;
+   string   order_comments;
+   string   order_states;
 };
 
 CatalogRow catalog[];
@@ -38,6 +43,9 @@ string catalog_location="NO_ENCONTRADO";
 int catalog_lines=0;
 int catalog_valid_rows=0;
 int catalog_exact_matches=0;
+ulong observed_order_tickets[];
+int historical_orders_loaded=0;
+int current_orders_loaded=0;
 
 string Trim(const string value)
 {
@@ -238,7 +246,12 @@ int FindStats(const string symbol,const long magic)
    history_stats[size].entries=0;
    history_stats[size].first_trade=0;
    history_stats[size].last_trade=0;
-   history_stats[size].comments="";
+   history_stats[size].deal_comments="";
+   history_stats[size].orders=0;
+   history_stats[size].first_order=0;
+   history_stats[size].last_order=0;
+   history_stats[size].order_comments="";
+   history_stats[size].order_states="";
    return size;
 }
 
@@ -251,34 +264,97 @@ void AddUniqueComment(string &target,const string value)
    target+=clean;
 }
 
+bool OrderTicketAlreadySeen(const ulong ticket)
+{
+   for(int i=0;i<ArraySize(observed_order_tickets);i++)
+      if(observed_order_tickets[i]==ticket) return true;
+   int size=ArraySize(observed_order_tickets);
+   ArrayResize(observed_order_tickets,size+1);
+   observed_order_tickets[size]=ticket;
+   return false;
+}
+
+bool IsTradingOrderType(const ENUM_ORDER_TYPE type)
+{
+   return (type==ORDER_TYPE_BUY || type==ORDER_TYPE_SELL ||
+           type==ORDER_TYPE_BUY_LIMIT || type==ORDER_TYPE_SELL_LIMIT ||
+           type==ORDER_TYPE_BUY_STOP || type==ORDER_TYPE_SELL_STOP ||
+           type==ORDER_TYPE_BUY_STOP_LIMIT || type==ORDER_TYPE_SELL_STOP_LIMIT);
+}
+
+void AddOrderActivity(const ulong ticket,const string symbol,const long magic,const datetime time,
+                      const string comment,const ENUM_ORDER_STATE state,const bool current)
+{
+   if(ticket==0 || OrderTicketAlreadySeen(ticket)) return;
+   int index=FindStats(symbol,magic);
+   history_stats[index].orders++;
+   if(history_stats[index].first_order==0 || time<history_stats[index].first_order)
+      history_stats[index].first_order=time;
+   if(time>history_stats[index].last_order)
+      history_stats[index].last_order=time;
+   AddUniqueComment(history_stats[index].order_comments,comment);
+   AddUniqueComment(history_stats[index].order_states,current ? "ACTIVA" : EnumToString(state));
+   if(current) current_orders_loaded++;
+   else historical_orders_loaded++;
+}
+
 bool LoadHistory()
 {
-   if(!HistorySelect((datetime)0,TimeCurrent()))
+   bool history_ok=HistorySelect((datetime)0,TimeCurrent());
+   if(!history_ok)
    {
       AddWarning("HISTORIAL_NO_DISPONIBLE: error "+IntegerToString(GetLastError()));
-      return false;
    }
-   int total=HistoryDealsTotal();
-   for(int i=0;i<total;i++)
+   else
    {
-      ulong ticket=HistoryDealGetTicket(i);
-      if(ticket==0) continue;
-      ENUM_DEAL_TYPE type=(ENUM_DEAL_TYPE)HistoryDealGetInteger(ticket,DEAL_TYPE);
-      ENUM_DEAL_ENTRY entry=(ENUM_DEAL_ENTRY)HistoryDealGetInteger(ticket,DEAL_ENTRY);
-      if(type!=DEAL_TYPE_BUY && type!=DEAL_TYPE_SELL) continue;
-      if(entry!=DEAL_ENTRY_IN && entry!=DEAL_ENTRY_INOUT) continue;
-      long magic=HistoryDealGetInteger(ticket,DEAL_MAGIC);
-      string symbol=HistoryDealGetString(ticket,DEAL_SYMBOL);
-      datetime time=(datetime)HistoryDealGetInteger(ticket,DEAL_TIME);
-      int index=FindStats(symbol,magic);
-      history_stats[index].entries++;
-      if(history_stats[index].first_trade==0 || time<history_stats[index].first_trade)
-         history_stats[index].first_trade=time;
-      if(time>history_stats[index].last_trade)
-         history_stats[index].last_trade=time;
-      AddUniqueComment(history_stats[index].comments,HistoryDealGetString(ticket,DEAL_COMMENT));
+      int total=HistoryDealsTotal();
+      for(int i=0;i<total;i++)
+      {
+         ulong ticket=HistoryDealGetTicket(i);
+         if(ticket==0) continue;
+         ENUM_DEAL_TYPE type=(ENUM_DEAL_TYPE)HistoryDealGetInteger(ticket,DEAL_TYPE);
+         ENUM_DEAL_ENTRY entry=(ENUM_DEAL_ENTRY)HistoryDealGetInteger(ticket,DEAL_ENTRY);
+         if(type!=DEAL_TYPE_BUY && type!=DEAL_TYPE_SELL) continue;
+         if(entry!=DEAL_ENTRY_IN && entry!=DEAL_ENTRY_INOUT) continue;
+         long magic=HistoryDealGetInteger(ticket,DEAL_MAGIC);
+         string symbol=HistoryDealGetString(ticket,DEAL_SYMBOL);
+         datetime time=(datetime)HistoryDealGetInteger(ticket,DEAL_TIME);
+         int index=FindStats(symbol,magic);
+         history_stats[index].entries++;
+         if(history_stats[index].first_trade==0 || time<history_stats[index].first_trade)
+            history_stats[index].first_trade=time;
+         if(time>history_stats[index].last_trade)
+            history_stats[index].last_trade=time;
+         AddUniqueComment(history_stats[index].deal_comments,HistoryDealGetString(ticket,DEAL_COMMENT));
+      }
+
+      int history_orders=HistoryOrdersTotal();
+      for(int i=0;i<history_orders;i++)
+      {
+         ulong ticket=HistoryOrderGetTicket(i);
+         if(ticket==0) continue;
+         ENUM_ORDER_TYPE type=(ENUM_ORDER_TYPE)HistoryOrderGetInteger(ticket,ORDER_TYPE);
+         if(!IsTradingOrderType(type)) continue;
+         AddOrderActivity(ticket,HistoryOrderGetString(ticket,ORDER_SYMBOL),
+                          HistoryOrderGetInteger(ticket,ORDER_MAGIC),
+                          (datetime)HistoryOrderGetInteger(ticket,ORDER_TIME_SETUP),
+                          HistoryOrderGetString(ticket,ORDER_COMMENT),
+                          (ENUM_ORDER_STATE)HistoryOrderGetInteger(ticket,ORDER_STATE),false);
+      }
    }
-   return true;
+
+   int active_orders=OrdersTotal();
+   for(int i=0;i<active_orders;i++)
+   {
+      ulong ticket=OrderGetTicket(i);
+      if(ticket==0) continue;
+      ENUM_ORDER_TYPE type=(ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+      if(!IsTradingOrderType(type)) continue;
+      AddOrderActivity(ticket,OrderGetString(ORDER_SYMBOL),OrderGetInteger(ORDER_MAGIC),
+                       (datetime)OrderGetInteger(ORDER_TIME_SETUP),OrderGetString(ORDER_COMMENT),
+                       (ENUM_ORDER_STATE)OrderGetInteger(ORDER_STATE),true);
+   }
+   return history_ok;
 }
 
 int ExistingStats(const string symbol,const long magic)
@@ -290,7 +366,12 @@ int ExistingStats(const string symbol,const long magic)
 
 string StrategySignature(const string value)
 {
-   string source=StringToLowerCopy(value);
+   // The EA name can end in .ex5.  Remove it before extracting numeric
+   // groups, otherwise the "5" in the extension becomes a false component
+   // of the signature (for example 4.7.21(2).ex5 -> 4.7.21.2.5).
+   string source=NormalizeEx5Name(value);
+   if(source=="")
+      source=StringToLowerCopy(value);
    int strategy_pos=StringFind(source,"strategy");
    if(strategy_pos>=0)
       source=StringSubstr(source,strategy_pos+8);
@@ -316,33 +397,85 @@ string StrategySignature(const string value)
    return result;
 }
 
-int AutoMatchHistory(const string symbol,const string ex5,string &confidence,string &reason)
+int AutoMatchByDeals(const string symbol,const string ex5,string &confidence,string &reason)
 {
    string signature=StrategySignature(ex5);
    confidence="SIN_COINCIDENCIA";
-   reason="FIRMA="+signature;
+   reason="FIRMA_DEALS="+signature;
    if(signature=="") return -1;
    int found=-1;
    int candidates=0;
    for(int i=0;i<ArraySize(history_stats);i++)
    {
       if(StringToLowerCopy(history_stats[i].symbol)!=StringToLowerCopy(symbol)) continue;
-      if(StrategySignature(history_stats[i].comments)!=signature) continue;
+      if(history_stats[i].entries<=0) continue;
+      if(StrategySignature(history_stats[i].deal_comments)!=signature) continue;
       found=i;
       candidates++;
    }
    if(candidates==1)
    {
-      confidence="PROBABLE_FIRMA_Y_SIMBOLO";
+      confidence="PROBABLE_FIRMA_DEAL_Y_SIMBOLO";
       reason="Firma "+signature+" coincide con un único MN del historial";
       return found;
    }
    if(candidates>1)
    {
       confidence="AMBIGUA";
-      reason="Firma "+signature+" coincide con "+IntegerToString(candidates)+" MN";
+      reason="Firma "+signature+" coincide con "+IntegerToString(candidates)+" MN en deals";
    }
    return -1;
+}
+
+int AutoMatchByOrders(const string symbol,const string ex5,string &confidence,string &reason)
+{
+   string signature=StrategySignature(ex5);
+   confidence="SIN_COINCIDENCIA";
+   reason="FIRMA_ORDENES="+signature;
+   if(signature=="") return -1;
+   int found=-1;
+   int candidates=0;
+   for(int i=0;i<ArraySize(history_stats);i++)
+   {
+      if(StringToLowerCopy(history_stats[i].symbol)!=StringToLowerCopy(symbol)) continue;
+      if(history_stats[i].orders<=0) continue;
+      if(StrategySignature(history_stats[i].order_comments)!=signature) continue;
+      found=i;
+      candidates++;
+   }
+   if(candidates==1)
+   {
+      confidence="PROBABLE_FIRMA_ORDEN_Y_SIMBOLO";
+      reason="Firma "+signature+" coincide con un unico MN en ordenes";
+      return found;
+   }
+   if(candidates>1)
+   {
+      confidence="AMBIGUA";
+      reason="Firma "+signature+" coincide con "+IntegerToString(candidates)+" MN en ordenes";
+   }
+   return -1;
+}
+
+string ObservedComments(const int stat)
+{
+   if(stat<0) return "";
+   string result=history_stats[stat].deal_comments;
+   string orders=history_stats[stat].order_comments;
+   if(orders!="" && StringFind(result,orders)<0)
+   {
+      if(result!="") result+=" | ";
+      result+=orders;
+   }
+   return result;
+}
+
+string ActivityStatus(const int stat)
+{
+   if(stat<0) return "SIN_ACTIVIDAD";
+   if(history_stats[stat].entries>0) return "CON_ENTRADAS";
+   if(history_stats[stat].orders>0) return "SOLO_ORDENES";
+   return "SIN_ACTIVIDAD";
 }
 
 string PeriodText(const ENUM_TIMEFRAMES period)
@@ -373,34 +506,40 @@ string WarningFlags(const int catalog_index,const string observed_comments)
 
 void WriteCsvHeader(const int handle)
 {
-   FileWriteString(handle,"generated_utc,account_login,server,chart_id,symbol,timeframe,ex5_name,magic_number,mapping_source,mapping_confidence,expected_comment,observed_comments,attached,terminal_connected,algo_trading_global,account_trade_allowed,status,trade_status,entry_deals,first_trade,last_trade,warnings\r\n");
+   FileWriteString(handle,"generated_utc,account_login,server,chart_id,symbol,timeframe,ex5_name,magic_number,mapping_source,mapping_confidence,expected_comment,observed_comments,attached,terminal_connected,algo_trading_global,account_trade_allowed,status,trade_status,activity_status,entry_deals,first_trade,last_trade,orders,first_order,last_order,order_states,warnings\r\n");
 }
 
 string CsvRow(const string generated,const long account,const string server,const long chart_id,const string symbol,
               const string timeframe,const string ex5,const string magic,const string mapping_source,const string confidence,
               const string expected,const string observed,
               const bool attached,const bool connected,const bool algo,const bool account_allowed,const string status,
-              const string trade_status,const string entries,const datetime first_trade,const datetime last_trade,const string flags)
+              const string trade_status,const string activity_status,const string entries,
+              const datetime first_trade,const datetime last_trade,const string orders,const datetime first_order,
+              const datetime last_order,const string order_states,const string flags)
 {
    return CsvEscape(generated)+","+CsvEscape((string)account)+","+CsvEscape(server)+","+CsvEscape((string)chart_id)+","+
           CsvEscape(symbol)+","+CsvEscape(timeframe)+","+CsvEscape(ex5)+","+CsvEscape(magic)+","+CsvEscape(mapping_source)+","+
           CsvEscape(confidence)+","+CsvEscape(expected)+","+
           CsvEscape(observed)+","+CsvEscape(BoolText(attached))+","+CsvEscape(BoolText(connected))+","+CsvEscape(BoolText(algo))+","+
-          CsvEscape(BoolText(account_allowed))+","+CsvEscape(status)+","+CsvEscape(trade_status)+","+CsvEscape(entries)+","+
-          CsvEscape(TimeText(first_trade))+","+CsvEscape(TimeText(last_trade))+","+CsvEscape(flags)+"\r\n";
+          CsvEscape(BoolText(account_allowed))+","+CsvEscape(status)+","+CsvEscape(trade_status)+","+CsvEscape(activity_status)+","+
+          CsvEscape(entries)+","+CsvEscape(TimeText(first_trade))+","+CsvEscape(TimeText(last_trade))+","+CsvEscape(orders)+","+
+          CsvEscape(TimeText(first_order))+","+CsvEscape(TimeText(last_order))+","+CsvEscape(order_states)+","+CsvEscape(flags)+"\r\n";
 }
 
 string HtmlRow(const long chart_id,const string symbol,const string timeframe,const string ex5,const string magic,
                const string mapping_source,const string confidence,const string expected,const string observed,
-               const string status,const string trade_status,const string entries,
-               const datetime first_trade,const datetime last_trade,const string flags)
+               const string status,const string trade_status,const string activity_status,const string entries,
+               const datetime first_trade,const datetime last_trade,const string orders,const datetime first_order,
+               const datetime last_order,const string order_states,const string flags)
 {
    string css=status=="ACTIVO" ? "active" : (status=="SIN_EA" ? "empty" : "inactive");
    return "<tr class='"+css+"'><td>"+(string)chart_id+"</td><td>"+HtmlEscape(symbol)+"</td><td>"+HtmlEscape(timeframe)+
           "</td><td>"+HtmlEscape(ex5)+"</td><td>"+HtmlEscape(magic)+"</td><td>"+HtmlEscape(mapping_source)+"</td><td>"+
           HtmlEscape(confidence)+"</td><td>"+HtmlEscape(expected)+"</td><td>"+
-          HtmlEscape(observed)+"</td><td>"+status+"</td><td>"+trade_status+"</td><td>"+HtmlEscape(entries)+"</td><td>"+
-          HtmlEscape(TimeText(first_trade))+"</td><td>"+HtmlEscape(TimeText(last_trade))+"</td><td>"+HtmlEscape(flags)+"</td></tr>\r\n";
+          HtmlEscape(observed)+"</td><td>"+status+"</td><td>"+trade_status+"</td><td>"+activity_status+"</td><td>"+
+          HtmlEscape(entries)+"</td><td>"+HtmlEscape(TimeText(first_trade))+"</td><td>"+HtmlEscape(TimeText(last_trade))+"</td><td>"+
+          HtmlEscape(orders)+"</td><td>"+HtmlEscape(TimeText(first_order))+"</td><td>"+HtmlEscape(TimeText(last_order))+"</td><td>"+
+          HtmlEscape(order_states)+"</td><td>"+HtmlEscape(flags)+"</td></tr>\r\n";
 }
 
 void WriteHistoryCsv(const string path,const string generated,const long account,const string server)
@@ -411,13 +550,16 @@ void WriteHistoryCsv(const string path,const string generated,const long account
       AddWarning("NO_SE_PUDO_CREAR_HISTORY_CSV: "+path+" error "+IntegerToString(GetLastError()));
       return;
    }
-   FileWriteString(handle,"generated_utc,account_login,server,symbol,magic_number,observed_comments,entry_deals,first_trade,last_trade\r\n");
+   FileWriteString(handle,"generated_utc,account_login,server,symbol,magic_number,deal_comments,entry_deals,first_trade,last_trade,order_comments,orders,first_order,last_order,order_states,activity_status\r\n");
    for(int i=0;i<ArraySize(history_stats);i++)
    {
       FileWriteString(handle,CsvEscape(generated)+","+CsvEscape((string)account)+","+CsvEscape(server)+","+
                       CsvEscape(history_stats[i].symbol)+","+CsvEscape((string)history_stats[i].magic)+","+
-                      CsvEscape(history_stats[i].comments)+","+CsvEscape((string)history_stats[i].entries)+","+
-                      CsvEscape(TimeText(history_stats[i].first_trade))+","+CsvEscape(TimeText(history_stats[i].last_trade))+"\r\n");
+                      CsvEscape(history_stats[i].deal_comments)+","+CsvEscape((string)history_stats[i].entries)+","+
+                      CsvEscape(TimeText(history_stats[i].first_trade))+","+CsvEscape(TimeText(history_stats[i].last_trade))+","+
+                      CsvEscape(history_stats[i].order_comments)+","+CsvEscape((string)history_stats[i].orders)+","+
+                      CsvEscape(TimeText(history_stats[i].first_order))+","+CsvEscape(TimeText(history_stats[i].last_order))+","+
+                      CsvEscape(history_stats[i].order_states)+","+CsvEscape(ActivityStatus(i))+"\r\n");
    }
    FileClose(handle);
 }
@@ -428,11 +570,14 @@ string HistoryHtmlRows()
    for(int i=0;i<ArraySize(history_stats);i++)
    {
       rows+="<tr><td>"+HtmlEscape(history_stats[i].symbol)+"</td><td>"+(string)history_stats[i].magic+"</td><td>"+
-            HtmlEscape(history_stats[i].comments)+"</td><td>"+(string)history_stats[i].entries+"</td><td>"+
-            HtmlEscape(TimeText(history_stats[i].first_trade))+"</td><td>"+HtmlEscape(TimeText(history_stats[i].last_trade))+"</td></tr>\r\n";
+            HtmlEscape(history_stats[i].deal_comments)+"</td><td>"+(string)history_stats[i].entries+"</td><td>"+
+            HtmlEscape(TimeText(history_stats[i].first_trade))+"</td><td>"+HtmlEscape(TimeText(history_stats[i].last_trade))+"</td><td>"+
+            HtmlEscape(history_stats[i].order_comments)+"</td><td>"+(string)history_stats[i].orders+"</td><td>"+
+            HtmlEscape(TimeText(history_stats[i].first_order))+"</td><td>"+HtmlEscape(TimeText(history_stats[i].last_order))+"</td><td>"+
+            HtmlEscape(history_stats[i].order_states)+"</td><td>"+ActivityStatus(i)+"</td></tr>\r\n";
    }
    if(rows=="")
-      rows="<tr><td colspan='6'>No se encontraron entradas BUY/SELL en el historial disponible.</td></tr>\r\n";
+      rows="<tr><td colspan='11'>No se encontraron entradas ni ordenes en el historial disponible.</td></tr>\r\n";
    return rows;
 }
 
@@ -443,7 +588,7 @@ void WriteDiagnosticsCsv(const string path,const string generated,const long acc
    int handle=FileOpen(path,FILE_WRITE|FILE_TXT|FILE_ANSI);
    if(handle==INVALID_HANDLE)
       return;
-   FileWriteString(handle,"generated_utc,account_login,server,catalog_read,catalog_location,catalog_lines,catalog_valid_rows,catalog_exact_matches,history_read,history_magic_groups,charts_reported,script_charts_excluded,auto_matched_rows,ambiguous_auto_matches,warnings\r\n");
+   FileWriteString(handle,"generated_utc,account_login,server,catalog_read,catalog_location,catalog_lines,catalog_valid_rows,catalog_exact_matches,history_read,activity_magic_groups,historical_orders,current_orders,charts_reported,script_charts_excluded,auto_matched_rows,ambiguous_auto_matches,warnings\r\n");
    string all_warnings="";
    for(int i=0;i<ArraySize(warnings);i++)
    {
@@ -453,7 +598,8 @@ void WriteDiagnosticsCsv(const string path,const string generated,const long acc
    FileWriteString(handle,CsvEscape(generated)+","+CsvEscape((string)account)+","+CsvEscape(server)+","+
                    CsvEscape(BoolText(catalog_ok))+","+CsvEscape(catalog_location)+","+CsvEscape((string)catalog_lines)+","+
                    CsvEscape((string)catalog_valid_rows)+","+CsvEscape((string)catalog_exact_matches)+","+
-                   CsvEscape(BoolText(history_ok))+","+CsvEscape((string)ArraySize(history_stats))+","+CsvEscape((string)charts)+","+
+                   CsvEscape(BoolText(history_ok))+","+CsvEscape((string)ArraySize(history_stats))+","+
+                   CsvEscape((string)historical_orders_loaded)+","+CsvEscape((string)current_orders_loaded)+","+CsvEscape((string)charts)+","+
                    CsvEscape((string)excluded_script_charts)+","+CsvEscape((string)auto_rows)+","+CsvEscape((string)ambiguous_rows)+","+
                    CsvEscape(all_warnings)+"\r\n");
    FileClose(handle);
@@ -487,6 +633,7 @@ void OnStart()
    WriteCsvHeader(csv);
    string rows="";
    int charts=0,ea_charts=0,active_rows=0,never_rows=0,unknown_rows=0,total_rows=0;
+   int entry_rows=0,only_order_rows=0,no_activity_rows=0;
    long chart_id=ChartFirst();
    while(chart_id>=0)
    {
@@ -508,8 +655,13 @@ void OnStart()
          int entries=stat>=0 ? history_stats[stat].entries : 0;
          datetime first_trade=stat>=0 ? history_stats[stat].first_trade : 0;
          datetime last_trade=stat>=0 ? history_stats[stat].last_trade : 0;
-         string observed=stat>=0 ? history_stats[stat].comments : "";
+         int orders=stat>=0 ? history_stats[stat].orders : 0;
+         datetime first_order=stat>=0 ? history_stats[stat].first_order : 0;
+         datetime last_order=stat>=0 ? history_stats[stat].last_order : 0;
+         string order_states=stat>=0 ? history_stats[stat].order_states : "";
+         string observed=ObservedComments(stat);
          string trade_status=history_ok ? (entries==0 ? "NUNCA_OPERO" : "CON_OPERACIONES") : "HISTORIAL_NO_DISPONIBLE";
+         string activity_status=ActivityStatus(stat);
          string flags=WarningFlags(c,observed);
          FileWriteString(csv,CsvRow(generated,account,server,chart_id,symbol,timeframe,ex5,(string)catalog[c].magic,
                                     catalog[c].expected_comment,observed,attached,connected,algo,account_allowed,status,
@@ -590,6 +742,7 @@ void OnStart()
    string rows="";
    string pending_rows="";
    int charts=0,ea_charts=0,active_rows=0,never_rows=0,unknown_rows=0,total_rows=0;
+   int entry_rows=0,only_order_rows=0,no_activity_rows=0;
    int excluded_script_charts=0,auto_rows=0,ambiguous_rows=0;
    long script_chart=ChartID();
 
@@ -624,43 +777,89 @@ void OnStart()
          int entries=stat>=0 ? history_stats[stat].entries : 0;
          datetime first_trade=stat>=0 ? history_stats[stat].first_trade : 0;
          datetime last_trade=stat>=0 ? history_stats[stat].last_trade : 0;
-         string observed=stat>=0 ? history_stats[stat].comments : "";
+         int orders=stat>=0 ? history_stats[stat].orders : 0;
+         datetime first_order=stat>=0 ? history_stats[stat].first_order : 0;
+         datetime last_order=stat>=0 ? history_stats[stat].last_order : 0;
+         string order_states=stat>=0 ? history_stats[stat].order_states : "";
+         string observed=ObservedComments(stat);
          string trade_status=history_ok ? (entries==0 ? "NUNCA_OPERO" : "CON_OPERACIONES") : "HISTORIAL_NO_DISPONIBLE";
+         string activity_status=ActivityStatus(stat);
          string flags=WarningFlags(c,observed);
 
          FileWriteString(csv,CsvRow(generated,account,server,chart_id,symbol,timeframe,ex5,(string)catalog[c].magic,
                                     "CATALOGO","CONFIRMADA_CATALOGO",catalog[c].expected_comment,observed,attached,connected,
-                                    algo,account_allowed,status,trade_status,(string)entries,first_trade,last_trade,flags));
+                                    algo,account_allowed,status,trade_status,activity_status,(string)entries,first_trade,last_trade,
+                                    (string)orders,first_order,last_order,order_states,flags));
          rows+=HtmlRow(chart_id,symbol,timeframe,ex5,(string)catalog[c].magic,"CATALOGO","CONFIRMADA_CATALOGO",
-                       catalog[c].expected_comment,observed,status,trade_status,(string)entries,first_trade,last_trade,flags);
+                       catalog[c].expected_comment,observed,status,trade_status,activity_status,(string)entries,first_trade,last_trade,
+                       (string)orders,first_order,last_order,order_states,flags);
          total_rows++;
          if(status=="ACTIVO") active_rows++;
          if(entries==0 && history_ok) never_rows++;
+         if(activity_status=="CON_ENTRADAS") entry_rows++;
+         else if(activity_status=="SOLO_ORDENES") only_order_rows++;
+         else if(activity_status=="SIN_ACTIVIDAD") no_activity_rows++;
       }
 
       if(!matched)
       {
          string confidence="";
          string reason="";
-         int stat=attached ? AutoMatchHistory(symbol,ex5,confidence,reason) : -1;
+         int stat=attached ? AutoMatchByDeals(symbol,ex5,confidence,reason) : -1;
+         string mapping_source="HISTORIAL_DEALS_AUTO";
+         if(attached && stat<0)
+         {
+            string deal_confidence=confidence;
+            string deal_reason=reason;
+            string order_confidence="";
+            string order_reason="";
+            int order_stat=AutoMatchByOrders(symbol,ex5,order_confidence,order_reason);
+            if(order_stat>=0)
+            {
+               stat=order_stat;
+               confidence=order_confidence;
+               reason=order_reason;
+               mapping_source="HISTORIAL_ORDENES_AUTO";
+            }
+            else if(deal_confidence=="AMBIGUA")
+            {
+               confidence=deal_confidence;
+               reason=deal_reason+" | "+order_reason;
+            }
+            else
+            {
+               confidence=order_confidence;
+               reason=order_reason;
+            }
+         }
 
          if(attached && stat>=0)
          {
             string flags="ASOCIACION_AUTOMATICA_REVISAR";
             string entries=(string)history_stats[stat].entries;
+            string orders=(string)history_stats[stat].orders;
+            string observed=ObservedComments(stat);
+            string trade_status=history_ok ? (history_stats[stat].entries==0 ? "NUNCA_OPERO" : "CON_OPERACIONES") : "HISTORIAL_NO_DISPONIBLE";
+            string activity_status=ActivityStatus(stat);
             FileWriteString(csv,CsvRow(generated,account,server,chart_id,symbol,timeframe,ex5,(string)history_stats[stat].magic,
-                                       "HISTORIAL_AUTO",confidence,"",history_stats[stat].comments,attached,connected,algo,
-                                       account_allowed,status,"CON_OPERACIONES",entries,history_stats[stat].first_trade,
-                                       history_stats[stat].last_trade,flags));
-            rows+=HtmlRow(chart_id,symbol,timeframe,ex5,(string)history_stats[stat].magic,"HISTORIAL_AUTO",confidence,"",
-                          history_stats[stat].comments,status,"CON_OPERACIONES",entries,history_stats[stat].first_trade,
-                          history_stats[stat].last_trade,flags);
+                                       mapping_source,confidence,"",observed,attached,connected,algo,account_allowed,status,
+                                       trade_status,activity_status,entries,history_stats[stat].first_trade,history_stats[stat].last_trade,
+                                       orders,history_stats[stat].first_order,history_stats[stat].last_order,
+                                       history_stats[stat].order_states,flags));
+            rows+=HtmlRow(chart_id,symbol,timeframe,ex5,(string)history_stats[stat].magic,mapping_source,confidence,"",
+                          observed,status,trade_status,activity_status,entries,history_stats[stat].first_trade,
+                          history_stats[stat].last_trade,orders,history_stats[stat].first_order,history_stats[stat].last_order,
+                          history_stats[stat].order_states,flags);
             pending_rows+=CsvEscape(ex5)+","+CsvEscape((string)history_stats[stat].magic)+","+
-                          CsvEscape(history_stats[stat].comments)+","+CsvEscape(symbol)+","+CsvEscape(confidence)+","+
+                          CsvEscape(observed)+","+CsvEscape(symbol)+","+CsvEscape(confidence)+","+
                           CsvEscape(reason)+"\r\n";
             auto_rows++;
             total_rows++;
             if(status=="ACTIVO") active_rows++;
+            if(history_stats[stat].entries==0 && history_ok) never_rows++;
+            if(activity_status=="CON_ENTRADAS") entry_rows++;
+            else if(activity_status=="SOLO_ORDENES") only_order_rows++;
+            else if(activity_status=="SIN_ACTIVIDAD") no_activity_rows++;
          }
          else
          {
@@ -674,9 +873,11 @@ void OnStart()
             string entries_text=attached ? "NO_DETERMINABLE" : "NO_APLICA";
             FileWriteString(csv,CsvRow(generated,account,server,chart_id,symbol,timeframe,ex5,"",
                                        attached ? "SIN_COINCIDENCIA" : "NO_APLICA",confidence,"","",attached,connected,
-                                       algo,account_allowed,status,trade_status,entries_text,0,0,flags));
+                                       algo,account_allowed,status,trade_status,attached ? "NO_DETERMINABLE" : "NO_APLICA",
+                                       entries_text,0,0,attached ? "NO_DETERMINABLE" : "NO_APLICA",0,0,"",flags));
             rows+=HtmlRow(chart_id,symbol,timeframe,ex5,"",attached ? "SIN_COINCIDENCIA" : "NO_APLICA",confidence,"","",
-                          status,trade_status,entries_text,0,0,flags);
+                          status,trade_status,attached ? "NO_DETERMINABLE" : "NO_APLICA",entries_text,0,0,
+                          attached ? "NO_DETERMINABLE" : "NO_APLICA",0,0,"",flags);
             if(attached)
                pending_rows+=CsvEscape(ex5)+",,,"+CsvEscape(symbol)+","+CsvEscape(confidence)+","+CsvEscape(reason)+"\r\n";
             total_rows++;
@@ -717,7 +918,8 @@ void OnStart()
       "</b> | Trading de cuenta/EA permitido: <b>"+BoolText(account_allowed)+"</b> | Catalogo leido: <b>"+BoolText(catalog_ok)+
       "</b> | Historial leido: <b>"+BoolText(history_ok)+"</b> | Catalogo: <b>"+HtmlEscape(catalog_location)+
       "</b> | Filas validas catalogo: <b>"+(string)catalog_valid_rows+"</b> | Coincidencias exactas: <b>"+
-      (string)catalog_exact_matches+"</b></p>";
+      (string)catalog_exact_matches+"</b> | Ordenes historicas: <b>"+(string)historical_orders_loaded+
+      "</b> | Ordenes actuales: <b>"+(string)current_orders_loaded+"</b></p>";
 
    string document="<!doctype html><html><head><meta charset='windows-1252'><title>Inventario de bots MT5</title>"
       "<style>body{font-family:Segoe UI,Arial,sans-serif;margin:24px;color:#17202a}h1{margin-bottom:4px}.meta{color:#566573}"
@@ -728,14 +930,19 @@ void OnStart()
       " | Cuenta: "+(string)account+" | Servidor: "+HtmlEscape(server)+"</div><div class='cards'>"
       "<div class='card'><b>Charts</b><br>"+(string)charts+"</div><div class='card'><b>Charts con EA</b><br>"+(string)ea_charts+
       "</div><div class='card'><b>Filas activas</b><br>"+(string)active_rows+"</div><div class='card'><b>Nunca operaron</b><br>"+
-      (string)never_rows+"</div><div class='card'><b>MN desconocido</b><br>"+(string)unknown_rows+"</div><div class='card'><b>Auto-asociados</b><br>"+
+      (string)never_rows+"</div><div class='card'><b>Con entradas</b><br>"+(string)entry_rows+
+      "</div><div class='card'><b>Solo ordenes</b><br>"+(string)only_order_rows+
+      "</div><div class='card'><b>Sin actividad</b><br>"+(string)no_activity_rows+
+      "</div><div class='card'><b>MN desconocido</b><br>"+(string)unknown_rows+"</div><div class='card'><b>Auto-asociados</b><br>"+
       (string)auto_rows+"</div></div>"+diagnostics+"<h2>Advertencias</h2>"+warning_html+
       "<h2>Detalle</h2><table><thead><tr><th>Chart ID</th><th>Simbolo</th><th>TF</th><th>EX5</th><th>MN</th>"
-      "<th>Origen</th><th>Confianza</th><th>Comentario esperado</th><th>Comentarios observados</th><th>Estado</th><th>Operaciones</th><th>Entradas</th>"
-      "<th>Primera</th><th>Ultima</th><th>Advertencias</th></tr></thead><tbody>"+rows+"</tbody></table>"
-      "<h2>Historial agrupado</h2><table><thead><tr><th>Simbolo</th><th>MN</th><th>Comentarios observados</th><th>Entradas</th>"
-      "<th>Primera</th><th>Ultima</th></tr></thead><tbody>"+HistoryHtmlRows()+"</tbody></table>"
-      "<p class='meta'>Solo lectura. NUNCA_OPERO se limita al historial disponible de la cuenta indicada.</p></body></html>";
+      "<th>Origen</th><th>Confianza</th><th>Comentario esperado</th><th>Comentarios observados</th><th>Estado</th><th>Operaciones</th>"
+      "<th>Actividad</th><th>Entradas</th><th>Primera entrada</th><th>Ultima entrada</th><th>Ordenes</th>"
+      "<th>Primera orden</th><th>Ultima orden</th><th>Estados orden</th><th>Advertencias</th></tr></thead><tbody>"+rows+"</tbody></table>"
+      "<h2>Actividad agrupada</h2><table><thead><tr><th>Simbolo</th><th>MN</th><th>Comentarios deals</th><th>Entradas</th>"
+      "<th>Primera entrada</th><th>Ultima entrada</th><th>Comentarios ordenes</th><th>Ordenes</th><th>Primera orden</th>"
+      "<th>Ultima orden</th><th>Estados</th><th>Actividad</th></tr></thead><tbody>"+HistoryHtmlRows()+"</tbody></table>"
+      "<p class='meta'>Solo lectura. NUNCA_OPERO significa cero entradas BUY/SELL ejecutadas y se limita al historial disponible.</p></body></html>";
    FileWriteString(html,document);
    FileClose(html);
    Print("BotInventoryReport: completado. Charts=",charts," filas=",total_rows," CSV=",base,".csv HTML=",base,".html");

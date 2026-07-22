@@ -14,10 +14,9 @@ from typing import Any
 
 from . import mt5_backtests, sqx_connector
 from .config import (
-    BACKTEST_START_DATE,
+    ACTIVE_BACKTEST_BROKER, BACKTEST_START_DATE, BROKER_PROFILES,
     DEFAULT_TERMINAL,
     EXPERT_SEARCH_ROOTS,
-    MT5_TERMINAL_EXE,
 )
 from .db import rows, session, utcnow
 from .mapping import normalize, symbol_family, version_signature
@@ -31,10 +30,37 @@ SYMBOL_FALLBACKS = {
     "dax": "GER40",
     "us30": "US30",
 }
+CUSTOM_HISTORY_SOURCE = "Custom"
+CUSTOM_START_DATE = "2016-01-01"
+# User-approved exclusions.  Keep both the persisted strategy identity and a
+# normalized name rule: the second bot is not currently catalogued, but must
+# remain excluded if it is imported later.
+EXCLUDED_BACKTEST_STRATEGY_IDS: set[int] = set()
+EXCLUDED_BACKTEST_NAMES = {
+    normalize("WF Matrix - Strategy 3.10.85-XAUUSD-M15"),
+}
+# Explicit user-approved reruns may proceed on Darwinex even when there is no
+# valid FPM reference run to clone.  Keep this deliberately narrow: these
+# strategies have a hash-verified EX5 and an SQX link of their own.
+EXPLICIT_DARWINEX_RERUN_STRATEGY_IDS = {130, 138}
+
+
+def _custom_history_end(symbol: str, broker: str) -> str | None:
+    """Return a safe inclusive end date from the imported Custom history."""
+    root = mt5_backtests.broker_profile(broker)["data_dir"] / "bases" / "Custom" / "history" / symbol
+    years = sorted(
+        int(path.stem) for path in root.glob("*.hcc") if path.stem.isdigit() and len(path.stem) == 4
+    )
+    if not years:
+        return None
+    latest_year = years[-1]
+    yesterday = date.today() - timedelta(days=1)
+    return min(yesterday, date(latest_year, 12, 31)).isoformat()
 
 
 def _acquire_worker_lock() -> Any | None:
-    lock_path = DEFAULT_TERMINAL / "MQL5" / "Files" / "Dashboardv1" / "backtest-worker.lock"
+    lock_root = mt5_backtests.broker_profile(ACTIVE_BACKTEST_BROKER)["data_dir"]
+    lock_path = Path(lock_root) / "MQL5" / "Files" / "Dashboardv1" / "backtest-worker.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     handle = lock_path.open("a+b")
     if lock_path.stat().st_size == 0:
@@ -57,9 +83,13 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _expert_files() -> list[Path]:
+def _expert_files(broker: str = "FPM") -> list[Path]:
+    profile = mt5_backtests.broker_profile(broker)
     found: dict[str, Path] = {}
-    for root in EXPERT_SEARCH_ROOTS:
+    roots = [Path(profile["data_dir"]) / "MQL5" / "Experts"]
+    if profile["broker"] != "FPM":
+        roots.append(DEFAULT_TERMINAL / "MQL5" / "Experts")
+    for root in roots:
         if root.is_dir():
             for path in root.rglob("*.ex5"):
                 found[str(path.resolve()).casefold()] = path.resolve()
@@ -94,9 +124,10 @@ def _dedupe_by_hash(paths: list[Path]) -> list[tuple[Path, str]]:
     return [(path, digest) for digest, path in hashes.items()]
 
 
-def _prefer_default_terminal(matches: list[tuple[Path, str]]) -> tuple[Path, str]:
-    fpm_matches = [item for item in matches if DEFAULT_TERMINAL in item[0].parents]
-    return (fpm_matches or matches)[0]
+def _prefer_default_terminal(matches: list[tuple[Path, str]], broker: str = "FPM") -> tuple[Path, str]:
+    root = mt5_backtests.broker_profile(broker)["data_dir"]
+    preferred = [item for item in matches if root in item[0].parents]
+    return (preferred or matches)[0]
 
 
 def _strict_identity_tail(name: str) -> str:
@@ -127,8 +158,9 @@ def _strict_identity_paths(files: list[Path], names: list[str], family: str) -> 
     return matches
 
 
-def discover_candidates() -> dict[str, Any]:
-    files = _expert_files()
+def discover_candidates(broker: str = ACTIVE_BACKTEST_BROKER, history_source: str | None = None) -> dict[str, Any]:
+    profile = mt5_backtests.broker_profile(broker)
+    files = _expert_files(broker)
     by_name: dict[str, list[Path]] = {}
     by_signature: dict[str, list[Path]] = {}
     for path in files:
@@ -147,24 +179,54 @@ def discover_candidates() -> dict[str, Any]:
                  ON l.strategy_id=COALESCE(s.identity_strategy_id,s.id)
                WHERE s.retired=0 AND s.archived_at IS NULL ORDER BY s.symbol,s.sqx_name"""
         ))
-        validated = {
+        completed_rows = rows(conn.execute(
+            """SELECT DISTINCT r.strategy_id,r.config_snapshot_json
+               FROM backtest_runs r JOIN backtest_metrics m ON m.run_id=r.id
+               WHERE r.status='completed' AND r.broker=?""", (profile["broker"],)
+        ))
+        validated = set()
+        for row in completed_rows:
+            try:
+                snapshot = json.loads(row["config_snapshot_json"] or "{}")
+            except json.JSONDecodeError:
+                snapshot = {}
+            if not history_source or snapshot.get("history_source") == history_source:
+                validated.add(int(row["strategy_id"]))
+        reference_ids = {
             int(row["strategy_id"])
             for row in conn.execute(
-                """SELECT DISTINCT r.strategy_id
-                   FROM backtest_runs r JOIN backtest_metrics m ON m.run_id=r.id
-                   WHERE r.status='completed'"""
+                """SELECT DISTINCT strategy_id FROM backtest_runs
+                   WHERE broker='FPM' AND status='completed'"""
             )
         }
         symbol_maps = {
             str(row["source_symbol"]).casefold(): str(row["target_symbol"])
-            for row in conn.execute("SELECT source_symbol,target_symbol FROM symbol_mappings WHERE broker='FPM'")
+            for row in conn.execute("SELECT source_symbol,target_symbol FROM symbol_mappings WHERE broker=?", (profile["broker"],))
         }
 
     output: list[dict[str, Any]] = []
     for strategy in strategies:
+        if int(strategy["id"]) in EXCLUDED_BACKTEST_STRATEGY_IDS or any(
+            normalize(name) in EXCLUDED_BACKTEST_NAMES for name in _candidate_names(strategy)
+        ):
+            output.append({
+                **strategy, "state": "excluded", "rerun_state": "excluded",
+                "reason": "Excluded from backtest by user request",
+                "resolution_method": "user_exclusion", "confidence": 1.0,
+                "family": symbol_family(str(strategy.get("symbol") or "")),
+                "target_symbol": None, "expert_path": None, "expert_hash": None,
+            })
+            continue
+        if (
+            profile["broker"] == "Darwinex"
+            and int(strategy["id"]) not in reference_ids
+            and int(strategy["id"]) not in EXPLICIT_DARWINEX_RERUN_STRATEGY_IDS
+        ):
+            continue
         is_validated = int(strategy["id"]) in validated
         family = symbol_family(str(strategy.get("sqx_symbol") or strategy.get("symbol") or ""))
-        target_symbol = symbol_maps.get(str(strategy.get("sqx_symbol") or "").casefold()) or SYMBOL_FALLBACKS.get(family)
+        source_symbol = str(strategy.get("sqx_symbol") or strategy.get("symbol") or "")
+        target_symbol = symbol_maps.get(source_symbol.casefold())
         names = _candidate_names(strategy)
         exact_paths: list[Path] = []
         for name in names:
@@ -211,7 +273,9 @@ def discover_candidates() -> dict[str, Any]:
         if not strategy.get("strategy_name"):
             state, reason = "blocked", "No SQX configuration is linked"
         elif not target_symbol:
-            state, reason = "blocked", "No FPM symbol mapping exists"
+            state, reason = "blocked", "No Darwinex Custom symbol mapping exists"
+        elif history_source == CUSTOM_HISTORY_SOURCE and not _custom_history_end(target_symbol, profile["broker"]):
+            state, reason = "blocked", f"Custom history is unavailable for {target_symbol}"
         elif not strategy.get("timeframe"):
             state, reason = "blocked", "No timeframe could be recovered"
         elif selected:
@@ -236,9 +300,9 @@ def discover_candidates() -> dict[str, Any]:
 
     counts = {
         state: sum(1 for item in output if item["state"] == state)
-        for state in ("eligible", "resolvable", "blocked", "validated")
+        for state in ("eligible", "resolvable", "blocked", "validated", "excluded")
     }
-    return {"counts": counts, "candidates": output, "expert_files": len(files)}
+    return {"broker": profile["broker"], "counts": counts, "candidates": output, "expert_files": len(files)}
 
 
 def _extract_source(snapshot: dict[str, Any]) -> str | None:
@@ -248,14 +312,16 @@ def _extract_source(snapshot: dict[str, Any]) -> str | None:
     return str(code) if code and str(code).strip().upper() != "NA" else None
 
 
-def _compile_sqx_source(strategy_name: str, source: str) -> tuple[Path, str]:
+def _compile_sqx_source(strategy_name: str, source: str, broker: str) -> tuple[Path, str]:
+    """Compile inside the same terminal profile that will execute the run."""
+    profile = mt5_backtests.broker_profile(broker)
     safe_name = re.sub(r'[<>:"/\\|?*]', "_", strategy_name).strip()
-    destination = DEFAULT_TERMINAL / "MQL5" / "Experts" / "DashboardBacktests" / "Generated"
+    destination = Path(profile["data_dir"]) / "MQL5" / "Experts" / "DashboardBacktests" / "Generated"
     destination.mkdir(parents=True, exist_ok=True)
     mq5 = destination / f"{safe_name}.mq5"
     log = destination / f"{safe_name}.compile.log"
     mq5.write_text(source, encoding="utf-8")
-    editor = MT5_TERMINAL_EXE.parent / "MetaEditor64.exe"
+    editor = Path(profile["terminal_exe"]).parent / "MetaEditor64.exe"
     completed = subprocess.run(
         [str(editor), f"/compile:{mq5}", f"/log:{log}"],
         cwd=str(editor.parent),
@@ -274,8 +340,9 @@ def _compile_sqx_source(strategy_name: str, source: str) -> tuple[Path, str]:
     return ex5, _sha256(ex5)
 
 
-def _stage_expert(path: Path, digest: str) -> Path:
-    root = DEFAULT_TERMINAL / "MQL5" / "Experts"
+def _stage_expert(path: Path, digest: str, broker: str) -> Path:
+    """Stage the EX5 only under the target broker's terminal DataDir."""
+    root = Path(mt5_backtests.broker_profile(broker)["data_dir"]) / "MQL5" / "Experts"
     if root in path.parents:
         return path
     destination = root / "DashboardBacktests" / digest[:12] / path.name
@@ -288,7 +355,8 @@ def _snapshot_setting(snapshot: dict[str, Any], key: str) -> str | None:
     return mt5_backtests._setting(snapshot, key)
 
 
-def _resolve_item(item_id: int, model: int) -> None:
+def _resolve_item(item_id: int, model: int, broker: str = ACTIVE_BACKTEST_BROKER) -> None:
+    broker_name = mt5_backtests.broker_profile(broker)["broker"]
     with session() as conn:
         item = conn.execute(
             """SELECT i.*,s.sqx_name,l.project,l.databank,l.strategy_name,l.symbol AS sqx_symbol,l.timeframe
@@ -299,47 +367,107 @@ def _resolve_item(item_id: int, model: int) -> None:
                WHERE i.id=?""",
             (item_id,),
         ).fetchone()
+        reference = conn.execute(
+            """SELECT * FROM backtest_runs
+               WHERE strategy_id=? AND broker='FPM' AND status='completed'
+               ORDER BY finished_at DESC,id DESC LIMIT 1""",
+            (item["strategy_id"],),
+        ).fetchone() if item else None
     if not item or not item["strategy_name"]:
         raise RuntimeError("SQX strategy link is unavailable")
 
     needs_source = item["resolution_method"] == "generated_from_sqx"
-    snapshot = sqx_connector.inspect_strategy(
-        item["project"], item["databank"], item["strategy_name"],
-        source_format="mq5" if needs_source else None,
-    )
     expert_path = Path(item["expert_path"]) if item["expert_path"] else None
     expert_hash = str(item["expert_hash"] or "")
+    snapshot: dict[str, Any] = {}
+    # A completed FPM run already contains the exact EX5 and reference
+    # configuration.  Reuse it for Darwinex instead of waiting on SQX again.
+    if reference and reference["expert_path"] and Path(reference["expert_path"]).is_file():
+        expert_path = Path(reference["expert_path"])
+        expert_hash = str(reference["expert_hash"] or expert_hash)
+        try:
+            snapshot = json.loads(reference["config_snapshot_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            snapshot = {}
+        needs_source = False
+    elif needs_source:
+        snapshot = sqx_connector.inspect_strategy(
+            item["project"], item["databank"], item["strategy_name"],
+            source_format="mq5" if needs_source else None,
+        )
+    else:
+        # An exact EX5 plus the persisted FPM run is sufficient for a Custom
+        # rerun.  Do not make the batch depend on a live SQX session merely to
+        # fetch metadata that is not needed by the tester.
+        snapshot = {
+            "resolution_method": item["resolution_method"],
+            "reference_run_id": int(reference["id"]) if reference else None,
+        }
     if needs_source:
         source = _extract_source(snapshot)
         if not source:
             raise RuntimeError("SQX could not generate MQL5 source for this strategy")
-        expert_path, expert_hash = _compile_sqx_source(item["strategy_name"], source)
+        expert_path, expert_hash = _compile_sqx_source(item["strategy_name"], source, broker_name)
     if not expert_path or not expert_path.is_file():
         raise RuntimeError("Resolved EX5 does not exist")
-    expert_path = _stage_expert(expert_path, expert_hash)
+    expert_path = _stage_expert(expert_path, expert_hash, broker_name)
 
+    item_config = json.loads(item["config_json"] or "{}")
+    history_source = item_config.get("history_source")
+    target_symbol = item_config.get("target_symbol")
     end_raw = (_snapshot_setting(snapshot, "End date") or date.today().isoformat()).replace(".", "-")
-    from_date = BACKTEST_START_DATE
-    to_date = min(end_raw, (date.today() - timedelta(days=1)).isoformat())
+    if history_source == CUSTOM_HISTORY_SOURCE:
+        from_date = CUSTOM_START_DATE
+        to_date = _custom_history_end(str(target_symbol or ""), broker_name)
+        if not to_date:
+            raise RuntimeError(f"Custom history is unavailable for {target_symbol}")
+    else:
+        from_date = str(reference["from_date"] if reference else BACKTEST_START_DATE)
+        to_date = str(reference["to_date"] if reference else min(end_raw, (date.today() - timedelta(days=1)).isoformat()))
+    inputs: dict[str, Any] = {}
+    if reference and reference["report_path"] and Path(reference["report_path"]).is_file():
+        try:
+            inputs = mt5_backtests.parse_report(Path(reference["report_path"]))["configuration"].get("inputs", {})
+        except (OSError, UnicodeError):
+            inputs = {}
+    # These are the user-approved Darwinex test overrides.  They are persisted
+    # in the run snapshot so the broker comparison can disclose them.
+    inputs["mmDecimals"] = "2"
+    inputs["mmLotsIfNoMM"] = "0.01"
+    # MT5 rejects an EA during OnInit when its order comment exceeds the
+    # platform's 30-character limit.  The comment is audit metadata only; a
+    # bounded value preserves strategy/risk behaviour while allowing the run.
+    comment = str(inputs.get("CustomComment") or "")
+    input_normalizations: dict[str, Any] = {}
+    if len(comment) > 30:
+        inputs["CustomComment"] = comment[:30]
+        input_normalizations["CustomComment"] = {
+            "original_length": len(comment), "stored_length": len(inputs["CustomComment"]),
+        }
     if from_date >= to_date:
         raise RuntimeError("SQX and FPM periods do not overlap")
     snapshot["resolution_method"] = item["resolution_method"]
     snapshot["expert_hash"] = expert_hash
+    if history_source:
+        snapshot["history_source"] = history_source
+        snapshot["custom_symbol"] = target_symbol
+    if input_normalizations:
+        snapshot["input_normalizations"] = input_normalizations
     config = {
         "strategy_id": int(item["strategy_id"]),
-        "broker": "FPM",
+        "broker": broker_name,
         "expert_path": str(expert_path),
         "sqx_symbol": item["sqx_symbol"],
-        "symbol": json.loads(item["config_json"] or "{}").get("target_symbol"),
+        "symbol": target_symbol,
         "timeframe": item["timeframe"] or _snapshot_setting(snapshot, "Timeframe") or "H1",
         "from_date": from_date,
         "to_date": to_date,
-        "deposit": 100000,
-        "currency": "USD",
-        "leverage": "1:100",
-        "model": model,
-        "spread": float(_snapshot_setting(snapshot, "Spread") or 1),
-        "inputs": {},
+        "deposit": float(reference["deposit"] if reference else 100000),
+        "currency": str(reference["currency"] if reference else "USD"),
+        "leverage": str(reference["leverage"] if reference else "1:100"),
+        "model": model if history_source == CUSTOM_HISTORY_SOURCE else int(reference["model"] if reference else model),
+        "spread": float(reference["spread"] if reference and reference["spread"] is not None else (_snapshot_setting(snapshot, "Spread") or 1)),
+        "inputs": inputs,
         "config_source": "auto_batch",
         "config_snapshot": snapshot,
     }
@@ -371,14 +499,20 @@ def create_batch(
     policy: str = "strict",
     unattempted_only: bool = False,
     only_missing: bool = True,
+    broker: str = ACTIVE_BACKTEST_BROKER,
+    history_source: str | None = None,
+    strategy_ids: set[int] | None = None,
 ) -> dict[str, Any] | None:
     if model not in {1, 4}:
         raise ValueError("Batch model must be 1 (1 minute OHLC) or 4 (real ticks)")
-    discovered = discover_candidates()
+    broker_name = mt5_backtests.broker_profile(broker)["broker"]
+    discovered = discover_candidates(broker_name, history_source=history_source)
     now = utcnow()
     with session() as conn:
         active = conn.execute(
-            "SELECT id FROM backtest_batches WHERE status IN ('resolving','waiting_terminal','queued','running','paused')"
+            """SELECT id FROM backtest_batches
+               WHERE broker=? AND status IN ('resolving','waiting_terminal','queued','running','paused')""",
+            (broker_name,),
         ).fetchone()
         if active:
             raise ValueError(f"Batch {active['id']} is already active")
@@ -389,6 +523,7 @@ def create_batch(
         selected = [
             candidate for candidate in discovered["candidates"]
             if (not only_missing or candidate["state"] != "validated")
+            and candidate["state"] != "excluded"
             and (
                 only_missing
                 or (
@@ -397,13 +532,14 @@ def create_batch(
                 )
             )
             and int(candidate["id"]) not in attempted
+            and (strategy_ids is None or int(candidate["id"]) in strategy_ids)
         ]
         if not selected:
             return None
         batch_id = int(conn.execute(
-            """INSERT INTO backtest_batches(status,model,policy,only_missing,created_at)
-               VALUES('resolving',?,?,?,?)""",
-            (model, policy, int(only_missing), now),
+            """INSERT INTO backtest_batches(status,broker,model,policy,only_missing,created_at)
+               VALUES('resolving',?,?,?,?,?)""",
+            (broker_name, model, policy, int(only_missing), now),
         ).lastrowid)
         for candidate in selected:
             rerun_state = candidate.get("rerun_state", candidate["state"])
@@ -417,7 +553,7 @@ def create_batch(
                     batch_id, candidate["id"], "resolving" if can_resolve else "blocked",
                     candidate.get("resolution_method"), candidate.get("confidence", 0),
                     candidate.get("expert_path"), candidate.get("expert_hash"),
-                    json.dumps({"target_symbol": candidate.get("target_symbol")}),
+                    json.dumps({"target_symbol": candidate.get("target_symbol"), "history_source": history_source}),
                     None if can_resolve else candidate.get("reason"), now, now,
                 ),
             )
@@ -466,7 +602,8 @@ def _terminal_running() -> bool:
     return mt5_backtests._terminal_is_running()
 
 
-def _safe_for_maintenance() -> tuple[bool, str]:
+def _safe_for_maintenance(broker: str = "FPM") -> tuple[bool, str]:
+    profile = mt5_backtests.broker_profile(broker)
     with session() as conn:
         dedicated_setting = conn.execute(
             "SELECT value_json FROM settings WHERE key='dedicated_backtest_terminal'"
@@ -474,23 +611,25 @@ def _safe_for_maintenance() -> tuple[bool, str]:
         positions = int(conn.execute("SELECT COUNT(*) FROM positions").fetchone()[0])
         orders = int(conn.execute("SELECT COUNT(*) FROM pending_orders").fetchone()[0])
         terminal = conn.execute(
-            "SELECT status,last_seen FROM terminals WHERE data_dir=?", (str(DEFAULT_TERMINAL),)
+            "SELECT status,last_seen FROM terminals WHERE data_dir=?", (str(profile["data_dir"]),)
         ).fetchone()
-    if dedicated_setting and json.loads(dedicated_setting["value_json"]):
-        return True, ""
-    if positions:
+    # The legacy flag must not override the live-account gate.  A Darwinex
+    # terminal can be labelled "dedicated" while still containing pending
+    # orders, so positions/orders are always checked first.
+    if positions and not profile.get("isolated"):
         return False, f"Waiting for {positions} open position(s)"
-    if orders:
+    if orders and not profile.get("isolated"):
         return False, f"Waiting for {orders} pending order(s)"
-    if _terminal_running() and (not terminal or terminal["status"] != "connected"):
+    if mt5_backtests._terminal_is_running(Path(profile["terminal_exe"])) and (not terminal or terminal["status"] != "connected"):
         return False, "Waiting for a fresh DashboardBridge safety snapshot"
     return True, ""
 
 
-def _close_terminal_gracefully() -> bool:
-    if not _terminal_running():
+def _close_terminal_gracefully(broker: str = "FPM") -> bool:
+    profile = mt5_backtests.broker_profile(broker)
+    if not mt5_backtests._terminal_is_running(Path(profile["terminal_exe"])):
         return True
-    target = str(MT5_TERMINAL_EXE).replace("'", "''")
+    target = str(profile["terminal_exe"]).replace("'", "''")
     command = (
         f"$target=[IO.Path]::GetFullPath('{target}');"
         "$p=Get-Process terminal64 -ErrorAction SilentlyContinue | "
@@ -506,24 +645,46 @@ def _close_terminal_gracefully() -> bool:
     return result.returncode == 0
 
 
-def _restart_live_terminal() -> None:
-    if not _terminal_running():
+def _sqx_retester_results_ready() -> tuple[bool, str]:
+    """Require the live SQX Retester/Results databank before every run.
+
+    Batch configurations are derived from the strategy as loaded in SQX.
+    A connected local API and a non-empty Retester/Results databank are the
+    strongest read-only check available that SQX is open on the requested
+    workspace; do not consume a queued run without both.
+    """
+    status = sqx_connector.status()
+    if not status.get("available"):
+        return False, f"SQX no está disponible: {status.get('message') or 'sin respuesta'}"
+    try:
+        databanks = sqx_connector.databanks()
+    except Exception as exc:
+        return False, f"No se pudo comprobar Retester/Results en SQX: {exc}"
+    for databank in databanks.get("Retester", []):
+        if str(databank.get("name") or "").casefold() == "results" and int(databank.get("records") or 0) > 0:
+            return True, ""
+    return False, "SQX debe estar abierto en Retester → Results con estrategias cargadas"
+
+
+def _restart_live_terminal(broker: str = "FPM") -> None:
+    profile = mt5_backtests.broker_profile(broker)
+    if not mt5_backtests._terminal_is_running(Path(profile["terminal_exe"])):
         subprocess.Popen(
-            [str(MT5_TERMINAL_EXE)],
-            cwd=str(MT5_TERMINAL_EXE.parent),
+            [str(profile["terminal_exe"])],
+            cwd=str(Path(profile["terminal_exe"]).parent),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
 
 
-def _finish_batch(batch_id: int, status: str = "completed", error: str | None = None) -> None:
+def _finish_batch(batch_id: int, status: str = "completed", error: str | None = None, broker: str = "FPM") -> None:
     with session() as conn:
         conn.execute(
             """UPDATE backtest_batches
                SET status=?,finished_at=?,current_strategy_id=NULL,error=? WHERE id=?""",
             (status, utcnow(), error, batch_id),
         )
-    _restart_live_terminal()
+    _restart_live_terminal(broker)
 
 
 def process_once() -> bool:
@@ -537,14 +698,31 @@ def process_once() -> bool:
         return False
     batch_id = int(batch["id"])
 
+    # Run already-resolved work before asking SQX to resolve more candidates.
+    # This makes a validated pilot available promptly and prevents a slow SQX
+    # session from starving the tester queue.
+    with session() as conn:
+        queued = conn.execute(
+            """SELECT * FROM backtest_batch_items
+               WHERE batch_id=? AND status='queued' ORDER BY id LIMIT 1""",
+            (batch_id,),
+        ).fetchone()
     with session() as conn:
         resolving = conn.execute(
             "SELECT id FROM backtest_batch_items WHERE batch_id=? AND status='resolving' ORDER BY id LIMIT 1",
             (batch_id,),
         ).fetchone()
-    if resolving:
+    if resolving and not queued:
+        sqx_ready, sqx_reason = _sqx_retester_results_ready()
+        if not sqx_ready:
+            with session() as conn:
+                conn.execute(
+                    "UPDATE backtest_batches SET status='paused',current_strategy_id=NULL,error=? WHERE id=?",
+                    (sqx_reason, batch_id),
+                )
+            return False
         try:
-            _resolve_item(int(resolving["id"]), int(batch["model"]))
+            _resolve_item(int(resolving["id"]), int(batch["model"]), str(batch["broker"] or "FPM"))
         except Exception as exc:
             with session() as conn:
                 conn.execute(
@@ -554,17 +732,12 @@ def process_once() -> bool:
                 )
         return True
 
-    with session() as conn:
-        queued = conn.execute(
-            """SELECT * FROM backtest_batch_items
-               WHERE batch_id=? AND status='queued' ORDER BY id LIMIT 1""",
-            (batch_id,),
-        ).fetchone()
     if not queued:
-        _finish_batch(batch_id)
+        _finish_batch(batch_id, broker=str(batch["broker"] or "FPM"))
         return True
 
-    safe, reason = _safe_for_maintenance()
+    broker = str(batch["broker"] or "FPM")
+    safe, reason = _safe_for_maintenance(broker)
     if not safe:
         with session() as conn:
             conn.execute(
@@ -572,7 +745,7 @@ def process_once() -> bool:
                 (reason, batch_id),
             )
         return False
-    if not _close_terminal_gracefully():
+    if not _close_terminal_gracefully(broker):
         with session() as conn:
             conn.execute(
                 "UPDATE backtest_batches SET status='waiting_terminal',error=? WHERE id=?",
@@ -601,7 +774,10 @@ def process_once() -> bool:
     item_status = "completed" if run["status"] == "completed" else "validation_failed"
     systemic_report_failure = (
         run["status"] != "completed"
-        and "without producing the requested report" in str(run.get("error") or "")
+        and (
+            "without producing the requested report" in str(run.get("error") or "")
+            or "MT5 exited with code" in str(run.get("error") or "")
+        )
     )
     with session() as conn:
         conn.execute(
@@ -616,7 +792,7 @@ def process_once() -> bool:
             conn.execute(
                 """UPDATE backtest_batches
                    SET status='paused',current_strategy_id=NULL,error=? WHERE id=?""",
-                ("Automation paused: MT5 did not produce the requested report", batch_id),
+                ("Automation paused: systemic MT5 tester failure", batch_id),
             )
         elif current_batch and current_batch["status"] not in ("cancelled", "paused"):
             conn.execute(
@@ -629,7 +805,7 @@ def process_once() -> bool:
                 (batch_id,),
             )
     if current_batch and current_batch["status"] == "cancelled":
-        _restart_live_terminal()
+        _restart_live_terminal(str(batch["broker"] or "FPM"))
     return True
 
 
@@ -709,6 +885,7 @@ def resume_batch(batch_id: int) -> dict[str, Any]:
 
 def cancel_batch(batch_id: int) -> dict[str, Any]:
     with session() as conn:
+        batch = conn.execute("SELECT broker FROM backtest_batches WHERE id=?", (batch_id,)).fetchone()
         running = conn.execute(
             """SELECT run_id FROM backtest_batch_items
                WHERE batch_id=? AND status='running' AND run_id IS NOT NULL LIMIT 1""",
@@ -730,5 +907,5 @@ def cancel_batch(batch_id: int) -> dict[str, Any]:
         except KeyError:
             pass
     else:
-        _restart_live_terminal()
+        _restart_live_terminal(str(batch["broker"] if batch else "FPM"))
     return get_batch(batch_id)

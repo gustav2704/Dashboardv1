@@ -52,15 +52,39 @@ export type BacktestSummary = {
   state: 'validated' | 'running' | 'failed' | 'none';
   has_completed: boolean; completed_count: number; latest_run_id: number | null;
   latest_status: string | null; latest_completed_at: string | null;
+  history_source?: string | null; custom_symbol?: string | null;
+  risk_alert?: boolean;
+  risk_audit?: {
+    status: string; tolerance?: number; use_money_management?: boolean; mm_risked_money?: number | null;
+    mm_multiplier?: number | null; declared_risk: number | null; worst_loss: number; risk_ratio: number | null;
+    warning?: string | null; evidence?: string | null;
+  } | null;
 }
 export type Strategy = {
-  id: number; identity_strategy_id: number; symbol: string; sqx_name: string; mql5_name: string; display_name: string; account_login: string;
+  id: number; identity_strategy_id: number; symbol: string; asset_key: string; sqx_name: string; mql5_name: string; display_name: string; display_name_source: string | null; account_login: string;
   lineage_accounts: { current: string[]; predecessor: string[] };
   origin: string; last_observed_at?: string; note: string; note_updated_at: string | null; selection: boolean;
   state: string; link_state: 'linked' | 'candidate' | 'sqx_catalog' | 'sqx_only' | 'mt5_only' | 'catalog_only';
-  sqx: SQXInfo | null; sqx_analytics: SQXAnalytics | null; metrics: Metrics; historical_metrics: Metrics; lifetime_metrics: Metrics; account_metrics: Record<string, Metrics>; health: Health; risk_guard: RiskGuard; baseline: Baseline | null; baselines: Baseline[];
-  backtest: BacktestSummary; mapping_count: number; historical_mapping_count: number;
+  deployment_state: 'attached_active' | 'attached_inactive' | 'observed' | null;
+  activity_state: 'with_recent_trades' | 'without_recent_trades' | 'undetermined' | 'not_deployed';
+  last_inventory_at: string | null;
+  deployments: BotDeployment[];
+  sqx: SQXInfo | null; sqx_analytics: SQXAnalytics | null; metrics: Metrics; live_metrics: Metrics; historical_metrics: Metrics; lifetime_metrics: Metrics; account_metrics: Record<string, Metrics>; account_balance: number | null; account_pl_percent: number | null; account_initial_capital: number | null; initial_capital_pl_percent: number | null; health: Health; risk_guard: RiskGuard; baseline: Baseline | null; baselines: Baseline[];
+  backtest: BacktestSummary; backtest_risk?: BacktestSummary['risk_audit']; backtest_risk_alert?: boolean; mapping_count: number; historical_mapping_count: number;
   magic_numbers: number[]; historical_magic_numbers: number[]; primary_magic_number: number | null;
+  operational_identity: { account_login: string; terminal_id: number; asset_key: string; magic: number; symbol: string } | null;
+  identity_conflicts: Array<{ identity: { account_login: string; terminal_id: number; asset_key: string; magic: number }; primary: boolean; mapping_ids: number[]; roles: string[] }>;
+}
+export type BotDeployment = {
+  id: number; account_login: string; server: string; chart_id: string; symbol: string; timeframe: string;
+  ex5_name: string; magic: number | null; deployment_status: string; trade_status: string;
+  activity_status: string; observed_at: string; confirmed: number; strategy_id: number | null;
+  first_trade_at?: string | null; last_trade_at?: string | null;
+}
+export type InventorySummary = {
+  account_login: string; server: string; inventoried: number; linked: number; pending: number;
+  active: number; inactive: number; with_recent_trades: number; without_recent_trades: number;
+  activity_undetermined: number; last_inventory_at: string;
 }
 export type Trade = {
   terminal_id: number; position_id: number; deal_ticket: number; symbol: string; direction: string;
@@ -73,22 +97,30 @@ export type StrategyMapping = {
   id: number; terminal_id: number; account_login: string; symbol: string; magic: number | null;
   comment_pattern: string; role: 'live' | 'historical'; confirmed: number;
 }
-export type StrategyDetails = Strategy & { mappings: StrategyMapping[]; trades: Trade[]; current_trades: Trade[]; historical_trades: Trade[]; equity_curve: EquityPoint[] }
+export type StrategyDetails = Strategy & { mappings: StrategyMapping[]; operational_mappings?: StrategyMapping[]; lineage_included?: boolean; trades: Trade[]; current_trades: Trade[]; historical_trades: Trade[]; equity_curve: EquityPoint[] }
 export type Terminal = { id: number; name: string; data_dir: string; account_login?: string; server?: string; status: string; last_seen?: string; last_error?: string }
 export type Dashboard = {
   generated_at: string; window: string;
   totals: { strategies: number; active: number; net_profit: number; floating_profit: number; trades: number; red: number };
   integration: { linked: number; candidate: number; sqx_catalog: number; sqx_only: number; mt5_only: number; catalog_only: number };
   terminals: Terminal[]; strategies: Strategy[];
+  inventory_summary: InventorySummary[];
   broker_accounts: string[]; has_unassigned_broker_account: boolean;
+  asset_options: Array<{ key: string; label: string; symbols: string[] }>;
+}
+
+export type AccountAliasSettings = {
+  accounts: string[];
+  aliases: Record<string, string>;
 }
 
 export type JournalTrade = {
-  strategy_id: number; strategy_name: string; symbol: string; account: string; source_role: 'live' | 'historical';
+  strategy_id: number; strategy_name: string; symbol: string; account: string; source_role: 'live' | 'historical' | 'unassigned';
   close_time_msc: number; volume: number; profit: number; commission: number; swap: number; net_profit: number;
 }
 export type JournalAnalysisData = {
   generated_at: string; window: string; account: string | null; balances: Record<string, number>; trades: JournalTrade[];
+  reconciliation: { raw_closed_trades: number; attributed_trades: number; unassigned_trades: number; displayed_trades: number; status: 'reconciled' | 'mismatch' };
 }
 
 export type BacktestDefaults = {

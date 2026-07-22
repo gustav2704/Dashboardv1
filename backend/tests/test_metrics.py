@@ -212,6 +212,39 @@ def test_risk_guard_ignores_zero_limits_and_uses_valid_source_fallback():
     assert result["checks"]["oos"]["loss_streak"]["source"] == "excel"
 
 
+def test_mt5_snake_case_baseline_is_used_for_health_and_risk_limits():
+    combined = {
+        **compute_metrics([]),
+        "max_drawdown": 50,
+        "max_consecutive_losses": 2,
+    }
+    baselines = [
+        {
+            "sample_type": sample,
+            "source": "mt5_backtest",
+            "metrics": {"max_drawdown": 100, "max_consecutive_losses": 3},
+        }
+        for sample in ("is", "oos")
+    ]
+    risk_guard = risk_guard_status(combined, baselines, RULES)
+    assert risk_guard["status"] == "green"
+    assert risk_guard["checks"]["oos"]["drawdown"]["source"] == "mt5_backtest"
+
+    observed = compute_metrics([
+        {"net_profit": value, "open_time_msc": index * 1000, "close_time_msc": (index + 1) * 1000, "commission": 0, "swap": 0}
+        for index, value in enumerate(([10] * 20) + ([-5] * 10))
+    ])
+    baseline = {
+        "sample_type": "oos",
+        "source": "mt5_backtest",
+        "metrics": {"profit_factor": 8, "expectancy": 10, "trades_per_month": 1},
+    }
+    health = health_status(observed, baseline, RULES)
+    assert health["status"] == "red"
+    assert "profit_factor" in health["red"]
+    assert "expectancy" in health["red"]
+
+
 def test_risk_guard_overrides_insufficient_performance_sample():
     current = compute_metrics([
         {"net_profit": -60, "open_time_msc": 0, "close_time_msc": 1000, "commission": 0, "swap": 0},

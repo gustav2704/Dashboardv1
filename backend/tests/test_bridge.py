@@ -5,6 +5,7 @@ from app import db
 from app.mt5_bridge import (
     BRIDGE_RELATIVE,
     ingest_responses,
+    repair_darwinex_live_demo_contamination,
     register_terminal,
     reuse_terminal_for_account,
 )
@@ -228,3 +229,129 @@ def test_disconnected_snapshot_does_not_clear_live_state(tmp_path, monkeypatch):
         assert conn.execute(
             "SELECT status FROM terminals WHERE id=?", (terminal["id"],)
         ).fetchone()[0] != "connected"
+
+
+def test_empty_poll_skips_expensive_strategy_discovery(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "empty-poll.db")
+    db.init_db()
+    called = False
+
+    def unexpected_discovery():
+        nonlocal called
+        called = True
+        return {"created": 0, "linked": 0, "safe_matches": 0}
+
+    monkeypatch.setattr("app.mapping.ensure_mt5_strategies", unexpected_discovery)
+
+    result = ingest_responses()
+
+    assert result["sync"] == 0
+    assert result["strategies_created"] == 0
+    assert result["strategies_linked"] == 0
+    assert not called
+
+
+def _sync_payload(account, server, *, ticket, magic=77, comment="bot"):
+    return {
+        "status": "ok", "generated_at": "2026-07-17T12:00:00Z",
+        "account_login": account, "server": server,
+        "account": {"balance": 10000, "equity": 10000},
+        "deals": [{"ticket": ticket, "position_id": ticket, "time_msc": ticket,
+                   "symbol": "XAUUSD", "deal_type": "BUY", "entry_type": "IN",
+                   "volume": 0.1, "price": 2300, "profit": 0, "commission": 0,
+                   "swap": 0, "magic": magic, "comment": comment}],
+        "positions": [], "orders": [],
+    }
+
+
+def test_sync_identity_change_archives_old_account_before_import(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "identity-change.db")
+    db.init_db()
+    data_dir = tmp_path / "terminal"
+    (data_dir / "MQL5").mkdir(parents=True)
+    (data_dir / "origin.txt").write_text("C:\\MT5", encoding="utf-8")
+    terminal = register_terminal("Fixture", str(data_dir))
+    response_dir = data_dir / BRIDGE_RELATIVE / "Responses"
+    response_dir.mkdir(parents=True)
+    (response_dir / "sync.response.json").write_text(
+        json.dumps(_sync_payload("demo", "Broker-Demo", ticket=1)), encoding="utf-8"
+    )
+    ingest_responses()
+    (response_dir / "sync.response.json").write_text(
+        json.dumps(_sync_payload("live", "Broker-Live", ticket=2)), encoding="utf-8"
+    )
+    ingest_responses()
+
+    with db.session() as conn:
+        active = conn.execute("SELECT * FROM terminals WHERE id=?", (terminal["id"],)).fetchone()
+        archived = conn.execute("SELECT * FROM terminals WHERE data_dir LIKE 'archive://%' ").fetchone()
+        assert (active["account_login"], active["server"], active["cursor_msc"]) == ("live", "Broker-Live", 2)
+        assert conn.execute("SELECT terminal_id FROM deals WHERE ticket=1").fetchone()[0] == archived["id"]
+        assert conn.execute("SELECT terminal_id FROM deals WHERE ticket=2").fetchone()[0] == terminal["id"]
+        event = conn.execute("SELECT * FROM terminal_identity_events").fetchone()
+        assert (event["old_account_login"], event["new_account_login"], event["source"]) == ("demo", "live", "bridge_sync")
+
+
+def test_sync_server_change_with_same_login_is_an_identity_change(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "server-change.db")
+    db.init_db()
+    data_dir = tmp_path / "terminal"
+    (data_dir / "MQL5").mkdir(parents=True)
+    (data_dir / "origin.txt").write_text("C:\\MT5", encoding="utf-8")
+    register_terminal("Fixture", str(data_dir))
+    response_dir = data_dir / BRIDGE_RELATIVE / "Responses"
+    response_dir.mkdir(parents=True)
+    for server, ticket in (("Broker-A", 1), ("Broker-B", 2)):
+        (response_dir / "sync.response.json").write_text(
+            json.dumps(_sync_payload("same-login", server, ticket=ticket)), encoding="utf-8"
+        )
+        ingest_responses()
+    with db.session() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM terminal_identity_events").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM deals WHERE terminal_id IN (SELECT id FROM terminals WHERE data_dir LIKE 'archive://%')").fetchone()[0] == 1
+
+
+def test_connected_response_without_identity_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "missing-identity.db")
+    db.init_db()
+    data_dir = tmp_path / "terminal"
+    (data_dir / "MQL5").mkdir(parents=True)
+    (data_dir / "origin.txt").write_text("C:\\MT5", encoding="utf-8")
+    terminal = register_terminal("Fixture", str(data_dir))
+    response_dir = data_dir / BRIDGE_RELATIVE / "Responses"
+    response_dir.mkdir(parents=True)
+    payload = _sync_payload("", "", ticket=1)
+    (response_dir / "sync.response.json").write_text(json.dumps(payload), encoding="utf-8")
+    result = ingest_responses()
+    assert result["errors"] == 1
+    with db.session() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM deals").fetchone()[0] == 0
+        assert conn.execute("SELECT account_login FROM terminals WHERE id=?", (terminal["id"],)).fetchone()[0] is None
+
+
+def test_repair_removes_only_demo_duplicates_from_live(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "repair.db")
+    db.init_db()
+    now = db.utcnow()
+    with db.session() as conn:
+        live_id = conn.execute("INSERT INTO terminals(name,data_dir,account_login,server,status,created_at) VALUES(?,?,?,?,?,?)", ("Live", "C:/live", "4000094894", "Darwinex-Live", "connected", now)).lastrowid
+        demo_id = conn.execute("INSERT INTO terminals(name,data_dir,account_login,server,status,created_at) VALUES(?,?,?,?,?,?)", ("Demo", "C:/demo", "3000097316", "Darwinex-Demo", "connected", now)).lastrowid
+        wrong_strategy = conn.execute("INSERT INTO strategies(symbol,sqx_name,account_login,origin,created_at) VALUES(?,?,?,?,?)", ("XAUUSD", "Demo bot", "4000094894", "mt5", now)).lastrowid
+        valid_strategy = conn.execute("INSERT INTO strategies(symbol,sqx_name,account_login,origin,created_at) VALUES(?,?,?,?,?)", ("NDX", "Live bot", "4000094894", "mt5", now)).lastrowid
+        for strategy_id, symbol, magic, comment in ((wrong_strategy, "XAUUSD", 7, "Demo bot"), (valid_strategy, "NDX", 8, "Live bot")):
+            conn.execute("INSERT INTO mappings(strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,role,confirmed,created_at) VALUES(?,?,?,?,?,?, 'live',1,?)", (strategy_id, live_id, "4000094894", symbol, magic, comment, now))
+        rows = [
+            (live_id, 1, 1, 1000, "XAUUSD", 7, "Demo bot"),
+            (demo_id, 1, 1, 1000, "XAUUSD", 7, "Demo bot"),
+            (live_id, 2, 2, 2000, "NDX", 8, "Live bot"),
+        ]
+        for terminal_id, ticket, position_id, time_msc, symbol, magic, comment in rows:
+            conn.execute("INSERT INTO deals(terminal_id,ticket,position_id,time_msc,symbol,deal_type,entry_type,volume,price,profit,commission,swap,magic,comment,raw_json) VALUES(?,?,?,?,?,'BUY','IN',1,1,0,0,0,?,?, '{}')", (terminal_id, ticket, position_id, time_msc, symbol, magic, comment))
+    result = repair_darwinex_live_demo_contamination(create_backup=False)
+    assert result["deleted_duplicate_deals"] == 1
+    with db.session() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM deals WHERE terminal_id=?", (live_id,)).fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM deals WHERE terminal_id=?", (demo_id,)).fetchone()[0] == 1
+        wrong = conn.execute("SELECT retired FROM strategies WHERE id=?", (wrong_strategy,)).fetchone()[0]
+        valid = conn.execute("SELECT retired FROM strategies WHERE id=?", (valid_strategy,)).fetchone()[0]
+        assert (wrong, valid) == (1, 0)

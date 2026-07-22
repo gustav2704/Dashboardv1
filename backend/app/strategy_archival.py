@@ -48,8 +48,6 @@ def _impact(conn: Any, strategy_id: int) -> dict[str, Any]:
     if not has_trades:
         reasons.append("sin_trades")
     blockers = []
-    if strategy["retired"]:
-        blockers.append("Strategy is retired")
     if strategy["archived_at"]:
         blockers.append("Strategy is already archived")
     if open_positions:

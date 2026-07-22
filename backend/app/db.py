@@ -99,11 +99,59 @@ CREATE TABLE IF NOT EXISTS mappings (
   magic INTEGER,
   comment_pattern TEXT,
   role TEXT NOT NULL DEFAULT 'live',
+  historical_magic_flexible INTEGER NOT NULL DEFAULT 0,
   confidence REAL NOT NULL DEFAULT 1.0,
   confirmed INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
   UNIQUE(strategy_id, terminal_id, symbol, magic, comment_pattern)
 );
+
+CREATE TABLE IF NOT EXISTS bot_inventory_imports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_path TEXT NOT NULL,
+  source_hash TEXT NOT NULL UNIQUE,
+  generated_at TEXT,
+  account_login TEXT,
+  server TEXT,
+  status TEXT NOT NULL,
+  row_count INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  imported_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS bot_deployments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_login TEXT NOT NULL,
+  server TEXT NOT NULL,
+  chart_id TEXT NOT NULL,
+  symbol TEXT NOT NULL,
+  timeframe TEXT,
+  ex5_name TEXT NOT NULL,
+  normalized_ex5 TEXT NOT NULL,
+  magic INTEGER,
+  expected_comment TEXT,
+  mapping_source TEXT,
+  mapping_confidence TEXT,
+  attached INTEGER NOT NULL DEFAULT 1,
+  terminal_connected INTEGER,
+  algo_trading_global INTEGER,
+  account_trade_allowed INTEGER,
+  deployment_status TEXT NOT NULL DEFAULT 'observed',
+  trade_status TEXT,
+  activity_status TEXT,
+  first_trade_at TEXT,
+  last_trade_at TEXT,
+  strategy_id INTEGER REFERENCES strategies(id) ON DELETE SET NULL,
+  confirmed INTEGER NOT NULL DEFAULT 0,
+  observed_at TEXT NOT NULL,
+  source_import_id INTEGER NOT NULL REFERENCES bot_inventory_imports(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(account_login,server,chart_id,normalized_ex5)
+);
+
+CREATE INDEX IF NOT EXISTS idx_bot_deployments_strategy
+ON bot_deployments(strategy_id,confirmed,account_login);
 
 CREATE TABLE IF NOT EXISTS imported_history_trades (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -142,6 +190,36 @@ CREATE TABLE IF NOT EXISTS account_migration_audits (
   summary_json TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS terminal_identity_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  terminal_id INTEGER NOT NULL REFERENCES terminals(id) ON DELETE CASCADE,
+  archive_terminal_id INTEGER REFERENCES terminals(id) ON DELETE SET NULL,
+  old_account_login TEXT NOT NULL,
+  old_server TEXT NOT NULL,
+  new_account_login TEXT NOT NULL,
+  new_server TEXT NOT NULL,
+  detected_at TEXT NOT NULL,
+  source TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS identity_repair_audits (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  action TEXT NOT NULL,
+  strategy_id INTEGER NOT NULL REFERENCES strategies(id) ON DELETE CASCADE,
+  mapping_id INTEGER,
+  before_json TEXT NOT NULL,
+  after_json TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_identity_repair_audits_strategy
+ON identity_repair_audits(strategy_id, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_terminal_identity_events_terminal
+ON terminal_identity_events(terminal_id, id DESC);
 
 CREATE TABLE IF NOT EXISTS deals (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -316,6 +394,7 @@ CREATE TABLE IF NOT EXISTS backtest_metrics (
 CREATE TABLE IF NOT EXISTS backtest_batches (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   status TEXT NOT NULL,
+  broker TEXT NOT NULL DEFAULT 'FPM',
   model INTEGER NOT NULL DEFAULT 1,
   policy TEXT NOT NULL DEFAULT 'strict',
   only_missing INTEGER NOT NULL DEFAULT 1,
@@ -371,6 +450,13 @@ DEFAULT_ALERTS = {
     "frequency_yellow_high": 1.50,
     "frequency_red_low": 0.25,
     "frequency_red_high": 2.00,
+}
+
+DEFAULT_ACCOUNT_ALIASES = {
+    "7396577": "Demo FP master",
+    "4000094894": "Live Dwnx",
+    "100121894": "Demo Infinox",
+    "3000097316": "dwnx demo",
 }
 
 
@@ -451,6 +537,17 @@ def init_db(path: Path | None = None) -> None:
         }
         if "role" not in mapping_columns:
             conn.execute("ALTER TABLE mappings ADD COLUMN role TEXT NOT NULL DEFAULT 'live'")
+        if "historical_magic_flexible" not in mapping_columns:
+            conn.execute(
+                "ALTER TABLE mappings ADD COLUMN historical_magic_flexible INTEGER NOT NULL DEFAULT 0"
+            )
+        deployment_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(bot_deployments)").fetchall()
+        }
+        if "first_trade_at" not in deployment_columns:
+            conn.execute("ALTER TABLE bot_deployments ADD COLUMN first_trade_at TEXT")
+        if "last_trade_at" not in deployment_columns:
+            conn.execute("ALTER TABLE bot_deployments ADD COLUMN last_trade_at TEXT")
         sqx_link_columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(sqx_strategy_links)").fetchall()
         }
@@ -463,6 +560,11 @@ def init_db(path: Path | None = None) -> None:
             conn.execute(
                 "ALTER TABLE backtest_runs ADD COLUMN batch_id INTEGER REFERENCES backtest_batches(id)"
             )
+        batch_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(backtest_batches)").fetchall()
+        }
+        if "broker" not in batch_columns:
+            conn.execute("ALTER TABLE backtest_batches ADD COLUMN broker TEXT NOT NULL DEFAULT 'FPM'")
         for strategy in conn.execute(
             "SELECT id,sqx_name,mql5_name,created_at FROM strategies"
         ).fetchall():
@@ -488,6 +590,12 @@ def init_db(path: Path | None = None) -> None:
             "INSERT OR IGNORE INTO settings(key,value_json,updated_at) VALUES(?,?,?)",
             ("alert_defaults", json.dumps(DEFAULT_ALERTS), utcnow()),
         )
+        # Preserve the aliases that were originally hard-coded in the UI while
+        # allowing users to manage them from Settings going forward.
+        conn.execute(
+            "INSERT OR IGNORE INTO settings(key,value_json,updated_at) VALUES(?,?,?)",
+            ("account_aliases", json.dumps(DEFAULT_ACCOUNT_ALIASES), utcnow()),
+        )
         from .display_names import seed_manual_display_names
 
         seed_manual_display_names(conn, utcnow())
@@ -509,6 +617,36 @@ def init_db(path: Path | None = None) -> None:
                      broker,source_symbol,target_symbol,created_at
                    ) VALUES(?,?,?,?)""",
                 ("FPM", source_symbol, target_symbol, utcnow()),
+            )
+        # Darwinex backtests use the user-imported Custom histories.  These
+        # aliases deliberately replace the native CFD names so the tester does
+        # not silently fall back to broker history with different contract
+        # specifications.
+        for source_symbol, target_symbol in (
+            ("USATECHIDXUSD_clonedwnx", "NDX_M1"),
+            ("USATECHIDXUSD_M1ut0_UTC2", "NDX_M1"),
+            ("NAQ", "NDX_M1"),
+            ("NAS100", "NDX_M1"),
+            ("USA30IDXUSD_clonedwnx", "WS30_DK_2016"),
+            ("US30", "WS30_DK_2016"),
+            ("WS30", "WS30_DK_2016"),
+            ("XAU", "XAUUSD_M1"),
+            ("XAUUSD", "XAUUSD_M1"),
+            ("XAUUSD_DWNXClone", "XAUUSD_M1"),
+            ("XAUUSD(2)_M1_UCT2", "XAUUSD_M1"),
+            ("DEUIDXEUR_M1", "GDAXI_M1"),
+            ("DEUIDXEUR_clonedwnx", "GDAXI_M1"),
+            ("DAX", "GDAXI_M1"),
+            ("GER40", "GDAXI_M1"),
+        ):
+            conn.execute(
+                """INSERT INTO symbol_mappings(
+                     broker,source_symbol,target_symbol,created_at
+                   ) VALUES(?,?,?,?)
+                   ON CONFLICT(broker,source_symbol) DO UPDATE SET
+                     target_symbol=excluded.target_symbol,
+                     created_at=excluded.created_at""",
+                ("Darwinex", source_symbol, target_symbol, utcnow()),
             )
         conn.execute(
             "INSERT OR IGNORE INTO settings(key,value_json,updated_at) VALUES(?,?,?)",

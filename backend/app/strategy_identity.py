@@ -971,6 +971,11 @@ def merge_strategies(
         )
         collapsed = _move_batch_items(conn, canonical_id, duplicate_ids)
         _move_expert_link(conn, canonical_id, duplicate_ids)
+        for strategy in strategies:
+            if int(strategy["id"]) == canonical_id:
+                continue
+            add_alias(conn, canonical_id, strategy["sqx_name"], "merged_name")
+            add_alias(conn, canonical_id, strategy["mql5_name"], "merged_name")
         _move_aliases(conn, canonical_id, duplicate_ids)
         _move_lineages(conn, canonical_id, duplicate_ids)
         _move_alerts(conn, canonical_id, duplicate_ids)

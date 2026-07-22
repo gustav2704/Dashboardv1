@@ -7,15 +7,20 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
 from . import sqx_connector
-from .config import BACKTEST_DIR, DEFAULT_TERMINAL, MT5_TERMINAL_EXE, MT5_TESTER_TIMEOUT
+from .config import (
+    BACKTEST_DIR, BROKER_PROFILES, DEFAULT_TERMINAL, MT5_TERMINAL_EXE,
+    MT5_TESTER_TIMEOUT,
+)
 from .db import rows, session, utcnow
 from .mapping import normalize
+from .backtest_risk import audit_report, with_audit
 
 
 FINAL_STATES = {
@@ -25,6 +30,26 @@ FINAL_STATES = {
 _lock = threading.Lock()
 _active_processes: dict[int, subprocess.Popen[str]] = {}
 _cancel_events: dict[int, threading.Event] = {}
+
+
+def broker_profile(broker: str | None) -> dict[str, Any]:
+    """Return a validated terminal profile; FPM remains the safe legacy default."""
+    requested = str(broker or "FPM").strip().casefold()
+    name = next((key for key in BROKER_PROFILES if key.casefold() == requested), None)
+    if not name:
+        raise ValueError(f"Unknown broker profile: {broker}")
+    profile = BROKER_PROFILES[name]
+    data_dir = Path(profile["data_dir"])
+    terminal_exe = Path(profile["terminal_exe"])
+    return {
+        "broker": name, "data_dir": data_dir, "terminal_exe": terminal_exe,
+        "isolated": bool(profile.get("isolated", False)),
+        "login": str(profile.get("login") or ""), "server": str(profile.get("server") or ""),
+    }
+
+
+def _terminal_for_run(run: dict[str, Any]) -> dict[str, Any]:
+    return broker_profile(str(run.get("broker") or "FPM"))
 
 
 class ReportParser(HTMLParser):
@@ -255,6 +280,8 @@ def _setting(snapshot: dict[str, Any], key: str) -> str | None:
 
 
 def backtest_defaults(strategy_id: int, profile: str = "reference") -> dict[str, Any]:
+    broker = "Darwinex" if profile.casefold() in {"darwinex", "live"} else "FPM"
+    terminal = broker_profile(broker)
     with session() as conn:
         strategy = conn.execute("SELECT * FROM strategies WHERE id=?", (strategy_id,)).fetchone()
         if not strategy:
@@ -265,24 +292,28 @@ def backtest_defaults(strategy_id: int, profile: str = "reference") -> dict[str,
             (identity_id,),
         ).fetchone()
         mapping = conn.execute(
-            "SELECT target_symbol FROM symbol_mappings WHERE broker='FPM' AND source_symbol=?",
-            ((link["symbol"] if link else "") or "",),
+            "SELECT target_symbol FROM symbol_mappings WHERE broker=? AND source_symbol=?",
+            (broker, (link["symbol"] if link else "") or ""),
         ).fetchone()
     name = str((link["strategy_name"] if link else None) or strategy["sqx_name"])
-    expert_candidates = list((DEFAULT_TERMINAL / "MQL5" / "Experts").rglob(f"{name}.ex5"))
+    expert_candidates = list((terminal["data_dir"] / "MQL5" / "Experts").rglob(f"{name}.ex5"))
     if not expert_candidates:
-        raise ValueError(f"Could not find {name}.ex5 in the FPM data directory")
+        # The source may exist only in the reference terminal; the runner will
+        # stage the identical hash into Darwinex before launching the test.
+        expert_candidates = list((DEFAULT_TERMINAL / "MQL5" / "Experts").rglob(f"{name}.ex5"))
+    if not expert_candidates:
+        raise ValueError(f"Could not find {name}.ex5 in the configured terminal trees")
     snapshot: dict[str, Any] = {}
     if link:
         try:
             snapshot = sqx_connector.inspect_strategy(link["project"], link["databank"], name)
         except sqx_connector.SQXUnavailable:
-            if profile != "reference":
+            if profile not in {"reference", "darwinex", "live"}:
                 raise
     sqx_symbol = str((link["symbol"] if link else "") or snapshot.get("identity", {}).get("symbol") or "")
     symbol = str((mapping["target_symbol"] if mapping else "") or "")
     if not symbol:
-        raise ValueError(f"No FPM symbol mapping exists for {sqx_symbol}")
+        raise ValueError(f"No {broker} symbol mapping exists for {sqx_symbol}")
     if profile == "reference" and name == "Strategy 5.14.40":
         from_date, to_date = "2024-01-01", "2026-06-25"
     else:
@@ -290,7 +321,7 @@ def backtest_defaults(strategy_id: int, profile: str = "reference") -> dict[str,
         to_date = (_setting(snapshot, "End date") or "").replace(".", "-")
     return {
         "strategy_id": strategy_id,
-        "broker": "FPM",
+        "broker": broker,
         "expert_path": str(expert_candidates[0]),
         "sqx_symbol": sqx_symbol,
         "symbol": symbol,
@@ -300,7 +331,7 @@ def backtest_defaults(strategy_id: int, profile: str = "reference") -> dict[str,
         "deposit": float(_setting(snapshot, "Initial capital") or 100000),
         "currency": "USD",
         "leverage": "1:100",
-        "model": 4,
+        "model": 1,
         "spread": float(_setting(snapshot, "Spread") or 1),
         "inputs": {},
         "config_source": profile,
@@ -349,8 +380,11 @@ def _insert_run(config: dict[str, Any], batch_id: int | None = None) -> int:
     if not expert.is_file():
         raise ValueError(f"Expert does not exist: {expert}")
     requested_at = utcnow()
+    profile = broker_profile(str(config.get("broker") or "FPM"))
+    config.setdefault("terminal_data_dir", str(profile["data_dir"]))
+    config.setdefault("terminal_exe", str(profile["terminal_exe"]))
     with session() as conn:
-        terminal = conn.execute("SELECT id FROM terminals WHERE data_dir=?", (str(DEFAULT_TERMINAL),)).fetchone()
+        terminal = conn.execute("SELECT id FROM terminals WHERE data_dir=?", (str(profile["data_dir"]),)).fetchone()
         return int(conn.execute(
             """INSERT INTO backtest_runs(
                  strategy_id,terminal_id,broker,expert_path,expert_hash,sqx_symbol,symbol,
@@ -410,6 +444,7 @@ def _parameter_match(snapshot: dict[str, Any], report_inputs: dict[str, str]) ->
     }
     ignored = {
         "magicnumber", "customcomment", "broker", "storestockpickerlogs",
+        "mmdecimals", "mmlotsnomm", "mmlotsifnomm",
     }
     overlap = [key for key in expected_map.keys() & actual_map.keys() if key not in ignored]
     if not overlap:
@@ -429,8 +464,13 @@ def _validate_parsed(run: dict[str, Any], parsed: dict[str, Any]) -> tuple[str |
     for key in ("from_date", "to_date"):
         if config.get(key) and str(config[key]) != str(run[key]):
             errors.append(f"report {key} does not match")
-    if float(metrics.get("history_quality") or 0) < 90:
-        errors.append("history quality is below 90%")
+    quality = float(metrics.get("history_quality") or 0)
+    is_custom_history = str((run.get("config_snapshot") or {}).get("history_source") or "").casefold() == "custom"
+    if quality < 90:
+        if not is_custom_history and str(run.get("broker") or "").casefold() == "darwinex" and quality >= 75:
+            metrics["history_quality_warning"] = f"History quality is {quality:.0f}% (below 90% Darwinex review threshold)"
+        else:
+            errors.append("history quality is below 90%")
     if int(metrics.get("bars") or 0) <= 0:
         errors.append("report has no bars")
     if int(metrics.get("trades") or 0) <= 0:
@@ -450,8 +490,8 @@ def _validate_parsed(run: dict[str, Any], parsed: dict[str, Any]) -> tuple[str |
     return ("; ".join(errors) if errors else None), match_score
 
 
-def _terminal_is_running() -> bool:
-    target = str(MT5_TERMINAL_EXE).replace("'", "''")
+def _terminal_is_running(terminal_exe: Path | None = None) -> bool:
+    target = str(terminal_exe or MT5_TERMINAL_EXE).replace("'", "''")
     command = (
         f"$target=[IO.Path]::GetFullPath('{target}');"
         "$match=Get-Process terminal64 -ErrorAction SilentlyContinue | "
@@ -494,7 +534,8 @@ def import_report(strategy_id: int, report_path: Path, config_source: str = "imp
                 config.get("from_date", ""), config.get("to_date", ""),
                 _numbers(config.get("deposit", "0"))[0] if _numbers(config.get("deposit", "0")) else 0,
                 config.get("currency", "USD"), config.get("leverage", "1:100"), 4, None,
-                "{}", config_source, json.dumps(config, ensure_ascii=False), "completed",
+                json.dumps(config.get("inputs", {}), ensure_ascii=False), config_source,
+                json.dumps(config, ensure_ascii=False), "completed",
                 now, now, now, str(report_path.resolve()),
             ),
         ).lastrowid
@@ -502,7 +543,7 @@ def import_report(strategy_id: int, report_path: Path, config_source: str = "imp
             "INSERT INTO backtest_metrics(run_id,metrics_json,raw_metrics_json,parsed_at) VALUES(?,?,?,?)",
             (
                 run_id,
-                json.dumps(parsed["metrics"], ensure_ascii=False),
+                json.dumps(with_audit(parsed), ensure_ascii=False),
                 json.dumps(parsed["raw_metrics"], ensure_ascii=False),
                 now,
             ),
@@ -520,8 +561,10 @@ def import_report(strategy_id: int, report_path: Path, config_source: str = "imp
 
 
 def _ini_text(run: dict[str, Any], report_name: str) -> str:
+    terminal_root = Path(run.get("terminal_data_dir") or _terminal_for_run(run)["data_dir"])
+    profile = _terminal_for_run(run)
     expert = Path(run["expert_path"])
-    relative = expert.relative_to(DEFAULT_TERMINAL / "MQL5" / "Experts").with_suffix("")
+    relative = expert.relative_to(terminal_root / "MQL5" / "Experts").with_suffix("")
     expert_name = str(relative).replace("/", "\\")
     lines = [
         "[Tester]",
@@ -537,6 +580,9 @@ def _ini_text(run: dict[str, Any], report_name: str) -> str:
         f"Deposit={run['deposit']}",
         f"Currency={run['currency']}",
         f"Leverage={run['leverage']}",
+        f"Login={run.get('login') or profile.get('login')}",
+        f"Server={run.get('server') or profile.get('server')}",
+        f"ExpertParameters={run.get('inputs_path')}" if run.get("inputs_path") else "",
         "UseLocal=1",
         "UseRemote=0",
         "UseCloud=0",
@@ -563,7 +609,6 @@ def _execute(run_id: int, cancel_event: threading.Event) -> None:
     run_dir = BACKTEST_DIR / str(run_id)
     report_path = run_dir / "report.html"
     report_name = f"DashboardBacktest-{run_id}"
-    report_roots = (DEFAULT_TERMINAL, MT5_TERMINAL_EXE.parent)
     log_path = run_dir / "runner.log"
     process: subprocess.Popen[str] | None = None
     try:
@@ -571,19 +616,48 @@ def _execute(run_id: int, cancel_event: threading.Event) -> None:
             if _active_processes:
                 raise RuntimeError("Another MT5 backtest is already running")
         run = _run_row(run_id)
+        profile = _terminal_for_run(run)
+        data_dir = Path(profile["data_dir"])
+        terminal_exe = Path(profile["terminal_exe"])
+        report_roots = (data_dir, terminal_exe.parent)
         expert = Path(run["expert_path"])
-        if not MT5_TERMINAL_EXE.is_file():
-            raise ValueError(f"MT5 terminal does not exist: {MT5_TERMINAL_EXE}")
+        if not terminal_exe.is_file():
+            raise ValueError(f"MT5 terminal does not exist: {terminal_exe}")
         if not expert.is_file():
             raise ValueError(f"Expert does not exist: {expert}")
-        if _terminal_is_running():
-            raise ValueError("Close the FPM terminal before starting an automated backtest")
+        target_experts = data_dir / "MQL5" / "Experts"
+        if target_experts not in expert.parents:
+            staged = target_experts / "DashboardBacktests" / run["expert_hash"][:12] / expert.name
+            staged.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(expert, staged)
+            expert = staged
+            run["expert_path"] = str(staged)
+            _set_state(run_id, "preflight", None, expert_path=str(staged))
+        if _terminal_is_running(terminal_exe):
+            raise ValueError(f"Close the {run['broker']} terminal before starting an automated backtest")
         if not run["from_date"] or not run["to_date"]:
             raise ValueError("Backtest dates are required")
         if datetime.fromisoformat(run["from_date"]) >= datetime.fromisoformat(run["to_date"]):
             raise ValueError("Backtest end date must be after its start date")
         run_dir.mkdir(parents=True, exist_ok=True)
         ini_path = run_dir / "tester.ini"
+        inputs = run.get("inputs") or {}
+        inputs_path = data_dir / "MQL5" / "Profiles" / "Tester" / f"DashboardBacktest-{run_id}.set"
+        if inputs:
+            def set_line(key: str, value: Any) -> str:
+                text = str(value)
+                if text.casefold() in {"true", "false"}:
+                    return f"{key}={text}||false||0||true||N"
+                try:
+                    number = float(text)
+                    return f"{key}={text}||{text}||0||{text}||N"
+                except ValueError:
+                    # MT5 treats the optimizer suffix literally for string
+                    # inputs.  That can make a valid 27-character order
+                    # comment exceed the EA's 30-character safety limit.
+                    return f"{key}={text}"
+            inputs_path.write_text("\n".join(set_line(key, value) for key, value in inputs.items()) + "\n", encoding="utf-8")
+            run["inputs_path"] = inputs_path.name
         for report_root in report_roots:
             for stale_report in report_root.glob(f"{report_name}*"):
                 if stale_report.is_file():
@@ -593,9 +667,13 @@ def _execute(run_id: int, cancel_event: threading.Event) -> None:
             run_id, "running", started_at=utcnow(), run_dir=str(run_dir),
             report_path=str(report_path), log_path=str(log_path),
         )
+        launch_args = [str(terminal_exe)]
+        if profile.get("isolated"):
+            launch_args.append("/portable")
+        launch_args.append(f"/config:{ini_path}")
         process = subprocess.Popen(
-            [str(MT5_TERMINAL_EXE), f"/config:{ini_path}"],
-            cwd=str(MT5_TERMINAL_EXE.parent),
+            launch_args,
+            cwd=str(terminal_exe.parent),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             text=True,
@@ -622,7 +700,12 @@ def _execute(run_id: int, cancel_event: threading.Event) -> None:
             for report_root in report_roots
             for suffix in (".htm", ".html")
         ]
-        generated_report = next((path for path in report_candidates if path.is_file()), None)
+        generated_report = None
+        for _ in range(60):
+            generated_report = next((path for path in report_candidates if path.is_file()), None)
+            if generated_report:
+                break
+            time.sleep(0.5)
         if not generated_report:
             raise RuntimeError("MT5 finished without producing the requested report")
         shutil.move(str(generated_report), report_path)
@@ -648,7 +731,7 @@ def _execute(run_id: int, cancel_event: threading.Event) -> None:
             conn.execute(
                 "INSERT OR REPLACE INTO backtest_metrics(run_id,metrics_json,raw_metrics_json,parsed_at) VALUES(?,?,?,?)",
                 (
-                    run_id, json.dumps(parsed["metrics"], ensure_ascii=False),
+                    run_id, json.dumps(with_audit(parsed), ensure_ascii=False),
                     json.dumps(parsed["raw_metrics"], ensure_ascii=False), now,
                 ),
             )

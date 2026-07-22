@@ -6,6 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT / "data"
+BOT_INVENTORY_DIR = DATA_DIR / "imports" / "bot_inventory" / "vps"
 EXPORT_DIR = DATA_DIR / "exports"
 BACKTEST_DIR = DATA_DIR / "backtests"
 EGT_HISTORY_DIR = Path(os.environ.get("EGT_HISTORY_DIR", DATA_DIR / "egt_history"))
@@ -36,9 +37,23 @@ BACKTEST_START_DATE = os.environ.get("MT5_BACKTEST_START_DATE", "2016-01-01")
 DARWINEX_TERMINAL = Path(
     os.environ.get(
         "DARWINEX_DATA_DIR",
-        r"C:\Users\Admin\AppData\Roaming\MetaQuotes\Terminal\9265798B599F649497F9A17BEC9C76C6",
+        r"D:\TerminalesMT5\Darwinex Strategy Tester",
     )
 )
+DARWINEX_TERMINAL_EXE = Path(
+    os.environ.get(
+        "DARWINEX_TERMINAL_EXE",
+        r"D:\TerminalesMT5\Darwinex Strategy Tester\terminal64.exe",
+    )
+)
+
+# A profile contains every path that must move together.  Backtests should
+# never silently use the FPM executable with a Darwinex DataDir (or vice versa).
+BROKER_PROFILES: dict[str, dict[str, Path | str]] = {
+    "FPM": {"data_dir": DEFAULT_TERMINAL, "terminal_exe": MT5_TERMINAL_EXE, "isolated": False, "login": "7396577", "server": "FirstPrudentialMarkets-Demo"},
+    "Darwinex": {"data_dir": DARWINEX_TERMINAL, "terminal_exe": DARWINEX_TERMINAL_EXE, "isolated": True, "login": "4000094894", "server": "Darwinex-Live"},
+}
+ACTIVE_BACKTEST_BROKER = os.environ.get("MT5_ACTIVE_BACKTEST_BROKER", "Darwinex")
 EXPERT_SEARCH_ROOTS = tuple(
     Path(value)
     for value in os.environ.get(
@@ -48,5 +63,7 @@ EXPERT_SEARCH_ROOTS = tuple(
     if value
 )
 
-REFRESH_SECONDS = int(os.environ.get("DASHBOARDV1_REFRESH_SECONDS", "300"))
-STALE_SECONDS = int(os.environ.get("DASHBOARDV1_STALE_SECONDS", "600"))
+# One minute keeps the terminal availability useful without repeatedly reading
+# the complete history: the bridge asks MT5 only for rows newer than its cursor.
+REFRESH_SECONDS = int(os.environ.get("DASHBOARDV1_REFRESH_SECONDS", "60"))
+STALE_SECONDS = int(os.environ.get("DASHBOARDV1_STALE_SECONDS", "180"))

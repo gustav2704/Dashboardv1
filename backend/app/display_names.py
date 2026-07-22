@@ -52,7 +52,8 @@ def seed_manual_display_names(conn: Any, now: str) -> int:
                ) VALUES(?,?,?,?,?,?)
                ON CONFLICT(strategy_id,account_login) DO UPDATE SET
                  display_name=excluded.display_name, source=excluded.source,
-                 updated_at=excluded.updated_at""",
+                 updated_at=excluded.updated_at
+               WHERE strategy_display_names.source='manual_registry'""",
             (
                 mapping["strategy_id"], mapping["account_login"],
                 rule["display_name"], "manual_registry", now, now,

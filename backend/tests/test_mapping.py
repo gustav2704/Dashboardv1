@@ -1,6 +1,10 @@
+import json
+
 from app import db
 from app.mapping import (
     _candidate,
+    asset_key,
+    asset_label,
     confirm_mapping,
     ensure_mt5_strategies,
     normalize,
@@ -30,6 +34,16 @@ def test_symbol_family_maps_broker_symbols_to_catalog_symbols():
     assert symbol_family("USA30IDXUSD_clonedwnx") == "us30"
     assert symbol_family("WS30") == "us30"
     assert symbol_family("XAUUSD.cyr") == "xau"
+
+
+def test_asset_key_normalizes_broker_aliases_suffixes_and_prefixes():
+    assert asset_key("GER40") == asset_key("DEUIDXEUR_clonedwnx") == "dax"
+    assert asset_key("NAQ") == asset_key("US100.cash") == "naq"
+    assert asset_key("XAUUSD.cyr") == asset_key("gold") == "xauusd"
+    assert asset_key("SPX500") == asset_key("US500.cash") == "sp500"
+    assert asset_key("EURUSD.r") == asset_key("EURUSDm") == "eurusd"
+    assert asset_key("CustomIndex.alpha") == asset_key("CustomIndex.beta") == "custom"
+    assert asset_label("xauusd") == "Oro (XAU/USD)"
 
 
 def test_version_signature_uses_strategy_version_numbers():
@@ -105,7 +119,7 @@ def test_confirm_mapping_creates_an_account_deployment_under_sqx_identity(
         ).fetchone()[0] == 1
 
 
-def _observed_pending_order(conn, terminal_id, comment):
+def _observed_pending_order(conn, terminal_id, comment, *, symbol="GER40", magic=11220):
     conn.execute(
         """INSERT INTO pending_orders(
              terminal_id,ticket,symbol,order_type,time_msc,volume,price,magic,
@@ -114,16 +128,53 @@ def _observed_pending_order(conn, terminal_id, comment):
         (
             terminal_id,
             1,
-            "GER40",
+            symbol,
             "BUY_STOP",
             1,
             0.1,
             25000,
-            11220,
+            magic,
             comment,
             "{}",
         ),
     )
+
+
+def test_operational_identity_ignores_comment_but_not_terminal_account_or_asset(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "operational-identity.db")
+    db.init_db()
+    now = db.utcnow()
+    with db.session() as conn:
+        terminals = {}
+        for name, account in (
+            ("Live", "100121894"),
+            ("Demo", "100121894"),
+            ("Other account", "4000094894"),
+            ("Other asset", "100121894"),
+        ):
+            terminals[name] = conn.execute(
+                """INSERT INTO terminals(name,data_dir,account_login,status,created_at)
+                   VALUES(?,?,?,?,?)""",
+                (name, str(tmp_path / name), account, "connected", now),
+            ).lastrowid
+        _observed_pending_order(conn, terminals["Live"], "US30v4 BUY", symbol="US30", magic=857)
+        _observed_pending_order(conn, terminals["Demo"], "US30v4 SELL", symbol="WS30", magic=857)
+        _observed_pending_order(conn, terminals["Other account"], "US30v4 BUY", symbol="US30", magic=857)
+        _observed_pending_order(conn, terminals["Other asset"], "Gold BUY", symbol="XAUUSD", magic=857)
+
+    result = ensure_mt5_strategies()
+
+    assert result["created"] == 4
+    with db.session() as conn:
+        strategies = conn.execute("SELECT id FROM strategies ORDER BY id").fetchall()
+        assert len(strategies) == 4
+        mapped = conn.execute(
+            """SELECT strategy_id FROM mappings
+               WHERE account_login='100121894' AND magic=857 AND symbol IN ('US30','WS30')"""
+        ).fetchall()
+        assert len({row["strategy_id"] for row in mapped}) == 2
 
 
 def test_exact_alias_links_observed_mt5_identity_without_creating_duplicate(
@@ -218,4 +269,119 @@ def test_shared_exact_alias_is_left_unmapped_for_manual_review(
     assert review[0]["safe"] is False
     with db.session() as conn:
         assert conn.execute("SELECT COUNT(*) FROM strategies").fetchone()[0] == 2
+        assert conn.execute("SELECT COUNT(*) FROM mappings").fetchone()[0] == 0
+
+
+def test_archived_mapping_is_reused_when_the_active_terminal_observes_same_bot(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "archive-continuity.db")
+    db.init_db()
+    now = db.utcnow()
+    with db.session() as conn:
+        active_id = conn.execute(
+            "INSERT INTO terminals(name,data_dir,account_login,status,created_at) VALUES(?,?,?,?,?)",
+            ("Live", str(tmp_path / "live"), "400", "connected", now),
+        ).lastrowid
+        archive_id = conn.execute(
+            "INSERT INTO terminals(name,data_dir,account_login,status,created_at) VALUES(?,?,?,?,?)",
+            ("Archive", f"archive://terminal/{active_id}/400", "400", "history", now),
+        ).lastrowid
+        strategy_id = conn.execute(
+            "INSERT INTO strategies(symbol,sqx_name,mql5_name,account_login,origin,created_at) VALUES(?,?,?,?,?,?)",
+            ("NDX", "PPM|1783033200", "PPM", "400", "mt5", now),
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO mappings(strategy_id,terminal_id,account_login,symbol,magic,
+               comment_pattern,role,confidence,confirmed,created_at) VALUES(?,?,?,?,?,?,'live',1,1,?)""",
+            (strategy_id, archive_id, "400", "NDX", 6, "PPM", now),
+        )
+        _observed_pending_order(conn, active_id, "PPM|1784588400", symbol="NDX", magic=6)
+
+    result = ensure_mt5_strategies()
+
+    assert result["created"] == 0
+    with db.session() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM strategies").fetchone()[0] == 1
+        mappings = conn.execute(
+            "SELECT strategy_id,terminal_id FROM mappings ORDER BY terminal_id"
+        ).fetchall()
+        assert {(row["strategy_id"], row["terminal_id"]) for row in mappings} == {
+            (strategy_id, active_id), (strategy_id, archive_id)
+        }
+
+
+def test_closed_deals_without_reliable_identity_remain_unassigned(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "closed-unassigned.db")
+    db.init_db()
+    now = db.utcnow()
+    with db.session() as conn:
+        terminal_id = conn.execute(
+            "INSERT INTO terminals(name,data_dir,account_login,status,created_at) VALUES(?,?,?,?,?)",
+            ("Live", str(tmp_path / "live"), "400", "connected", now),
+        ).lastrowid
+        conn.executemany(
+            """INSERT INTO deals(terminal_id,ticket,position_id,time_msc,symbol,deal_type,
+               entry_type,volume,price,profit,commission,swap,magic,comment,raw_json)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            [
+                (terminal_id, 1, 1, 1, "GDAXI", "BUY", "IN", 0.1, 1, 0, 0, 0, 311241, "DAX_3_11_24_REAL", "{}"),
+                (terminal_id, 2, 1, 2, "GDAXI", "SELL", "OUT", 0.1, 1, -10, 0, 0, 311241, "[sl]", "{}"),
+            ],
+        )
+
+    result = ensure_mt5_strategies()
+
+    assert result["created"] == 0
+    with db.session() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM strategies").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM mappings").fetchone()[0] == 0
+
+
+def test_rejected_automatic_identity_is_not_recreated_from_open_position(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "suppressed-identity.db")
+    db.init_db()
+    now = db.utcnow()
+    with db.session() as conn:
+        terminal_id = conn.execute(
+            "INSERT INTO terminals(name,data_dir,account_login,status,created_at) VALUES(?,?,?,?,?)",
+            ("Live", str(tmp_path / "live"), "400", "connected", now),
+        ).lastrowid
+        rejected = {
+            "terminal_id": terminal_id,
+            "account_login": "400",
+            "symbol": "GDAXI",
+            "magic": 311241,
+            "comment_pattern": "DAX_3_11_24_REAL",
+        }
+        rejected_strategy_id = conn.execute(
+            """INSERT INTO strategies(
+                 symbol,sqx_name,mql5_name,account_login,origin,retired,archived_at,created_at
+               ) VALUES(?,?,?,?,?,1,?,?)""",
+            ("GDAXI", "Rejected", "DAX_3_11_24_REAL", "400", "mt5", now, now),
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO identity_repair_audits(
+                 action,strategy_id,before_json,after_json,reason,created_at
+               ) VALUES(?,?,?,?,?,?)""",
+            (
+                "disabled_unverified_autocreated_mapping",
+                rejected_strategy_id,
+                json.dumps(rejected),
+                "{}",
+                "manual review required",
+                now,
+            ),
+        )
+        conn.execute(
+            """INSERT INTO positions(terminal_id,ticket,position_id,symbol,direction,time_msc,
+               volume,open_price,current_price,profit,swap,magic,comment,raw_json)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (terminal_id, 1, 1, "GDAXI", "Long", 1, 0.1, 1, 1, 0, 0, 311241, "DAX_3_11_24_REAL", "{}"),
+        )
+
+    result = ensure_mt5_strategies()
+
+    assert result["created"] == 0
+    assert suggestions() == []
+    with db.session() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM strategies WHERE retired=0").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM mappings").fetchone()[0] == 0

@@ -17,6 +17,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
+from .config import ACTIVE_BACKTEST_BROKER
 from .db import session
 
 
@@ -178,15 +179,16 @@ def _latest_related() -> dict[str, dict[int, Any]]:
                 {**_json(row["analytics_json"]), "synced_at": row["synced_at"]},
             )
         for row in conn.execute(
-            "SELECT * FROM backtest_runs ORDER BY requested_at DESC,id DESC"
+            "SELECT * FROM backtest_runs WHERE broker=? ORDER BY requested_at DESC,id DESC",
+            (ACTIVE_BACKTEST_BROKER,)
         ):
             item = dict(row)
             latest_runs.setdefault(int(item["strategy_id"]), item)
         for row in conn.execute(
             """SELECT r.*,m.metrics_json,m.raw_metrics_json,m.parsed_at
                FROM backtest_runs r JOIN backtest_metrics m ON m.run_id=r.id
-               WHERE r.status='completed'
-               ORDER BY COALESCE(r.finished_at,r.requested_at) DESC,r.id DESC"""
+               WHERE r.status='completed' AND r.broker=?
+               ORDER BY COALESCE(r.finished_at,r.requested_at) DESC,r.id DESC""", (ACTIVE_BACKTEST_BROKER,)
         ):
             item = dict(row)
             item["metrics"] = _json(item.pop("metrics_json"))

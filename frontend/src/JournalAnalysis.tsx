@@ -1,11 +1,12 @@
-import { useMemo, useState } from 'react'
-import { Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import { useEffect, useMemo, useState } from 'react'
+import { Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import type { JournalAnalysisData, JournalTrade } from './types'
 
 const GREEN = '#2dd4bf'
 const RED = '#fb7185'
 const YELLOW = '#fbbf24'
 const GRID = '#172633'
+const BOT_COLORS = ['#38bdf8', '#fbbf24', '#a78bfa', '#fb7185', '#34d399', '#f97316', '#60a5fa', '#e879f9']
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
@@ -18,7 +19,7 @@ function scoreColor(score: number) { return score >= 60 ? GREEN : score >= 40 ? 
 export type BotRanking = { id: number; name: string; symbol: string; count: number; wins: number; net: number; volume: number; winRate: number; pf: number; dd: number; netPerLot: number | null; returnToDd: number; score: number; efficiencyScore: number }
 export function buildBotRankings(trades: JournalTrade[]): BotRanking[] {
   const grouped = new Map<number, JournalTrade[]>()
-  for (const trade of trades) grouped.set(trade.strategy_id, [...(grouped.get(trade.strategy_id) || []), trade])
+  for (const trade of trades) if (trade.strategy_id > 0) grouped.set(trade.strategy_id, [...(grouped.get(trade.strategy_id) || []), trade])
   const rows = [...grouped.entries()].map(([id, items]) => {
     const net = items.reduce((sum, t) => sum + t.net_profit, 0)
     const grossProfit = items.filter(t => t.profit > 0).reduce((sum,t) => sum + t.profit, 0)
@@ -33,6 +34,33 @@ export function buildBotRankings(trades: JournalTrade[]): BotRanking[] {
   const positive = (values: Array<number | null>, value: number | null) => value === Infinity ? 1 : value == null || value <= 0 ? 0 : value / Math.max(1, ...values.filter((v): v is number => v != null && Number.isFinite(v) && v > 0))
   for (const r of eligible) r.efficiencyScore = positive(eligible.map(x => x.netPerLot), r.netPerLot) * 35 + positive(eligible.map(x => x.returnToDd), r.returnToDd) * 30 + r.winRate / 100 * 15 + normalizePf(r.pf) * 15 + (maxTrades ? r.count / maxTrades * 5 : 0)
   return rows
+}
+
+export type BotEquitySeries = { id: number; key: string; name: string; color: string }
+export type BotEquityPoint = { timestamp: number; label: string } & Record<string, number | string>
+
+export function buildBotEquityCurves(trades: JournalTrade[]): { series: BotEquitySeries[]; points: BotEquityPoint[] } {
+  const botTrades = trades.filter(trade => trade.strategy_id > 0)
+  const grouped = new Map<number, JournalTrade[]>()
+  for (const trade of botTrades) grouped.set(trade.strategy_id, [...(grouped.get(trade.strategy_id) || []), trade])
+  const series = [...grouped.entries()].sort(([left], [right]) => left - right).map(([id, items]) => ({
+    id, key: `bot_${id}`, name: `${items[0].strategy_name} #${id}`, color: BOT_COLORS[Math.abs(id) % BOT_COLORS.length],
+  }))
+  const balances = new Map(series.map(item => [item.id, 0]))
+  const points: BotEquityPoint[] = []
+  const ordered = [...botTrades].sort((left, right) => left.close_time_msc - right.close_time_msc || left.strategy_id - right.strategy_id)
+  for (let index = 0; index < ordered.length;) {
+    const timestamp = ordered[index].close_time_msc
+    while (index < ordered.length && ordered[index].close_time_msc === timestamp) {
+      const trade = ordered[index]
+      balances.set(trade.strategy_id, (balances.get(trade.strategy_id) || 0) + trade.net_profit)
+      index++
+    }
+    const point: BotEquityPoint = { timestamp, label: new Date(timestamp).toLocaleString() }
+    for (const item of series) point[item.key] = balances.get(item.id) || 0
+    points.push(point)
+  }
+  return { series, points }
 }
 
 function ChartTip({ active, payload, suffix = '' }: { active?: boolean; payload?: Array<{name:string;value:number;color:string}>; suffix?: string }) {
@@ -69,6 +97,28 @@ export function TopTenCharts({ data, accountLabel }: { data: JournalAnalysisData
   return <section className="top-ten-section"><div className="top-ten-heading"><span className="eyebrow">JOURNAL RANKINGS</span><h2>Todos los Top 10</h2></div><div className="top-ten-grid">{charts.map(chart => <JournalChart title={chart.title} key={chart.key}><ResponsiveContainer><BarChart data={chart.rows} layout="vertical" margin={{left:25,right:22}}><CartesianGrid stroke={GRID} horizontal={false}/><XAxis type="number" tick={{fill:'#74899a',fontSize:9}}/><YAxis type="category" dataKey="name" width={170} tick={{fill:'#a8bdca',fontSize:9}}/><Tooltip content={<ChartTip suffix={chart.key === 'winRate' ? '%' : ''}/>} /><Bar dataKey={chart.key} radius={[0,3,3,0]}>{chart.rows.map(row=><Cell key={row.id} fill={chart.key === 'winRate' ? GREEN : scoreColor(row[chart.key])}/>)}</Bar></BarChart></ResponsiveContainer></JournalChart>)}</div></section>
 }
 
+const TRADES_PER_PAGE = 50
+
+function TradeList({ data }: { data: JournalAnalysisData }) {
+  const trades = data.trades
+  const [page, setPage] = useState(0)
+  const sortedTrades = useMemo(
+    () => [...trades].sort((left, right) => right.close_time_msc - left.close_time_msc || right.strategy_id - left.strategy_id),
+    [trades],
+  )
+  const totalPages = Math.max(1, Math.ceil(sortedTrades.length / TRADES_PER_PAGE))
+  const safePage = Math.min(page, totalPages - 1)
+  const pageTrades = sortedTrades.slice(safePage * TRADES_PER_PAGE, (safePage + 1) * TRADES_PER_PAGE)
+
+  useEffect(() => setPage(0), [trades])
+
+  return <section className="panel journal-trades">
+    <div className="panel-heading journal-trades-heading"><div><span className="eyebrow">OPERACIONES FILTRADAS</span><h2>Lista de trades</h2></div><span className={data.reconciliation.status === 'reconciled' ? 'value-good' : 'value-bad'}>{sortedTrades.length} operaciones · {data.reconciliation.attributed_trades} asignadas · {data.reconciliation.unassigned_trades} sin asignar</span></div>
+    <div className="table-scroll journal-trades-scroll"><table className="journal-trades-table"><thead><tr><th>Cierre</th><th>Cuenta</th><th>Activo</th><th>Estrategia</th><th>Volumen</th><th>P/L neto</th></tr></thead><tbody>{pageTrades.map(trade => <tr key={`${trade.strategy_id}-${trade.close_time_msc}-${trade.account}-${trade.net_profit}`}><td>{new Date(trade.close_time_msc).toLocaleString('en-GB')}</td><td>{trade.account || 'Sin asignar'}</td><td>{trade.symbol || '-'}</td><td>{trade.strategy_name}</td><td>{trade.volume.toLocaleString('en-US', { maximumFractionDigits: 2 })}</td><td className={trade.net_profit >= 0 ? 'value-good' : 'value-bad'}>{trade.net_profit >= 0 ? '+' : ''}{trade.net_profit.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td></tr>)}</tbody></table></div>
+    {totalPages > 1 && <div className="journal-trades-pagination"><span>Mostrando {safePage * TRADES_PER_PAGE + 1}-{Math.min((safePage + 1) * TRADES_PER_PAGE, sortedTrades.length)} de {sortedTrades.length}</span><div><button type="button" className="button" disabled={safePage === 0} onClick={() => setPage(current => Math.max(0, current - 1))}>Anterior</button><span>Pagina {safePage + 1} de {totalPages}</span><button type="button" className="button" disabled={safePage + 1 >= totalPages} onClick={() => setPage(current => Math.min(totalPages - 1, current + 1))}>Siguiente</button></div></div>}
+  </section>
+}
+
 export default function JournalAnalysis({ data }: { data: JournalAnalysisData | null }) {
   const charts = useMemo(() => {
     const trades = data?.trades || [], equity: Array<{label:string;equity:number}> = []; let total = 0
@@ -76,9 +126,10 @@ export default function JournalAnalysis({ data }: { data: JournalAnalysisData | 
     const monthlyMap = new Map<string,JournalTrade[]>(), weekday = DAYS.map(day=>({day,wins:0,count:0})), hourly = Array.from({length:24},(_,hour)=>({hour:`${String(hour).padStart(2,'0')}:00`,profit:0}))
     for (const t of trades) { const mk=monthKey(t.close_time_msc); monthlyMap.set(mk,[...(monthlyMap.get(mk)||[]),t]); const d=new Date(t.close_time_msc); weekday[d.getDay()].count++; if(t.net_profit>0) weekday[d.getDay()].wins++; hourly[d.getHours()].profit += t.net_profit }
     const monthly=[...monthlyMap].map(([month,items])=>({month,trades:items.length,drawdown:maxDrawdown(items)}))
-    return {equity,monthly,weekday:weekday.map(x=>({...x,winRate:x.count ? x.wins/x.count*100 : 0})),hourly}
+    const botEquity = buildBotEquityCurves(trades)
+    return {equity,botEquity: botEquity.series.length ? botEquity : null,monthly,weekday:weekday.map(x=>({...x,winRate:x.count ? x.wins/x.count*100 : 0})),hourly}
   }, [data])
   if (!data) return <div className="panel empty-state performance-empty">Loading journal analysis…</div>
   if (!data.trades.length) return <div className="panel empty-state performance-empty">No closed trades match the selected accounts and dates.</div>
-  return <div className="journal-view"><div className="performance-intro"><div><span className="eyebrow">PORTFOLIO JOURNAL</span><h2>Journal analysis</h2></div><p>Current and historical trades attributed to the selected broker accounts.</p></div><div className="journal-grid"><JournalChart wide title="Equity curve — cumulative net profit"><ResponsiveContainer><AreaChart data={charts.equity}><defs><linearGradient id="equityFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor={GREEN} stopOpacity={.35}/><stop offset="1" stopColor={GREEN} stopOpacity={0}/></linearGradient></defs><CartesianGrid stroke={GRID}/><XAxis dataKey="label" tick={{fill:'#74899a',fontSize:9}} minTickGap={30}/><YAxis tick={{fill:'#74899a',fontSize:9}}/><Tooltip content={<ChartTip/>}/><Area dataKey="equity" stroke={GREEN} fill="url(#equityFill)"/></AreaChart></ResponsiveContainer></JournalChart><JournalChart title="Trades executed by month"><ResponsiveContainer><BarChart data={charts.monthly}><CartesianGrid stroke={GRID}/><XAxis dataKey="month" tick={{fill:'#74899a',fontSize:9}}/><YAxis tick={{fill:'#74899a',fontSize:9}}/><Tooltip content={<ChartTip/>}/><Bar dataKey="trades" fill="#38bdf8"/></BarChart></ResponsiveContainer></JournalChart><JournalChart title="Win rate by weekday"><ResponsiveContainer><BarChart data={charts.weekday}><CartesianGrid stroke={GRID}/><XAxis dataKey="day" tick={{fill:'#74899a',fontSize:9}}/><YAxis domain={[0,100]} tick={{fill:'#74899a',fontSize:9}}/><Tooltip content={<ChartTip suffix="%"/>}/><Bar dataKey="winRate" fill={GREEN}/></BarChart></ResponsiveContainer></JournalChart><JournalChart title="Net profit by hour"><ResponsiveContainer><BarChart data={charts.hourly}><CartesianGrid stroke={GRID}/><XAxis dataKey="hour" interval={2} tick={{fill:'#74899a',fontSize:9}}/><YAxis tick={{fill:'#74899a',fontSize:9}}/><Tooltip content={<ChartTip/>}/><Bar dataKey="profit">{charts.hourly.map((x,i)=><Cell key={i} fill={x.profit >= 0 ? GREEN : RED}/>)}</Bar></BarChart></ResponsiveContainer></JournalChart><JournalChart title="Max drawdown by month"><ResponsiveContainer><LineChart data={charts.monthly}><CartesianGrid stroke={GRID}/><XAxis dataKey="month" tick={{fill:'#74899a',fontSize:9}}/><YAxis tick={{fill:'#74899a',fontSize:9}}/><Tooltip content={<ChartTip/>}/><Line dataKey="drawdown" stroke={RED} strokeWidth={2}/></LineChart></ResponsiveContainer></JournalChart></div><Calendar data={data}/></div>
+  return <div className="journal-view"><div className="performance-intro"><div><span className="eyebrow">PORTFOLIO JOURNAL</span><h2>Journal analysis</h2></div><p>All closed trades for the selected broker accounts, including operations awaiting strategy assignment.</p></div><div className="journal-grid"><JournalChart wide title="Equity curve — cumulative net profit"><ResponsiveContainer><AreaChart data={charts.equity}><defs><linearGradient id="equityFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor={GREEN} stopOpacity={.35}/><stop offset="1" stopColor={GREEN} stopOpacity={0}/></linearGradient></defs><CartesianGrid stroke={GRID}/><XAxis dataKey="label" tick={{fill:'#74899a',fontSize:9}} minTickGap={30}/><YAxis tick={{fill:'#74899a',fontSize:9}}/><Tooltip content={<ChartTip/>}/><Area dataKey="equity" stroke={GREEN} fill="url(#equityFill)"/></AreaChart></ResponsiveContainer></JournalChart>{charts.botEquity && <JournalChart wide title="Equity individual por bot"><ResponsiveContainer><LineChart data={charts.botEquity.points}><CartesianGrid stroke={GRID}/><XAxis dataKey="label" tick={{fill:'#74899a',fontSize:9}} minTickGap={30}/><YAxis tick={{fill:'#74899a',fontSize:9}}/><Tooltip content={<ChartTip/>}/><Legend wrapperStyle={{fontSize:10}}/>{charts.botEquity.series.map(series => <Line key={series.key} type="monotone" dataKey={series.key} name={series.name} stroke={series.color} strokeWidth={2} dot={false} />)}</LineChart></ResponsiveContainer></JournalChart>}<JournalChart title="Trades executed by month"><ResponsiveContainer><BarChart data={charts.monthly}><CartesianGrid stroke={GRID}/><XAxis dataKey="month" tick={{fill:'#74899a',fontSize:9}}/><YAxis tick={{fill:'#74899a',fontSize:9}}/><Tooltip content={<ChartTip/>}/><Bar dataKey="trades" fill="#38bdf8"/></BarChart></ResponsiveContainer></JournalChart><JournalChart title="Win rate by weekday"><ResponsiveContainer><BarChart data={charts.weekday}><CartesianGrid stroke={GRID}/><XAxis dataKey="day" tick={{fill:'#74899a',fontSize:9}}/><YAxis domain={[0,100]} tick={{fill:'#74899a',fontSize:9}}/><Tooltip content={<ChartTip suffix="%"/>}/><Bar dataKey="winRate" fill={GREEN}/></BarChart></ResponsiveContainer></JournalChart><JournalChart title="Net profit by hour"><ResponsiveContainer><BarChart data={charts.hourly}><CartesianGrid stroke={GRID}/><XAxis dataKey="hour" interval={2} tick={{fill:'#74899a',fontSize:9}}/><YAxis tick={{fill:'#74899a',fontSize:9}}/><Tooltip content={<ChartTip/>}/><Bar dataKey="profit">{charts.hourly.map((x,i)=><Cell key={i} fill={x.profit >= 0 ? GREEN : RED}/>)}</Bar></BarChart></ResponsiveContainer></JournalChart><JournalChart title="Max drawdown by month"><ResponsiveContainer><LineChart data={charts.monthly}><CartesianGrid stroke={GRID}/><XAxis dataKey="month" tick={{fill:'#74899a',fontSize:9}}/><YAxis tick={{fill:'#74899a',fontSize:9}}/><Tooltip content={<ChartTip/>}/><Line dataKey="drawdown" stroke={RED} strokeWidth={2}/></LineChart></ResponsiveContainer></JournalChart></div><Calendar data={data}/><TradeList data={data}/></div>
 }

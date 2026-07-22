@@ -2,10 +2,10 @@ from app import db, main, strategy_archival
 from app.mapping import ensure_mt5_strategies
 
 
-def _strategy(conn, now, name, *, magic=None, archived=False):
+def _strategy(conn, now, name, *, magic=None, archived=False, retired=False):
     strategy_id = conn.execute(
-        "INSERT INTO strategies(sqx_name,origin,archived_at,archive_reason,created_at) VALUES(?,?,?,?,?)",
-        (name, "mt5", now if archived else None, "sin_trades" if archived else None, now),
+        "INSERT INTO strategies(sqx_name,origin,retired,archived_at,archive_reason,created_at) VALUES(?,?,?,?,?,?)",
+        (name, "mt5", int(retired), now if archived else None, "sin_trades" if archived else None, now),
     ).lastrowid
     conn.execute(
         "INSERT OR IGNORE INTO terminals(name,data_dir,account_login,status,created_at) VALUES(?,?,?,?,?)",
@@ -67,3 +67,19 @@ def test_archive_blocks_open_positions_and_reactivates_on_mt5_activity(tmp_path,
         row = conn.execute("SELECT archived_at,archive_reason FROM strategies WHERE id=?", (strategy_id,)).fetchone()
     assert row["archived_at"] is None
     assert row["archive_reason"] is None
+
+
+def test_retired_strategy_without_magic_or_trades_can_be_archived(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "retired-archive.db")
+    monkeypatch.setattr(main, "suggestions", lambda: [])
+    db.init_db()
+    now = db.utcnow()
+    with db.session() as conn:
+        strategy_id, _ = _strategy(conn, now, "Retired empty", retired=True)
+
+    impact = strategy_archival.archive_impact(strategy_id)
+    assert impact["allowed"] is True
+    assert impact["reasons"] == ["sin_mn", "sin_trades"]
+
+    strategy_archival.archive_strategy(strategy_id)
+    assert strategy_id not in {row["id"] for row in main.dashboard_data()["strategies"]}

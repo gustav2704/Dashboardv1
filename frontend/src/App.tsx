@@ -1,16 +1,38 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Activity, Archive, BookOpen, CandlestickChart, FlaskConical, LayoutDashboard, Pause, Play, RefreshCw, RotateCcw, Settings as SettingsIcon, Square, TrendingUp, Trash2 } from 'lucide-react'
+import { Activity, Archive, BookOpen, CandlestickChart, FlaskConical, HelpCircle, LayoutDashboard, Pause, Play, RefreshCw, RotateCcw, Settings as SettingsIcon, Square, TrendingUp, Trash2, X } from 'lucide-react'
 import { Bar, BarChart, CartesianGrid, Cell, ReferenceLine, ResponsiveContainer, Scatter, ScatterChart, Tooltip, XAxis, YAxis, ZAxis } from 'recharts'
 import { api } from './api'
 import ChartPanel from './ChartPanel'
 import JournalAnalysis, { TopTenCharts } from './JournalAnalysis'
-import type { BacktestBatch, BacktestCandidates, BacktestDefaults, BacktestRun, BacktestSummary, Baseline, Dashboard, JournalAnalysisData, Metrics, RiskCheck, RiskGuard, Strategy, StrategyArchiveImpact, StrategyDeletionImpact, StrategyDetails } from './types'
+import type { AccountAliasSettings, BacktestBatch, BacktestCandidates, BacktestDefaults, BacktestRun, BacktestSummary, Baseline, Dashboard, JournalAnalysisData, Metrics, RiskCheck, RiskGuard, Strategy, StrategyArchiveImpact, StrategyDeletionImpact, StrategyDetails } from './types'
+import { detailGuides, type DetailGuideId } from './detailGuides'
 
 type Tab = 'overview' | 'performance' | 'journal' | 'detail' | 'chart' | 'backtests' | 'settings'
-type SortKey = 'state' | 'source' | 'backtest' | 'edge' | 'egt' | 'strategy' | 'symbol' | 'account' | 'magic' | 'net_profit' | 'trades' | 'win_rate' | 'profit_factor' | 'max_drawdown' | 'avg_wl' | 'best_trade' | 'today_profit' | 'history'
+type SortKey = 'state' | 'source' | 'backtest' | 'edge' | 'egt' | 'strategy' | 'symbol' | 'account' | 'magic' | 'net_profit' | 'expectancy' | 'trades' | 'win_rate' | 'profit_factor' | 'max_drawdown' | 'avg_wl' | 'best_trade' | 'today_profit' | 'floating_profit' | 'account_pl_percent' | 'initial_capital_pl_percent' | 'health' | 'history' | 'id'
 type SortDirection = 'ascending' | 'descending'
 type SortState = { key: SortKey; direction: SortDirection } | null
+type BacktestFilter = 'all' | BacktestSummary['state'] | 'risk_exceeded' | 'risk_validated' | 'no_mm' | 'not_auditable' | 'no_risk_audit'
+type OverviewViewSnapshot = {
+  query: string
+  strategyIdQuery: string
+  magicQuery: string
+  statusFilter: string
+  linkFilter: string
+  backtestStatusFilter: BacktestFilter
+  sort: SortState
+  pageScrollY: number
+  tableScrollLeft: number
+}
 const SIDEBAR_STORAGE_KEY = 'dashboardv1:sidebar-collapsed'
+
+function parseStrategyIds(query: string) {
+  return new Set(
+    query
+      .split(/[\s,]+/)
+      .filter(part => /^\d+$/.test(part))
+      .map(Number)
+  )
+}
 
 const stateLabels: Record<string, string> = {
   active: 'Active', no_recent_trades: 'No recent trades', unlinked: 'Unlinked',
@@ -19,6 +41,13 @@ const stateLabels: Record<string, string> = {
 const linkLabels: Record<string, string> = {
   linked: 'Linked', candidate: 'Candidate', sqx_catalog: 'SQX + Catalog', sqx_only: 'SQX only',
   mt5_only: 'MT5 only', catalog_only: 'Catalog only',
+}
+const deploymentLabels: Record<string, string> = {
+  attached_active: 'Adjunto activo', attached_inactive: 'Adjunto inactivo', observed: 'Despliegue observado',
+}
+const activityLabels: Record<string, string> = {
+  with_recent_trades: 'Con trades recientes', without_recent_trades: 'Sin trades recientes',
+  undetermined: 'Actividad no determinable', not_deployed: 'Sin inventario VPS',
 }
 
 function money(value: number | null | undefined) {
@@ -37,7 +66,7 @@ function duration(seconds: number) {
 function tradeDuration(openTime: number, closeTime: number) {
   return duration(Math.max(0, closeTime - openTime) / 1000)
 }
-function buildDashboardQuery(windowName: string, customStart: string, customEnd: string, selectedAccounts: Set<string> | null) {
+function buildDashboardQuery(windowName: string, customStart: string, customEnd: string, selectedAccounts: Set<string> | null, selectedAssets: Set<string> | null) {
   const params = new URLSearchParams({ window: windowName })
   if (windowName === 'custom' && customStart && customEnd) {
     params.set('start', customStart)
@@ -48,7 +77,15 @@ function buildDashboardQuery(windowName: string, customStart: string, customEnd:
     params.set('include_unassigned', String(selectedAccounts.has(UNASSIGNED_ACCOUNT)))
     for (const account of selectedAccounts) if (account !== UNASSIGNED_ACCOUNT) params.append('accounts', account)
   }
+  if (selectedAssets !== null) {
+    params.set('filter_assets', 'true')
+    for (const asset of selectedAssets) params.append('assets', asset)
+  }
   return params.toString()
+}
+function signedPercent(value: number | null | undefined) {
+  if (value == null) return '—'
+  return `${value > 0 ? '+' : ''}${value.toFixed(2)}%`
 }
 function recoveryFactor(metrics: Metrics) {
   if (metrics.return_dd != null) return number(metrics.return_dd)
@@ -58,24 +95,19 @@ function performanceMetrics(strategy: Strategy) {
   return strategy.lifetime_metrics || strategy.metrics
 }
 const UNASSIGNED_ACCOUNT = '__unassigned__'
-const accountAliases: Record<string, string> = {
-  '7396577': 'Demo FP master',
-  '4000094894': 'Live Dwnx',
-  '100121894': 'Demo FP experimental',
-  '3000097316': 'dwnx demo',
-}
-function accountAlias(account: string | null | undefined) {
-  return accountAliases[String(account || '').trim()] || ''
+function accountAlias(aliases: Record<string, string>, account: string | null | undefined) {
+  return aliases[String(account || '').trim()] || ''
 }
 type AccountFilterProps = {
   accounts: string[]
+  aliases: Record<string, string>
   hasUnassigned: boolean
   selected: Set<string> | null
   onChange: (selected: Set<string>) => void
   compact?: boolean
 }
 
-function AccountFilter({ accounts, hasUnassigned, selected, onChange, compact = false }: AccountFilterProps) {
+function AccountFilter({ accounts, aliases, hasUnassigned, selected, onChange, compact = false }: AccountFilterProps) {
   const [open, setOpen] = useState(false)
   const root = useRef<HTMLDivElement>(null)
   const values = [...accounts, ...(hasUnassigned ? [UNASSIGNED_ACCOUNT] : [])]
@@ -100,13 +132,53 @@ function AccountFilter({ accounts, hasUnassigned, selected, onChange, compact = 
   function toggleAll(checked: boolean) { onChange(checked ? new Set(values) : new Set()) }
 
   return <div ref={root} className={`account-filter${compact ? ' compact' : ''}`}>
-    {!compact && <span className="account-filter-label">Cuentas de broker</span>}
+    {!compact && <span className="account-filter-label">Cuentas activas</span>}
     <button type="button" className="account-filter-trigger" aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen(current => !current)}>{label}<span aria-hidden="true">⌄</span></button>
     {open && <div className="account-filter-menu" role="listbox" aria-label="Cuentas de broker" aria-multiselectable="true">
-      <label className="account-filter-option all"><input type="checkbox" checked={allSelected} onChange={event => toggleAll(event.target.checked)} />Todas las cuentas</label>
+      <label className="account-filter-option all"><input type="checkbox" checked={allSelected} onChange={event => toggleAll(event.target.checked)} /><span className="account-filter-all-label">Todas las cuentas</span></label>
       <div className="account-filter-divider" />
-      {accounts.map(account => <label key={account} className="account-filter-option"><input type="checkbox" checked={active.has(account)} onChange={event => setValue(account, event.target.checked)} />{accountAlias(account) ? <><strong>{account}</strong><small>{accountAlias(account)}</small></> : account}</label>)}
-      {hasUnassigned && <label className="account-filter-option"><input type="checkbox" checked={active.has(UNASSIGNED_ACCOUNT)} onChange={event => setValue(UNASSIGNED_ACCOUNT, event.target.checked)} />Sin asignar</label>}
+      {accounts.map(account => {
+        const alias = accountAlias(aliases, account)
+        return <label key={account} className="account-filter-option"><input type="checkbox" checked={active.has(account)} onChange={event => setValue(account, event.target.checked)} /><strong className="account-filter-account">{account}</strong>{alias && <small className="account-filter-alias" title={alias}>{alias}</small>}</label>
+      })}
+      {hasUnassigned && <label className="account-filter-option"><input type="checkbox" checked={active.has(UNASSIGNED_ACCOUNT)} onChange={event => setValue(UNASSIGNED_ACCOUNT, event.target.checked)} /><span className="account-filter-unassigned">Sin asignar</span></label>}
+    </div>}
+  </div>
+}
+
+type AssetOption = { key: string; label: string; symbols: string[] }
+type AssetFilterProps = { assets: AssetOption[]; selected: Set<string> | null; onChange: (selected: Set<string>) => void; compact?: boolean }
+
+function AssetFilter({ assets, selected, onChange, compact = false }: AssetFilterProps) {
+  const [open, setOpen] = useState(false)
+  const root = useRef<HTMLDivElement>(null)
+  const values = assets.map(asset => asset.key)
+  const active = selected ?? new Set(values)
+  const allSelected = values.length > 0 && values.every(asset => active.has(asset))
+  const selectedCount = values.filter(asset => active.has(asset)).length
+  const label = allSelected ? 'Todos los activos' : selectedCount ? `${selectedCount} activo${selectedCount === 1 ? '' : 's'}` : 'Sin activos'
+
+  useEffect(() => {
+    const close = (event: MouseEvent) => { if (root.current && !root.current.contains(event.target as Node)) setOpen(false) }
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setOpen(false) }
+    document.addEventListener('mousedown', close)
+    document.addEventListener('keydown', onKeyDown)
+    return () => { document.removeEventListener('mousedown', close); document.removeEventListener('keydown', onKeyDown) }
+  }, [])
+
+  function setValue(value: string, checked: boolean) {
+    const next = new Set(active)
+    if (checked) next.add(value); else next.delete(value)
+    onChange(next)
+  }
+
+  return <div ref={root} className={`asset-filter account-filter${compact ? ' compact' : ''}`}>
+    {!compact && <span className="account-filter-label">Activos</span>}
+    <button type="button" className="account-filter-trigger" aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen(current => !current)}>{label}<span aria-hidden="true">⌄</span></button>
+    {open && <div className="account-filter-menu" role="listbox" aria-label="Activos" aria-multiselectable="true">
+      <label className="account-filter-option all"><input type="checkbox" checked={allSelected} onChange={event => onChange(event.target.checked ? new Set(values) : new Set())} /><span className="account-filter-all-label">Todos los activos</span></label>
+      <div className="account-filter-divider" />
+      {assets.map(asset => <label key={asset.key} className="account-filter-option asset-filter-option"><input type="checkbox" checked={active.has(asset.key)} onChange={event => setValue(asset.key, event.target.checked)} /><strong className="account-filter-account">{asset.label}</strong><small className="account-filter-alias" title={asset.symbols.join(', ')}>{asset.symbols.join(', ')}</small></label>)}
     </div>}
   </div>
 }
@@ -141,6 +213,22 @@ const backtestLabels: Record<BacktestSummary['state'], string> = {
   failed: 'Failed',
   none: 'No backtest',
 }
+const backtestAuditFilterLabels: Record<Exclude<BacktestFilter, 'all' | BacktestSummary['state']>, string> = {
+  risk_exceeded: 'Risk alert',
+  risk_validated: 'Risk validated',
+  no_mm: 'No money management',
+  not_auditable: 'Risk not auditable',
+  no_risk_audit: 'No risk audit data',
+}
+
+function matchesBacktestFilter(summary: BacktestSummary, filter: BacktestFilter) {
+  if (filter === 'all') return true
+  if (filter in backtestLabels) return summary.state === filter
+  if (filter === 'risk_exceeded') return summary.risk_audit?.status === 'risk_exceeded'
+  if (filter === 'risk_validated') return summary.risk_audit?.status === 'validated'
+  if (filter === 'no_risk_audit') return summary.has_completed && !summary.risk_audit
+  return summary.risk_audit?.status === filter
+}
 
 function BacktestBadge({ summary }: { summary: BacktestSummary }) {
   const details = summary.state === 'none'
@@ -149,18 +237,33 @@ function BacktestBadge({ summary }: { summary: BacktestSummary }) {
         `${summary.completed_count} completed backtest${summary.completed_count === 1 ? '' : 's'}`,
         summary.latest_completed_at ? `Last valid: ${new Date(summary.latest_completed_at).toLocaleString()}` : 'No valid result',
         `Latest run: ${summary.latest_status || 'unknown'}`,
+        summary.history_source === 'Custom' ? `Custom: ${summary.custom_symbol || 'unknown symbol'}` : '',
       ].join(' · ')
-  return <span className={`backtest-badge ${summary.state}`} title={details}>{backtestLabels[summary.state]}</span>
+  const risk = summary.risk_audit
+  const riskDetails = risk?.status === 'risk_exceeded'
+    ? `Riesgo excedido: peor pérdida ${money(risk.worst_loss)} / declarado ${money(risk.declared_risk)}`
+    : ''
+  return <span className={`backtest-badge ${summary.state} ${summary.risk_alert ? 'risk-alert' : ''}`} title={[details, riskDetails].filter(Boolean).join(' · ')}>{summary.risk_alert ? 'Risk alert' : backtestLabels[summary.state]}</span>
 }
 
-function SortableHeader({ label, sortKey, sort, onSort }: { label: string; sortKey: SortKey; sort: SortState; onSort: (key: SortKey) => void }) {
+function SortableHeader({ label, sortKey, sort, onSort, className = '' }: { label: string; sortKey: SortKey; sort: SortState; onSort: (key: SortKey) => void; className?: string }) {
   const active = sort?.key === sortKey
   const direction = active ? sort.direction : 'none'
-  return <th className="sortable-header" aria-sort={direction}>
+  return <th className={`sortable-header ${className}`} aria-sort={direction}>
     <button type="button" className={active ? 'sort-button active' : 'sort-button'} onClick={() => onSort(sortKey)}>
       <span>{label}</span><span className="sort-indicator" aria-hidden="true">{active ? (sort.direction === 'ascending' ? '↑' : '↓') : '↕'}</span>
     </button>
   </th>
+}
+
+function OverviewTableColGroup() {
+  return <colgroup>
+    {[60, 78, 100, 340, 75, 112, 70, 94, 69, 120, 90, 92, 92, 120, 100, 100, 100, 100, 115, 115, 115, 100, 100, 100, 30].map((width, index) => <col key={index} style={{ width }} />)}
+  </colgroup>
+}
+
+function OverviewTableHead({ sort, onSort }: { sort: SortState; onSort: (key: SortKey) => void }) {
+  return <tr><SortableHeader label="ID" sortKey="id" sort={sort} onSort={onSort}/><th className="selection-column">Selection</th><SortableHeader label="Backtest" sortKey="backtest" sort={sort} onSort={onSort}/><SortableHeader label="Strategy" sortKey="strategy" sort={sort} onSort={onSort}/><SortableHeader className="overview-symbol-column" label="Symbol" sortKey="symbol" sort={sort} onSort={onSort}/><SortableHeader label="Account" sortKey="account" sort={sort} onSort={onSort}/><SortableHeader label="Magic" sortKey="magic" sort={sort} onSort={onSort}/><SortableHeader label="Edge" sortKey="edge" sort={sort} onSort={onSort}/><SortableHeader label="EGT" sortKey="egt" sort={sort} onSort={onSort}/><SortableHeader label="Net P/L" sortKey="net_profit" sort={sort} onSort={onSort}/><SortableHeader label="Esperanza" sortKey="expectancy" sort={sort} onSort={onSort}/><SortableHeader label="Trades" sortKey="trades" sort={sort} onSort={onSort}/><SortableHeader label="Win %" sortKey="win_rate" sort={sort} onSort={onSort}/><SortableHeader label="Avg W/L" sortKey="avg_wl" sort={sort} onSort={onSort}/><SortableHeader label="Best trade" sortKey="best_trade" sort={sort} onSort={onSort}/><SortableHeader label="P/L today" sortKey="today_profit" sort={sort} onSort={onSort}/><SortableHeader label="Max DD" sortKey="max_drawdown" sort={sort} onSort={onSort}/><SortableHeader label="Floating P/L" sortKey="floating_profit" sort={sort} onSort={onSort}/><SortableHeader label="Account P/L %" sortKey="account_pl_percent" sort={sort} onSort={onSort}/><SortableHeader label="Init cap PL %" sortKey="initial_capital_pl_percent" sort={sort} onSort={onSort}/><SortableHeader label="Health" sortKey="health" sort={sort} onSort={onSort}/><SortableHeader label="History" sortKey="history" sort={sort} onSort={onSort}/><SortableHeader label="Source" sortKey="source" sort={sort} onSort={onSort}/><SortableHeader className="overview-state-column" label="State" sortKey="state" sort={sort} onSort={onSort}/><th aria-label="Open panel"></th></tr>
 }
 
 const strategyCollator = new Intl.Collator('es-MX', { numeric: true, sensitivity: 'base' })
@@ -185,6 +288,7 @@ function sortValue(strategy: Strategy, key: SortKey): string | number | null {
     case 'account': return strategy.account_login || null
     case 'magic': return strategy.primary_magic_number
     case 'net_profit': return performanceMetrics(strategy).net_profit
+    case 'expectancy': return performanceMetrics(strategy).expectancy
     case 'trades': return performanceMetrics(strategy).trades
     case 'win_rate': return performanceMetrics(strategy).win_rate
     case 'profit_factor': return performanceMetrics(strategy).profit_factor
@@ -192,7 +296,12 @@ function sortValue(strategy: Strategy, key: SortKey): string | number | null {
     case 'avg_wl': return performanceMetrics(strategy).avg_loss < 0 ? performanceMetrics(strategy).avg_win / Math.abs(performanceMetrics(strategy).avg_loss) : performanceMetrics(strategy).avg_win || null
     case 'best_trade': return performanceMetrics(strategy).best_trade
     case 'today_profit': return strategy.metrics.today_profit
+    case 'floating_profit': return strategy.metrics.floating_profit
+    case 'account_pl_percent': return strategy.account_pl_percent
+    case 'initial_capital_pl_percent': return strategy.initial_capital_pl_percent
+    case 'health': return { red: 0, yellow: 1, green: 2, gray: 3 }[strategy.health.status]
     case 'history': return strategy.historical_metrics.trades
+    case 'id': return strategy.id
   }
 }
 
@@ -241,21 +350,47 @@ function RiskCheckCell({ check, format }: { check: RiskCheck; format: (value: nu
   </div>
 }
 
-function RiskGuardPanel({ risk }: { risk: RiskGuard }) {
+function GuideButton({ guide, onOpen }: { guide: DetailGuideId; onOpen: (guide: DetailGuideId) => void }) {
+  return <button className="guide-button" type="button" onClick={() => onOpen(guide)} aria-label={`Cómo interpretar: ${detailGuides[guide].title}`}>
+    <HelpCircle size={14} aria-hidden="true" />
+  </button>
+}
+
+function DetailGuidePanel({ guide, onClose }: { guide: DetailGuideId; onClose: () => void }) {
+  const content = detailGuides[guide]
+  const closeRef = useRef<HTMLButtonElement>(null)
+  useEffect(() => {
+    closeRef.current?.focus()
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [guide, onClose])
+  return <aside className="detail-guide-panel" aria-label={`Guía: ${content.title}`}>
+    <div className="detail-guide-heading"><div><span className="eyebrow">{content.eyebrow}</span><h2>{content.title}</h2></div><button ref={closeRef} className="guide-close" type="button" onClick={onClose} aria-label="Cerrar guía"><X size={18} /></button></div>
+    <section><h3>Qué analiza</h3><p>{content.analyzes}</p></section>
+    <section><h3>Fuente y ventana</h3><p>{content.source}</p></section>
+    <section><h3>Atributos</h3><dl>{content.attributes.map(([name, description]) => <div key={name}><dt>{name}</dt><dd>{description}</dd></div>)}</dl></section>
+    <section><h3>Cómo interpretarlo</h3><p>{content.interpretation}</p></section>
+    <section className="guide-example"><h3>Ejemplo</h3><p>{content.example}</p></section>
+    <section className="guide-action"><h3>Qué hacer</h3><p>{content.action}</p></section>
+  </aside>
+}
+
+function RiskGuardPanel({ risk, onGuide }: { risk: RiskGuard; onGuide: (guide: DetailGuideId) => void }) {
   return <section className={`panel risk-guard-panel ${risk.status}`}>
     <div className="panel-heading">
       <div><span className="eyebrow">HARD RISK LIMITS</span><h2>Risk Guard</h2></div>
-      <span className={`risk-verdict ${risk.stop_recommended ? 'stop' : risk.status}`}>
+      <div className="panel-heading-actions"><GuideButton guide="risk-guard" onOpen={onGuide} /><span className={`risk-verdict ${risk.stop_recommended ? 'stop' : risk.status}`}>
         {risk.stop_recommended ? 'Stop recommended' : risk.status === 'gray' ? 'Not evaluated' : risk.status === 'yellow' ? 'Attention' : 'Within limits'}
-      </span>
+      </span></div>
     </div>
     <div className="risk-live-strip">
       <div><span>Current losing streak</span><strong>{risk.live.current_consecutive_losses}</strong></div>
-      <div><span>Live max loss streak</span><strong>{risk.live.max_consecutive_losses}</strong></div>
-      <div><span>Live max drawdown</span><strong>{money(risk.live.max_drawdown)}</strong></div>
+      <div><span>Combined max loss streak</span><strong>{risk.live.max_consecutive_losses}</strong></div>
+      <div><span>Combined max drawdown</span><strong>{money(risk.live.max_drawdown)}</strong></div>
       <div><span>History evaluated</span><strong>{risk.live.trades} trades</strong></div>
     </div>
-    <div className="risk-grid risk-grid-head"><span>Metric</span><span>Live</span><span>IS limit</span><span>OOS limit</span></div>
+    <div className="risk-grid risk-grid-head"><span>Metric</span><span>Combined</span><span>IS limit</span><span>OOS limit</span></div>
     <div className="risk-grid">
       <span>Max drawdown</span><strong>{money(risk.live.max_drawdown)}</strong>
       <RiskCheckCell check={risk.checks.is.drawdown} format={money} />
@@ -316,16 +451,17 @@ function SQXAnalyticsBadge({ strategy, kind }: { strategy: Strategy; kind: 'edge
   const egt = strategy.sqx_analytics?.egt
   if (!egt) return <span className="analytics-badge unavailable" title="No SQX analytics snapshot">—</span>
   if (!egt.available) return <span className="analytics-badge unavailable" title={egt.reason || 'Not available'}>N/A</span>
-  return <span className="analytics-badge egt" title={`EGT · ${egt.grade || 'No grade'} · ${egt.history_source || egt.source || 'Unknown source'}`}>{number(egt.total)}<small>{egt.grade}</small></span>
+  return <span className="analytics-badge egt" title={`EGT · ${egt.grade || 'No grade'} · ${egt.history_source || egt.source || 'Unknown source'}`}><span className="analytics-badge-value">{number(egt.total)}</span><small>{egt.grade}</small></span>
 }
 
-function SQXAnalyticsPanel({ strategy }: { strategy: Strategy }) {
+function SQXAnalyticsPanel({ strategy, onGuide }: { strategy: Strategy; onGuide: (guide: DetailGuideId) => void }) {
   const analytics = strategy.sqx_analytics
   const edge = analytics?.edge
   const egt = analytics?.egt
   return <section className="panel sqx-analytics-panel">
     <div className="panel-heading">
       <div><span className="eyebrow">SQX ANALYTICS</span><h2>Edge Decay & EGT</h2></div>
+      <GuideButton guide="sqx-analytics" onOpen={onGuide} />
       <span className="source-tag">{analytics ? `${analytics.project} · ${analytics.databank} · ${new Date(analytics.synced_at).toLocaleDateString()}` : 'No snapshot'}</span>
     </div>
     <div className="sqx-analytics-grid">
@@ -544,8 +680,112 @@ function Performance({
 
 type StrategyNoteResult = { strategy_id: number; note: string; note_updated_at: string }
 type NoteSavedHandler = (strategyId: number, note: string, noteUpdatedAt: string) => void
+type StrategyDisplayNameResult = { strategy_id: number; display_name: string; display_name_source: string; display_name_updated_at: string }
+type DisplayNameSavedHandler = (strategyId: number, displayName: string, source: string) => void
 
-function StrategyNoteEditor({ strategy, onSaved, placement }: { strategy: Strategy; onSaved: NoteSavedHandler; placement: 'drawer' | 'detail' }) {
+function StrategyDisplayNameEditor({ strategy, onSaved }: { strategy: Strategy; onSaved: DisplayNameSavedHandler }) {
+  const isAssigned = strategy.display_name_source != null
+  const [draft, setDraft] = useState(isAssigned ? strategy.display_name : '')
+  const [savedName, setSavedName] = useState(isAssigned ? strategy.display_name : '')
+  const [saving, setSaving] = useState(false)
+  const [status, setStatus] = useState('')
+
+  useEffect(() => {
+    const current = strategy.display_name_source != null ? strategy.display_name : ''
+    setDraft(current)
+    setSavedName(current)
+    setStatus('')
+  }, [strategy.id, strategy.display_name, strategy.display_name_source])
+
+  async function save() {
+    setSaving(true)
+    setStatus('')
+    try {
+      const result = await api<StrategyDisplayNameResult>(`/api/strategies/${strategy.id}/display-name`, {
+        method: 'PUT',
+        body: JSON.stringify({ display_name: draft }),
+      })
+      setSavedName(result.display_name)
+      setStatus('Saved')
+      onSaved(result.strategy_id, result.display_name, result.display_name_source)
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : 'Could not save name')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const technicalName = [strategy.mql5_name, strategy.sqx_name].filter((value, index, values) => value && values.indexOf(value) === index).join(' · ')
+  return <section className="drawer-section strategy-display-name">
+    <div className="strategy-note-heading"><div><span className="eyebrow">NOMBRE PERSONALIZADO</span><small>Se usa como nombre principal en el panel.</small></div><span className={status && status !== 'Saved' ? 'note-status error' : 'note-status'}>{status}</span></div>
+    <input aria-label="Nombre personalizado de estrategia" maxLength={160} placeholder="Ej. XAU reversión conservadora" value={draft} onChange={event => { setDraft(event.target.value); setStatus('') }} />
+    {technicalName && <small className="strategy-display-name-reference">Referencia técnica: {technicalName}</small>}
+    <div className="strategy-note-actions"><small>{draft.length} / 160</small><button className="button primary" type="button" disabled={!draft.trim() || draft === savedName || saving} onClick={save}>{saving ? 'Saving…' : 'Save name'}</button></div>
+  </section>
+}
+
+function BacktestRiskAudit({ strategy, onGuide }: { strategy: Strategy; onGuide: (guide: DetailGuideId) => void }) {
+  const audit = strategy.backtest_risk || strategy.backtest.risk_audit
+  const backtest = strategy.backtest
+  const alert = audit?.status === 'risk_exceeded'
+  const label = !audit ? 'No audit available' : alert ? 'Risk alert' : audit.status === 'validated' ? 'Validated' : 'Not auditable'
+  const excess = audit?.risk_ratio != null ? Math.max(0, (audit.risk_ratio - 1) * 100) : null
+  return <section className={`panel backtest-risk-audit ${alert ? 'alert' : audit?.status === 'validated' ? 'validated' : 'neutral'}`}>
+    <div className="panel-heading"><div><span className="eyebrow">MT5 BACKTEST CONTROL</span><h2>Backtest Risk Audit</h2></div><div className="panel-heading-actions"><GuideButton guide="backtest-risk" onOpen={onGuide} /><span className={`risk-verdict ${alert ? 'stop' : audit?.status === 'validated' ? 'green' : 'gray'}`}>{label}</span></div></div>
+    {audit ? <>
+      <div className="backtest-audit-grid"><div><span>Declared risk</span><strong>{money(audit.declared_risk)}</strong></div><div><span>Worst loss</span><strong className={alert ? 'value-bad' : ''}>{money(audit.worst_loss)}</strong></div><div><span>Risk ratio</span><strong>{audit.risk_ratio == null ? '—' : `${audit.risk_ratio.toFixed(2)}×`}</strong></div><div><span>Excess</span><strong className={alert ? 'value-bad' : ''}>{excess == null ? '—' : `${excess.toFixed(1)}%`}</strong></div></div>
+      <p className={alert ? 'backtest-audit-message alert' : 'backtest-audit-message'}>{audit.warning || (audit.status === 'validated' ? 'Worst trade stayed within the declared-risk tolerance.' : 'The report inputs do not allow this risk check.')}</p>
+    </> : <p className="backtest-audit-message">No risk audit is available for the latest valid backtest.</p>}
+    <div className="backtest-audit-context"><span>Run {backtest.latest_run_id ?? '—'}</span><span>{backtest.history_source || 'MT5 history'}{backtest.custom_symbol ? ` · ${backtest.custom_symbol}` : ''}</span><span>{backtest.latest_completed_at ? new Date(backtest.latest_completed_at).toLocaleString() : 'No valid result'}</span></div>
+  </section>
+}
+
+function StrategyIdentifiers({ strategy, detail }: { strategy: Strategy; detail: StrategyDetails | null }) {
+  const identifiers = new Map<string, Set<string>>()
+  function add(label: string, value: string | number | null | undefined) {
+    const normalized = String(value ?? '').trim()
+    if (!normalized) return
+    const values = identifiers.get(label) || new Set<string>()
+    values.add(normalized)
+    identifiers.set(label, values)
+  }
+  if (strategy.display_name_source) add(strategy.display_name_source === 'manual_user' ? 'Nombre personalizado' : 'Nombre asignado', strategy.display_name)
+  if (strategy.operational_identity) add('Identidad operativa', `${strategy.operational_identity.account_login} / terminal ${strategy.operational_identity.terminal_id} / ${strategy.operational_identity.symbol} / MN ${strategy.operational_identity.magic}`)
+  add('Nombre SQX', strategy.sqx_name)
+  add('Nombre MT5 / comentario', strategy.mql5_name)
+  add('Cuenta', strategy.account_login)
+  strategy.lineage_accounts.current.forEach(value => add('Cuenta actual', value))
+  strategy.lineage_accounts.predecessor.forEach(value => add('Cuenta histórica', value))
+  add('Símbolo', strategy.symbol)
+  strategy.magic_numbers.forEach(value => add('Magic Number', value))
+  strategy.historical_magic_numbers.forEach(value => add('Magic Number histórico', value))
+  strategy.deployments.forEach(deployment => {
+    add('Archivo .ex5', deployment.ex5_name)
+    add('Cuenta', deployment.account_login)
+    add('Símbolo', deployment.symbol)
+    add('Magic Number', deployment.magic)
+  })
+  detail?.mappings.forEach(mapping => {
+    add('Comentario mapeado', mapping.comment_pattern)
+    add('Cuenta', mapping.account_login)
+    add('Símbolo', mapping.symbol)
+    add(mapping.role === 'historical' ? 'Magic Number histórico' : 'Magic Number', mapping.magic)
+  })
+  detail?.trades.forEach(trade => {
+    add('Comentario observado', trade.comment)
+    add('Comentario de salida', trade.exit_comment)
+    add('Cuenta', trade.source_account)
+    add('Símbolo', trade.symbol)
+    add(trade.source_role === 'historical' ? 'Magic Number histórico' : 'Magic Number', trade.magic)
+  })
+  return <details className="drawer-section drawer-collapsible strategy-identifiers">
+    <summary className="drawer-collapsible-summary"><span className="eyebrow">IDENTIFICADORES ENCONTRADOS</span><span className="drawer-collapsible-chevron" aria-hidden="true">⌄</span></summary>
+    {strategy.identity_conflicts.length > 0 && <p className="note-status error">Conflicto de identidad: hay {strategy.identity_conflicts.length} identidades operativas registradas. El historial normal usa sólo la identidad principal.</p>}
+    <div className="strategy-identifier-list">{[...identifiers].map(([label, values]) => <div key={label}><strong>{label}</strong><span>{[...values].join(' · ')}</span></div>)}</div>
+  </details>
+}
+
+function StrategyNoteEditor({ strategy, onSaved, placement, onGuide }: { strategy: Strategy; onSaved: NoteSavedHandler; placement: 'drawer' | 'detail'; onGuide?: (guide: DetailGuideId) => void }) {
   const [draft, setDraft] = useState(strategy.note || '')
   const [savedNote, setSavedNote] = useState(strategy.note || '')
   const [saving, setSaving] = useState(false)
@@ -580,14 +820,21 @@ function StrategyNoteEditor({ strategy, onSaved, placement }: { strategy: Strate
     ? `Last saved ${new Date(strategy.note_updated_at).toLocaleString('en-US')}`
     : 'Not saved yet'
   return <section className={`${placement === 'detail' ? 'panel ' : 'drawer-section '}strategy-note strategy-note-${placement}`}>
-    <div className="strategy-note-heading"><div><span className="eyebrow">STRATEGY NOTES</span><small>{updatedLabel}</small></div><span className={status && status !== 'Saved' ? 'note-status error' : 'note-status'}>{status}</span></div>
+    <div className="strategy-note-heading"><div><span className="eyebrow">STRATEGY NOTES</span><small>{updatedLabel}</small></div><div className="panel-heading-actions">{onGuide && <GuideButton guide="notes" onOpen={onGuide} />}<span className={status && status !== 'Saved' ? 'note-status error' : 'note-status'}>{status}</span></div></div>
     <textarea aria-label="Strategy notes" maxLength={10000} rows={placement === 'drawer' ? 5 : 6} placeholder="Add observations, follow-ups, or decisions for this strategy…" value={draft} onChange={event => { setDraft(event.target.value); setStatus('') }} />
     <div className="strategy-note-actions"><small>{draft.length.toLocaleString()} / 10,000</small><button className="button primary" type="button" disabled={!changed || saving} onClick={save}>{saving ? 'Saving…' : 'Save note'}</button></div>
   </section>
 }
 
-function MagicNumbersPanel({ strategy, mappings, placement = 'detail' }: {
-  strategy: Strategy; mappings?: StrategyDetails['mappings']; placement?: 'detail' | 'drawer'
+function DrawerMagicNumbers({ entries }: { entries: Array<{ magic: number; roles: string[]; mappings: StrategyDetails['mappings'] }> }) {
+  return <details className="drawer-section drawer-collapsible magic-numbers-panel">
+    <summary className="drawer-collapsible-summary"><div className="magic-numbers-heading"><div><span className="eyebrow">MAGIC NUMBERS</span><h2>{entries.length ? `${entries.length} registered` : 'No registered MN'}</h2></div></div><span className="drawer-collapsible-chevron" aria-hidden="true">⌄</span></summary>
+    <div className="drawer-collapsible-content">{entries.length ? <div className="magic-number-list">{entries.map(entry => <div className="magic-number-entry" key={entry.magic}><strong>{entry.magic}</strong><span>{entry.roles.join(' + ')}</span>{entry.mappings.length ? <small>{entry.mappings.map(mapping => [mapping.symbol, mapping.account_login, mapping.comment_pattern || 'No comment'].filter(Boolean).join(' · ')).join(' / ')}</small> : null}</div>)}</div> : <div className="drawer-empty">No live or historical mappings have a Magic Number.</div>}</div>
+  </details>
+}
+
+function MagicNumbersPanel({ strategy, mappings, placement = 'detail', onGuide }: {
+  strategy: Strategy; mappings?: StrategyDetails['mappings']; placement?: 'detail' | 'drawer'; onGuide?: (guide: DetailGuideId) => void
 }) {
   const fallback = [
     ...strategy.magic_numbers.map(magic => ({ magic, roles: ['Live'], mappings: [] as StrategyDetails['mappings'] })),
@@ -603,9 +850,9 @@ function MagicNumbersPanel({ strategy, mappings, placement = 'detail' }: {
     grouped.set(mapping.magic, current)
   }
   const entries = [...grouped.values()].sort((left, right) => left.magic - right.magic)
-  const className = placement === 'drawer' ? 'drawer-section magic-numbers-panel' : 'panel magic-numbers-panel'
-  return <section className={className}>
-    <div className="magic-numbers-heading"><div><span className="eyebrow">MAGIC NUMBERS</span><h2>{entries.length ? `${entries.length} registered` : 'No registered MN'}</h2></div></div>
+  if (placement === 'drawer') return <DrawerMagicNumbers entries={entries} />
+  return <section className="panel magic-numbers-panel">
+    <div className="magic-numbers-heading"><div><span className="eyebrow">MAGIC NUMBERS</span><h2>{entries.length ? `${entries.length} registered` : 'No registered MN'}</h2></div>{onGuide && <GuideButton guide="magic-numbers" onOpen={onGuide} />}</div>
     {entries.length ? <div className="magic-number-list">{entries.map(entry => <div className="magic-number-entry" key={entry.magic}><strong>{entry.magic}</strong><span>{entry.roles.join(' + ')}</span>{entry.mappings.length ? <small>{entry.mappings.map(mapping => [mapping.symbol, mapping.account_login, mapping.comment_pattern || 'No comment'].filter(Boolean).join(' · ')).join(' / ')}</small> : null}</div>)}</div> : <div className="drawer-empty">No live or historical mappings have a Magic Number.</div>}
   </section>
 }
@@ -614,32 +861,48 @@ function StrategyDetail({ strategy, onDeleted, onNoteSaved }: { strategy: Strate
   const m = strategy.metrics
   const lifetime = strategy.lifetime_metrics
   const [baselineId, setBaselineId] = useState('')
+  const [activeGuide, setActiveGuide] = useState<DetailGuideId | null>(null)
   useEffect(() => setBaselineId(''), [strategy.id])
   const b = strategy.baselines.find(item => `${item.source}:${item.sample_type}:${item.synced_at}` === baselineId) || strategy.baseline
-  return <div className="detail-grid">
+  return <div className={`detail-workbench ${activeGuide ? 'guide-open' : ''}`}>
+    <div className="detail-grid">
     <section className="panel strategy-hero">
-      <div className="strategy-title"><div><span className="symbol-pill">{strategy.symbol}</span><h2>{displayName(strategy)}</h2><p>{strategy.sqx_name}{strategy.sqx ? ` · ${strategy.sqx.project} / ${strategy.sqx.databank} · ${strategy.sqx.timeframe}` : ''}</p></div><div className={`health-badge ${strategy.health.status}`}><HealthDot status={strategy.health.status}/>{healthLabel(strategy.health.status)}</div></div>
+      <div className="strategy-title"><div><span className="symbol-pill">{strategy.symbol}</span><h2>{displayName(strategy)}</h2><p>{strategy.sqx_name}{strategy.sqx ? ` · ${strategy.sqx.project} / ${strategy.sqx.databank} · ${strategy.sqx.timeframe}` : ''}</p></div><div className="panel-heading-actions"><GuideButton guide="summary" onOpen={setActiveGuide} /><div className={`health-badge ${strategy.health.status}`}><HealthDot status={strategy.health.status}/>{healthLabel(strategy.health.status)}</div></div></div>
       <MissingSqxNotice strategy={strategy} onDeleted={onDeleted} />
       <ArchiveStrategyNotice strategy={strategy} onArchived={onDeleted} />
       <div className="hero-stats"><div><span>Realized P/L</span><strong>{money(m.net_profit)}</strong></div><div><span>Floating P/L</span><strong>{money(m.floating_profit)}</strong></div><div><span>Trades</span><strong>{m.trades}</strong></div><div><span>Positions</span><strong>{m.open_positions}</strong></div></div>
       <div className="reason-list">{strategy.health.reasons.map(reason => <span key={reason}>{reason}</span>)}{!strategy.health.reasons.length && <span>No active alerts</span>}</div>
     </section>
+    <DeploymentStatusPanel strategy={strategy} onGuide={setActiveGuide} />
     <section className="panel comparison-panel">
-      <div className="panel-heading"><div><span className="eyebrow">BEHAVIOR</span><h2>Current vs. {b?.sample_type?.toUpperCase() || 'baseline'}</h2></div><select className="baseline-select" value={b ? `${b.source}:${b.sample_type}:${b.synced_at}` : ''} onChange={event => setBaselineId(event.target.value)}>{strategy.baselines.map(item => <option key={`${item.source}:${item.sample_type}:${item.synced_at}`} value={`${item.source}:${item.sample_type}:${item.synced_at}`}>{item.source} · {item.sample_type.toUpperCase()} · {new Date(item.synced_at).toLocaleDateString()}</option>)}</select></div>
+      <div className="panel-heading"><div><span className="eyebrow">BEHAVIOR</span><h2>Observed history vs. {b?.sample_type?.toUpperCase() || 'baseline'}</h2></div><div className="panel-heading-actions"><GuideButton guide="comparison" onOpen={setActiveGuide} /><select className="baseline-select" value={b ? `${b.source}:${b.sample_type}:${b.synced_at}` : ''} onChange={event => setBaselineId(event.target.value)}>{strategy.baselines.map(item => <option key={`${item.source}:${item.sample_type}:${item.synced_at}`} value={`${item.source}:${item.sample_type}:${item.synced_at}`}>{item.source} · {item.sample_type.toUpperCase()} · {new Date(item.synced_at).toLocaleDateString()}</option>)}</select></div></div>
       <div className="comparison-head"><span>KPI</span><span>Current</span><span>Backtest</span><span>Δ</span></div>
       <Comparison label="Profit factor" current={m.profit_factor} baseline={baselineValue(b, 'ProfitFactor')} />
       <Comparison label="Expectancy" current={m.expectancy} baseline={baselineValue(b, 'Expectancy')} format={money} />
       <Comparison label="Return / DD" current={m.return_dd} baseline={baselineValue(b, 'ReturnDDRatio', 'RetDD')} />
       <Comparison label="SQN" current={m.sqn} baseline={baselineValue(b, 'SQN')} />
       <Comparison label="Trades / month" current={m.trades_per_month} baseline={baselineValue(b, 'AvgTradesPerMonth')} />
-      <Comparison label="Max drawdown" current={m.max_drawdown} baseline={baselineValue(b, 'MaxDD', 'Drawdown')} format={money} />
+      <Comparison label="Max drawdown" current={m.max_drawdown} baseline={baselineValue(b, 'MaxDD', 'Drawdown', 'max_drawdown')} format={money} />
     </section>
-    <MagicNumbersPanel strategy={strategy} />
-    <StrategyNoteEditor strategy={strategy} onSaved={onNoteSaved} placement="detail" />
-    <section className="panel compact-metrics"><div><span>Win rate</span><strong>{(m.win_rate * 100).toFixed(1)}%</strong></div><div><span>Average duration</span><strong>{duration(m.avg_duration_seconds)}</strong></div><div><StreakPair metrics={lifetime} /></div><div><span>Average win</span><strong>{money(m.avg_win)}</strong></div><div><span>Average loss</span><strong>{money(m.avg_loss)}</strong></div><div><span>Commission + swap</span><strong>{money(m.commissions + m.swaps)}</strong></div></section>
-    <SQXAnalyticsPanel strategy={strategy} />
-    <RiskGuardPanel risk={strategy.risk_guard} />
+    <MagicNumbersPanel strategy={strategy} onGuide={setActiveGuide} />
+    <StrategyNoteEditor strategy={strategy} onSaved={onNoteSaved} placement="detail" onGuide={setActiveGuide} />
+    <section className="panel compact-metrics"><div className="compact-metrics-heading"><span className="eyebrow">OPERATING METRICS</span><GuideButton guide="metrics" onOpen={setActiveGuide} /></div><div><span>Win rate</span><strong>{(m.win_rate * 100).toFixed(1)}%</strong></div><div><span>Average duration</span><strong>{duration(m.avg_duration_seconds)}</strong></div><div><StreakPair metrics={lifetime} /></div><div><span>Average win</span><strong>{money(m.avg_win)}</strong></div><div><span>Average loss</span><strong>{money(m.avg_loss)}</strong></div><div><span>Commission + swap</span><strong>{money(m.commissions + m.swaps)}</strong></div></section>
+    <SQXAnalyticsPanel strategy={strategy} onGuide={setActiveGuide} />
+    <RiskGuardPanel risk={strategy.risk_guard} onGuide={setActiveGuide} />
+    <BacktestRiskAudit strategy={strategy} onGuide={setActiveGuide} />
+    </div>
+    {activeGuide && <DetailGuidePanel guide={activeGuide} onClose={() => setActiveGuide(null)} />}
   </div>
+}
+
+function DeploymentStatusPanel({ strategy, onGuide }: { strategy: Strategy; onGuide: (guide: DetailGuideId) => void }) {
+  const deployment = strategy.deployments[0]
+  if (!deployment) return <section className="panel deployment-detail"><span className="eyebrow">VPS DEPLOYMENT</span><h2>Sin inventario VPS</h2><p className="help">No hay evidencia de que este EA esté adjunto a una terminal VPS real.</p></section>
+  return <section className="panel deployment-detail">
+    <div className="panel-heading"><div><span className="eyebrow">VPS DEPLOYMENT</span><h2>{deploymentLabels[strategy.deployment_state || 'observed']}</h2></div><GuideButton guide="deployment" onOpen={onGuide} /></div>
+    <div className="deployment-detail-badges"><span className={`deployment-badge ${strategy.deployment_state || 'observed'}`}>{deploymentLabels[strategy.deployment_state || 'observed']}</span><span className={`activity-badge ${strategy.activity_state}`}>{activityLabels[strategy.activity_state]}</span></div>
+    <dl><div><dt>Cuenta</dt><dd>{deployment.account_login}</dd></div><div><dt>Terminal</dt><dd>{deployment.server}</dd></div><div><dt>Chart</dt><dd>{deployment.symbol} · {deployment.timeframe || '—'}</dd></div><div><dt>Magic</dt><dd>{deployment.magic ?? 'Desconocido'}</dd></div><div><dt>Última operación</dt><dd>{deployment.last_trade_at ? new Date(deployment.last_trade_at).toLocaleString() : 'Sin operaciones registradas'}</dd></div><div><dt>Último inventario</dt><dd>{new Date(deployment.observed_at).toLocaleString()}</dd></div></dl>
+  </section>
 }
 
 function DrawerMetric({ label, value, detail, tone = '', dotStatus }: { label: string; value: string; detail: string; tone?: string; dotStatus?: string }) {
@@ -676,7 +939,7 @@ function EquitySparkline({ points }: { points: StrategyDetails['equity_curve'] }
   </div>
 }
 
-function StrategySidePanel({ strategy, query, onClose, onDeleted, onNoteSaved }: { strategy: Strategy; query: string; onClose: () => void; onDeleted: (strategyId: number) => void; onNoteSaved: NoteSavedHandler }) {
+function StrategySidePanel({ strategy, query, onClose, onDeleted, onNoteSaved, onDisplayNameSaved }: { strategy: Strategy; query: string; onClose: () => void; onDeleted: (strategyId: number) => void; onNoteSaved: NoteSavedHandler; onDisplayNameSaved: DisplayNameSavedHandler }) {
   const [detail, setDetail] = useState<StrategyDetails | null>(null)
   const [error, setError] = useState('')
   useEffect(() => {
@@ -692,7 +955,6 @@ function StrategySidePanel({ strategy, query, onClose, onDeleted, onNoteSaved }:
   const active = detail || strategy
   const m = active.metrics
   const historical = active.historical_metrics
-  const lifetime = active.lifetime_metrics
   const history = detail ? [...detail.trades].reverse().slice(0, 80) : []
   return <aside className="strategy-drawer" aria-label="Quick strategy statistics">
     <div className="drawer-header">
@@ -708,10 +970,10 @@ function StrategySidePanel({ strategy, query, onClose, onDeleted, onNoteSaved }:
         setDetail(current => current ? { ...current, note, note_updated_at: noteUpdatedAt } : current)
         onNoteSaved(strategyId, note, noteUpdatedAt)
       }} />
-      {detail && <MagicNumbersPanel strategy={active} mappings={detail.mappings} placement="drawer" />}
       <div className="drawer-stat-grid">
-        <DrawerMetric label="Lifetime P/L" value={signedMoney(lifetime.net_profit)} detail={`${lifetime.trades} total trades`} tone={lifetime.net_profit >= 0 ? 'positive' : 'negative'} />
-        <DrawerMetric label="Current P/L" value={signedMoney(m.net_profit)} detail={`${m.trades} live-account trades | Exp ${money(m.expectancy)}`} tone={m.net_profit >= 0 ? 'positive' : 'negative'} />
+        <DrawerMetric label="Realized P/L" value={signedMoney(m.net_profit)} detail={`${m.trades} combined trades | Exp ${money(m.expectancy)}`} tone={m.net_profit >= 0 ? 'positive' : 'negative'} />
+        <DrawerMetric label="Floating P/L" value={signedMoney(m.floating_profit)} detail={`${m.open_positions} open position${m.open_positions === 1 ? '' : 's'}`} tone={m.floating_profit >= 0 ? 'positive' : 'negative'} />
+        <DrawerMetric label="Accumulated P/L %" value={signedPercent(active.account_pl_percent)} detail={active.account_balance == null ? 'No active-account balance snapshot' : `Combined P/L + floating / current ${money(active.account_balance)} balance`} tone={(active.account_pl_percent ?? 0) >= 0 ? 'positive' : 'negative'} />
         <DrawerMetric label="Historical P/L" value={signedMoney(historical.net_profit)} detail={`${historical.trades} imported/old-account trades`} tone={historical.net_profit >= 0 ? 'positive' : 'negative'} />
         <DrawerMetric label="Health" value={healthLabel(active.health.status)} detail={active.health.reasons.join(', ') || 'No active alerts'} tone={`status-${active.health.status}`} dotStatus={active.health.status} />
         <DrawerMetric label="Today" value={signedMoney(m.today_profit)} detail={`${m.today_trades} trades today`} tone={m.today_profit >= 0 ? 'positive' : 'negative'} />
@@ -723,11 +985,11 @@ function StrategySidePanel({ strategy, query, onClose, onDeleted, onNoteSaved }:
         <DrawerMetric label="Avg. dur." value={duration(m.avg_duration_seconds)} detail="Average time per trade" />
         <DrawerMetric label="Best trade" value={signedMoney(m.best_trade)} detail="Closed trade" tone={(m.best_trade || 0) >= 0 ? 'positive' : 'negative'} />
         <DrawerMetric label="Worst trade" value={signedMoney(m.worst_trade)} detail="Closed trade" tone={(m.worst_trade || 0) >= 0 ? 'positive' : 'negative'} />
-        <div className="drawer-card streak-card"><StreakPair metrics={lifetime} /></div>
+        <div className="drawer-card streak-card"><StreakPair metrics={m} /></div>
       </div>
       <section className={`drawer-section drawer-risk ${active.risk_guard.status}`}>
         <div className="drawer-section-title"><span className="eyebrow">RISK GUARD</span><span className={`risk-verdict ${active.risk_guard.stop_recommended ? 'stop' : active.risk_guard.status}`}>{active.risk_guard.stop_recommended ? 'Stop recommended' : active.risk_guard.status === 'gray' ? 'Not evaluated' : active.risk_guard.status === 'yellow' ? 'Attention' : 'Within limits'}</span></div>
-        <div className="drawer-risk-live"><span>Current losing streak <strong>{active.risk_guard.live.current_consecutive_losses}</strong></span><span>Max DD <strong>{money(active.risk_guard.live.max_drawdown)}</strong></span></div>
+        <div className="drawer-risk-live"><span>Combined losing streak <strong>{active.risk_guard.live.current_consecutive_losses}</strong></span><span>Max DD <strong>{money(active.risk_guard.live.max_drawdown)}</strong></span></div>
         {(['is', 'oos'] as const).map(sample => <div className="drawer-risk-row" key={sample}>
           <strong>{sample.toUpperCase()}</strong>
           <span>DD: {riskCheckLabel(active.risk_guard.checks[sample].drawdown)}</span>
@@ -738,6 +1000,12 @@ function StrategySidePanel({ strategy, query, onClose, onDeleted, onNoteSaved }:
         <div className="drawer-section-title"><span className="eyebrow">EQUITY CURVE</span></div>
         <EquitySparkline points={detail?.equity_curve || []} />
       </section>
+      <StrategyDisplayNameEditor strategy={active} onSaved={(strategyId, displayName, source) => {
+        setDetail(current => current ? { ...current, display_name: displayName, display_name_source: source } : current)
+        onDisplayNameSaved(strategyId, displayName, source)
+      }} />
+      {detail && <MagicNumbersPanel key={`magic-numbers-${strategy.id}`} strategy={active} mappings={detail.mappings} placement="drawer" />}
+      <StrategyIdentifiers key={`identifiers-${strategy.id}`} strategy={active} detail={detail} />
       <section className="drawer-section drawer-history">
         <div className="drawer-section-title"><span className="eyebrow">HISTORY ({detail?.trades.length || 0})</span></div>
         {history.length ? <table className="drawer-table"><thead><tr><th>Close</th><th>Acct.</th><th>Sym.</th><th>Dir.</th><th>Lots</th><th>Net P/L</th><th>Dur.</th></tr></thead><tbody>{history.map(trade => <tr key={`${trade.terminal_id}-${trade.deal_ticket}`}><td>{new Date(trade.close_time_msc).toLocaleString('en-US', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</td><td><span className={`trade-source ${trade.source_role || 'live'}`}>{trade.source_account || 'Live'}</span></td><td>{trade.symbol}</td><td>{directionLabel(trade.direction)}</td><td>{trade.volume.toFixed(2)}</td><td className={trade.net_profit >= 0 ? 'value-good' : 'value-bad'}>{signedMoney(trade.net_profit)}</td><td>{tradeDuration(trade.open_time_msc, trade.close_time_msc)}</td></tr>)}</tbody></table> : <div className="drawer-empty">{detail ? 'No history for this window.' : 'Loading history…'}</div>}
@@ -758,7 +1026,7 @@ function metricNumber(metrics: Record<string, unknown> | undefined, key: string)
 
 function Backtests({ strategies, initialStrategyId, onCompleted }: { strategies: Strategy[]; initialStrategyId: number | null; onCompleted: () => void }) {
   const [strategyId, setStrategyId] = useState(initialStrategyId || strategies[0]?.id || 0)
-  const [profile, setProfile] = useState<'reference' | 'sqx'>('reference')
+  const [profile, setProfile] = useState<'reference' | 'sqx' | 'darwinex'>('darwinex')
   const [form, setForm] = useState<BacktestDefaults | null>(null)
   const [runs, setRuns] = useState<BacktestRun[]>([])
   const [notice, setNotice] = useState('')
@@ -853,7 +1121,7 @@ function Backtests({ strategies, initialStrategyId, onCompleted }: { strategies:
     try {
       await api('/api/backtests/batches', {
         method: 'POST',
-        body: JSON.stringify({ model: batchModel, policy: 'strict' }),
+        body: JSON.stringify({ model: batchModel, policy: 'strict', broker: 'Darwinex' }),
       })
       setNotice('Validation batch created.')
       await loadAutomation()
@@ -911,7 +1179,8 @@ function Backtests({ strategies, initialStrategyId, onCompleted }: { strategies:
       <div className="backtest-control-head">
         <div><span className="eyebrow">MT5 STRATEGY TESTER</span><h2>New backtest</h2></div>
         <div className="profile-switch" aria-label="Configuration source">
-          <button className={profile === 'reference' ? 'active' : ''} onClick={() => setProfile('reference')}>Reference</button>
+          <button className={profile === 'darwinex' ? 'active' : ''} onClick={() => setProfile('darwinex')}>Darwinex</button>
+          <button className={profile === 'reference' ? 'active' : ''} onClick={() => setProfile('reference')}>FPM reference</button>
           <button className={profile === 'sqx' ? 'active' : ''} onClick={() => setProfile('sqx')}>SQX period</button>
         </div>
       </div>
@@ -957,7 +1226,7 @@ function Backtests({ strategies, initialStrategyId, onCompleted }: { strategies:
   </div>
 }
 
-function Settings({ reload }: { reload: () => void }) {
+function Settings({ reload, aliases: savedAliases, onAliasesSaved }: { reload: () => void; aliases: Record<string, string>; onAliasesSaved: (aliases: Record<string, string>) => void }) {
   const [dataDir, setDataDir] = useState('')
   const [terminalName, setTerminalName] = useState('New terminal')
   const [project, setProject] = useState('Retester')
@@ -969,7 +1238,11 @@ function Settings({ reload }: { reload: () => void }) {
   const [mappingChoices, setMappingChoices] = useState<Record<number, number>>({})
   const [deploymentSuggestions, setDeploymentSuggestions] = useState<Array<{deployment_id:number;name:string;account_login:string;symbol:string;safe:boolean;candidates:Array<{canonical_id:number;name:string;score:number;evidence:string[]}>}>>([])
   const [deploymentChoices, setDeploymentChoices] = useState<Record<number, number>>({})
+  const [inventoryCandidates, setInventoryCandidates] = useState<Array<{id:number;account_login:string;server:string;symbol:string;timeframe:string;ex5_name:string;magic:number|null;observed_at:string;candidates:Array<{strategy_id:number;name:string;confidence:number;evidence:string[]}>}>>([])
+  const [inventoryChoices, setInventoryChoices] = useState<Record<number, number>>({})
   const [rules, setRules] = useState<Record<string, number>>({})
+  const [accountAliases, setAccountAliases] = useState<Record<string, string>>(savedAliases)
+  const [aliasAccounts, setAliasAccounts] = useState<string[]>([])
   useEffect(() => {
     api<Record<string,number>>('/api/alerts').then(setRules).catch(() => undefined)
     api<{available:boolean;details?:{app_version?:string}}>('/api/sqx/status')
@@ -978,7 +1251,11 @@ function Settings({ reload }: { reload: () => void }) {
     api<Record<string, Array<{name:string;records:number;view:string}>>>('/api/sqx/databanks')
       .then(setSqxDatabanks)
       .catch(() => undefined)
+    api<AccountAliasSettings>('/api/settings/account-aliases')
+      .then(result => { setAliasAccounts(result.accounts); setAccountAliases(result.aliases) })
+      .catch(() => undefined)
   }, [])
+  useEffect(() => { setAccountAliases(savedAliases) }, [savedAliases])
   async function addTerminal() {
     try { await api('/api/terminals', { method: 'POST', body: JSON.stringify({ name: terminalName, data_dir: dataDir }) }); setNotice('Terminal registered.'); reload() }
     catch (error) { setNotice(error instanceof Error ? error.message : 'Error') }
@@ -998,6 +1275,25 @@ function Settings({ reload }: { reload: () => void }) {
     setMappingSuggestions(result)
     setMappingChoices(Object.fromEntries(result.map((item, index) => [index, item.candidates[0]?.strategy_id || 0])))
     setNotice(`${result.length} trade groups need review.`)
+  }
+  async function scanInventory() {
+    const result = await api<{imported:number;skipped:number;failed:number}>('/api/bot-inventory/scan', { method: 'POST' })
+    setNotice(`Inventarios VPS: ${result.imported} nuevos · ${result.skipped} ya importados · ${result.failed} con error.`)
+    await loadInventoryCandidates(); reload()
+  }
+  async function loadInventoryCandidates() {
+    const result = await api<typeof inventoryCandidates>('/api/bot-inventory/candidates')
+    setInventoryCandidates(result)
+    setInventoryChoices(Object.fromEntries(result.map((item, index) => [index, item.candidates[0]?.strategy_id || 0])))
+    setNotice(`${result.length} despliegues VPS necesitan revisión.`)
+  }
+  async function confirmInventoryCandidate(index: number) {
+    const item = inventoryCandidates[index]
+    const strategyId = inventoryChoices[index]
+    if (!strategyId) { setNotice('Selecciona una estrategia SQX.'); return }
+    await api(`/api/bot-inventory/deployments/${item.id}/confirm`, { method: 'POST', body: JSON.stringify({ strategy_id: strategyId }) })
+    setNotice('Despliegue VPS vinculado.')
+    await loadInventoryCandidates(); reload()
   }
   async function loadDeploymentSuggestions() {
     const result = await api<typeof deploymentSuggestions>('/api/strategy-identities/deployment-suggestions')
@@ -1039,16 +1335,34 @@ function Settings({ reload }: { reload: () => void }) {
     await api('/api/alerts', { method: 'PUT', body: JSON.stringify(rules) })
     setNotice('Global thresholds saved.'); reload()
   }
+  async function saveAccountAliases() {
+    try {
+      const result = await api<AccountAliasSettings>('/api/settings/account-aliases', {
+        method: 'PUT', body: JSON.stringify({ aliases: accountAliases }),
+      })
+      setAliasAccounts(result.accounts)
+      setAccountAliases(result.aliases)
+      onAliasesSaved(result.aliases)
+      setNotice('Aliases de cuentas guardados.')
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'No se pudieron guardar los aliases.')
+    }
+  }
   return <div className="settings-grid">
     <section className="panel"><span className="eyebrow">MT5 SOURCES</span><h2>Register terminal</h2><p className="help">Each terminal needs its DataDir and the DashboardBridge service running.</p><label>Name<input value={terminalName} onChange={e => setTerminalName(e.target.value)} /></label><label>DataDir<input placeholder="C:\Users\…\MetaQuotes\Terminal\HASH" value={dataDir} onChange={e => setDataDir(e.target.value)} /></label><button className="button primary" onClick={addTerminal}>Save terminal</button></section>
     <section className="panel"><span className="eyebrow">HISTORY</span><h2>Sync SQX</h2><p className="help">{sqxStatus}. Previous snapshots remain available after SQX closes.</p><label>Project<select value={project} onChange={e => { setProject(e.target.value); setDatabank(sqxDatabanks[e.target.value]?.[0]?.name || '') }}>{Object.keys(sqxDatabanks).length ? Object.keys(sqxDatabanks).map(value => <option key={value} value={value}>{value}</option>) : <option value={project}>{project}</option>}</select></label><label>Databank<select value={databank} onChange={e => setDatabank(e.target.value)}>{sqxDatabanks[project]?.length ? sqxDatabanks[project].map(value => <option key={value.name} value={value.name}>{value.name} · {value.records} strategies</option>) : <option value={databank}>{databank}</option>}</select></label><button className="button primary" onClick={syncSqx}>Read-only sync</button></section>
-    <section className="panel settings-wide"><span className="eyebrow">CATALOG AND MAPPINGS</span><h2>Maintenance</h2><div className="maintenance-actions"><button className="button" onClick={async () => { await api('/api/catalog/import', { method: 'POST' }); setNotice('Catalog reloaded.'); reload() }}>Reload Track_v1.xlsx</button><a className="button export-button" href="/api/catalog/export">Exportar Excel</a><button className="button primary" onClick={autoConfirmMappings}>Link safe matches</button><button className="button" onClick={loadMappings}>Find suggested links</button><button className="button primary" onClick={autoLinkDeployments}>Link safe SQX identities</button><button className="button" onClick={loadDeploymentSuggestions}>Review SQX identities</button></div>
+    <section className="panel settings-wide"><span className="eyebrow">CATALOG AND MAPPINGS</span><h2>Maintenance</h2><div className="maintenance-actions"><button className="button" onClick={async () => { await api('/api/catalog/import', { method: 'POST' }); setNotice('Catalog reloaded.'); reload() }}>Reload Track_v1.xlsx</button><a className="button export-button" href="/api/catalog/export">Exportar Excel</a><button className="button primary" onClick={scanInventory}>Importar inventarios VPS</button><button className="button" onClick={loadInventoryCandidates}>Revisar despliegues VPS</button><button className="button primary" onClick={autoConfirmMappings}>Link safe matches</button><button className="button" onClick={loadMappings}>Find suggested links</button><button className="button primary" onClick={autoLinkDeployments}>Link safe SQX identities</button><button className="button" onClick={loadDeploymentSuggestions}>Review SQX identities</button></div>
+      {inventoryCandidates.length > 0 && <div className="mapping-review"><div className="mapping-review-head"><span>Despliegue VPS</span><span>Estrategia SQX</span><span>Evidencia</span><span /></div>{inventoryCandidates.map((item,index) => {
+        const selected = item.candidates.find(candidate => candidate.strategy_id === inventoryChoices[index])
+        return <div className="mapping-review-row" key={`inventory-${item.id}`}><div><strong>{item.account_login} · {item.symbol} · {item.timeframe || '—'}</strong><small>{item.ex5_name} · MN {item.magic ?? 'desconocido'} · {item.server}</small></div><select value={inventoryChoices[index] || ''} onChange={event => setInventoryChoices({...inventoryChoices,[index]:Number(event.target.value)})}><option value="">Seleccionar…</option>{item.candidates.map(candidate => <option key={candidate.strategy_id} value={candidate.strategy_id}>{candidate.name}</option>)}</select><span>{selected ? `${Math.round(selected.confidence * 100)}% · ${selected.evidence.join(', ')}` : '—'}</span><button className="button" onClick={() => confirmInventoryCandidate(index)}>Confirmar vínculo</button></div>
+      })}</div>}
       {mappingSuggestions.length > 0 && <div className="mapping-review"><div className="mapping-review-head"><span>Observed trade</span><span>Proposed strategy</span><span>Confidence</span><span /></div>{mappingSuggestions.map((item,index) => <div className="mapping-review-row" key={`${item.terminal_id}-${item.magic}-${item.symbol}-${item.comment}`}><div><strong>{item.symbol} · magic {item.magic}</strong><small>{item.comment || 'No comment'} · {item.deal_count} deals</small></div><select value={mappingChoices[index] || ''} onChange={event => setMappingChoices({...mappingChoices,[index]:Number(event.target.value)})}><option value="">Select…</option>{item.candidates.map(candidate => <option key={candidate.strategy_id} value={candidate.strategy_id}>{candidate.name}</option>)}</select><span>{item.candidates.find(candidate => candidate.strategy_id === mappingChoices[index])?.score ? `${Math.round((item.candidates.find(candidate => candidate.strategy_id === mappingChoices[index])?.score || 0) * 100)}%` : '—'}</span><button className="button" onClick={() => confirmSuggestion(index)}>Confirm</button></div>)}</div>}
       {deploymentSuggestions.length > 0 && <div className="mapping-review"><div className="mapping-review-head"><span>MT5 deployment</span><span>Canonical SQX identity</span><span>Evidence</span><span /></div>{deploymentSuggestions.map((item,index) => {
         const selectedCandidate = item.candidates.find(candidate => candidate.canonical_id === deploymentChoices[index])
         return <div className="mapping-review-row" key={`deployment-${item.deployment_id}`}><div><strong>{item.symbol} · {item.account_login || 'No account'}</strong><small>{item.name}</small></div><select value={deploymentChoices[index] || ''} onChange={event => setDeploymentChoices({...deploymentChoices,[index]:Number(event.target.value)})}><option value="">Select…</option>{item.candidates.map(candidate => <option key={candidate.canonical_id} value={candidate.canonical_id}>{candidate.name}</option>)}</select><span>{selectedCandidate ? `${Math.round(selectedCandidate.score * 100)}% · ${selectedCandidate.evidence.join(', ')}` : '—'}</span><button className="button" onClick={() => confirmDeployment(index)}>Attach</button></div>
       })}</div>}
     </section>
+    <section className="panel settings-wide"><span className="eyebrow">ACCOUNTS</span><h2>Account aliases</h2><p className="help">Asigna un nombre corto a cada cuenta. El login MT5 se conserva como referencia.</p><div className="account-aliases">{aliasAccounts.map(account => <label key={account} className="account-alias-row"><strong>{account}</strong><input aria-label={`Alias para cuenta ${account}`} placeholder="Sin alias" value={accountAliases[account] || ''} onChange={event => setAccountAliases({ ...accountAliases, [account]: event.target.value })} /></label>)}{!aliasAccounts.length && <div className="empty-state">No hay cuentas detectadas todavía.</div>}</div><button className="button primary" onClick={saveAccountAliases}>Save aliases</button></section>
     <section className="panel settings-wide"><span className="eyebrow">HEALTH RULES</span><h2>Global thresholds</h2><div className="rules-grid">{Object.entries({min_trades:'Minimum trades',drawdown_yellow:'Yellow DD',drawdown_red:'Red DD',performance_yellow:'Yellow performance',performance_red:'Red performance',frequency_yellow_low:'Yellow frequency min.',frequency_yellow_high:'Yellow frequency max.',frequency_red_low:'Red frequency min.',frequency_red_high:'Red frequency max.'}).map(([key,label]) => <label key={key}>{label}<input type="number" step={key === 'min_trades' ? 1 : .05} value={rules[key] ?? ''} onChange={event => setRules({...rules,[key]:Number(event.target.value)})}/></label>)}</div><button className="button primary" onClick={saveRules}>Save thresholds</button></section>
     {notice && <div className="toast">{notice}</div>}
   </div>
@@ -1057,27 +1371,31 @@ function Settings({ reload }: { reload: () => void }) {
 export default function App() {
   const [data, setData] = useState<Dashboard | null>(null)
   const [journalData, setJournalData] = useState<JournalAnalysisData | null>(null)
+  const [accountAliases, setAccountAliases] = useState<Record<string, string>>({})
   const [tab, setTab] = useState<Tab>('overview')
   const [windowName, setWindowName] = useState('all')
   const [customStart, setCustomStart] = useState('')
   const [customEnd, setCustomEnd] = useState('')
   const [brokerAccounts, setBrokerAccounts] = useState<Set<string> | null>(null)
+  const [assets, setAssets] = useState<Set<string> | null>(null)
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [panelStrategyId, setPanelStrategyId] = useState<number | null>(null)
   const [query, setQuery] = useState('')
+  const [strategyIdQuery, setStrategyIdQuery] = useState('')
   const [magicQuery, setMagicQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState('all')
   const [linkFilter, setLinkFilter] = useState('all')
+  const [backtestStatusFilter, setBacktestStatusFilter] = useState<BacktestFilter>('all')
   const [sort, setSort] = useState<SortState>(null)
+  const [overviewView, setOverviewView] = useState<OverviewViewSnapshot | null>(null)
   const [error, setError] = useState('')
   const [selectionSaving, setSelectionSaving] = useState<Set<number>>(() => new Set())
   const [sidebarCollapsed, setSidebarCollapsed] = useState(readSidebarCollapsed)
   const overviewTopScrollRef = useRef<HTMLDivElement>(null)
   const overviewTableScrollRef = useRef<HTMLDivElement>(null)
   const overviewTableRef = useRef<HTMLTableElement>(null)
-  const [overviewScrollWidth, setOverviewScrollWidth] = useState(0)
-  const [overviewHasOverflow, setOverviewHasOverflow] = useState(false)
-  const dashboardQuery = useMemo(() => buildDashboardQuery(windowName, customStart, customEnd, brokerAccounts), [windowName, customStart, customEnd, brokerAccounts])
+  const restoreOverviewViewRef = useRef(false)
+  const dashboardQuery = useMemo(() => buildDashboardQuery(windowName, customStart, customEnd, brokerAccounts, assets), [windowName, customStart, customEnd, brokerAccounts, assets])
   async function load() {
     try {
       const [payload, journalPayload] = await Promise.all([
@@ -1087,6 +1405,7 @@ export default function App() {
       setData(payload)
       setJournalData(journalPayload)
       setBrokerAccounts(current => current ?? new Set([...payload.broker_accounts, ...(payload.has_unassigned_broker_account ? [UNASSIGNED_ACCOUNT] : [])]))
+      setAssets(current => current === null ? null : new Set([...current].filter(asset => payload.asset_options.some(option => option.key === asset))))
       setSelectedId(current => current ?? payload.strategies[0]?.id ?? null)
       setError('')
     }
@@ -1097,6 +1416,11 @@ export default function App() {
     await load()
     setSelectedId(null)
   }
+  useEffect(() => {
+    api<AccountAliasSettings>('/api/settings/account-aliases')
+      .then(result => setAccountAliases(result.aliases))
+      .catch(() => undefined)
+  }, [])
   function handleNoteSaved(strategyId: number, note: string, noteUpdatedAt: string) {
     setData(current => current ? {
       ...current,
@@ -1104,6 +1428,15 @@ export default function App() {
         ? { ...strategy, note, note_updated_at: noteUpdatedAt }
         : strategy),
     } : current)
+  }
+  function handleDisplayNameSaved(strategyId: number, displayName: string, source: string) {
+    setData(current => current ? {
+      ...current,
+      strategies: current.strategies.map(strategy => strategy.id === strategyId
+        ? { ...strategy, display_name: displayName, display_name_source: source }
+        : strategy),
+    } : current)
+    void load()
   }
   async function updateStrategySelection(strategyId: number, selection: boolean) {
     setData(current => current ? {
@@ -1135,15 +1468,19 @@ export default function App() {
       })
     }
   }
-  useEffect(() => { if (windowName !== 'custom' || (customStart && customEnd)) load(); const timer = setInterval(load, 300_000); return () => clearInterval(timer) }, [windowName, customStart, customEnd, brokerAccounts])
+  useEffect(() => { if (windowName !== 'custom' || (customStart && customEnd)) load(); const timer = setInterval(load, 60_000); return () => clearInterval(timer) }, [windowName, customStart, customEnd, brokerAccounts, assets])
   const allStrategies = data?.strategies || []
   const brokerAccountOptions = data?.broker_accounts || []
+  const assetOptions = data?.asset_options || []
+  const strategyIds = useMemo(() => parseStrategyIds(strategyIdQuery), [strategyIdQuery])
   const activeAccountLabel = brokerAccounts === null
-    ? 'Todos los brokers'
+    ? 'Todas las cuentas activas'
     : brokerAccounts.size === 1
       ? ([...brokerAccounts][0] === UNASSIGNED_ACCOUNT ? 'Unassigned' : `Account ${[...brokerAccounts][0]}`)
       : `${brokerAccounts.size} broker accounts`
-  const brokerFilteredStrategies = allStrategies
+  const brokerFilteredStrategies = useMemo(() => allStrategies.filter(strategy =>
+    strategyIds.size === 0 || strategyIds.has(strategy.id)
+  ), [allStrategies, strategyIds])
   useEffect(() => {
     if (!data) return
     setSelectedId(current => current && brokerFilteredStrategies.some(strategy => strategy.id === current)
@@ -1155,6 +1492,21 @@ export default function App() {
   }, [data, brokerFilteredStrategies])
   const selected = brokerFilteredStrategies.find(strategy => strategy.id === selectedId) || null
   const panelStrategy = brokerFilteredStrategies.find(strategy => strategy.id === panelStrategyId) || null
+  const filteredJournalData = useMemo(() => {
+    if (!journalData || strategyIds.size === 0) return journalData
+    const trades = journalData.trades.filter(trade => strategyIds.has(trade.strategy_id))
+    return {
+      ...journalData,
+      trades,
+      reconciliation: {
+        raw_closed_trades: trades.length,
+        attributed_trades: trades.filter(trade => trade.source_role !== 'unassigned').length,
+        unassigned_trades: trades.filter(trade => trade.source_role === 'unassigned').length,
+        displayed_trades: trades.length,
+        status: 'reconciled' as const,
+      },
+    }
+  }, [journalData, strategyIds])
   const visibleTotals = useMemo(() => {
     return data?.totals || null
   }, [data])
@@ -1165,7 +1517,8 @@ export default function App() {
     return matchesText && matchesMagic
       && (statusFilter === 'all' || strategy.state === statusFilter)
       && (linkFilter === 'all' || strategy.link_state === linkFilter)
-  }), [brokerFilteredStrategies, query, magicQuery, statusFilter, linkFilter])
+      && matchesBacktestFilter(strategy.backtest, backtestStatusFilter)
+  }), [brokerFilteredStrategies, query, magicQuery, statusFilter, linkFilter, backtestStatusFilter])
   const sortedStrategies = useMemo(() => {
     if (!sort) return filtered
     return [...filtered].sort((a, b) => compareStrategies(a, b, sort.key, sort.direction))
@@ -1176,9 +1529,6 @@ export default function App() {
     const table = overviewTableRef.current
     if (!topScroll || !tableScroll || !table) return
     const measure = () => {
-      const scrollWidth = Math.max(table.scrollWidth, tableScroll.scrollWidth)
-      setOverviewScrollWidth(scrollWidth)
-      setOverviewHasOverflow(scrollWidth > tableScroll.clientWidth + 1)
       topScroll.scrollLeft = tableScroll.scrollLeft
     }
     const observer = new ResizeObserver(measure)
@@ -1187,6 +1537,27 @@ export default function App() {
     measure()
     return () => observer.disconnect()
   }, [sidebarCollapsed, sortedStrategies.length])
+  useEffect(() => {
+    if (tab !== 'overview' || !restoreOverviewViewRef.current || !overviewView) return
+    const restore = requestAnimationFrame(() => {
+      setQuery(overviewView.query)
+      setStrategyIdQuery(overviewView.strategyIdQuery)
+      setMagicQuery(overviewView.magicQuery)
+      setStatusFilter(overviewView.statusFilter)
+      setLinkFilter(overviewView.linkFilter)
+      setBacktestStatusFilter(overviewView.backtestStatusFilter)
+      setSort(overviewView.sort)
+      if (overviewTopScrollRef.current) overviewTopScrollRef.current.scrollLeft = overviewView.tableScrollLeft
+      if (overviewTableScrollRef.current) overviewTableScrollRef.current.scrollLeft = overviewView.tableScrollLeft
+      window.scrollTo({ top: overviewView.pageScrollY })
+      restoreOverviewViewRef.current = false
+    })
+    return () => cancelAnimationFrame(restore)
+  }, [tab, overviewView])
+  useEffect(() => {
+    if (tab !== 'overview' || selectedId == null) return
+    if (!sortedStrategies.some(strategy => strategy.id === selectedId)) setSelectedId(null)
+  }, [tab, selectedId, sortedStrategies])
   function syncOverviewScroll(source: 'top' | 'table') {
     const topScroll = overviewTopScrollRef.current
     const tableScroll = overviewTableScrollRef.current
@@ -1199,6 +1570,23 @@ export default function App() {
     setSort(current => current?.key === key
       ? { key, direction: current.direction === 'ascending' ? 'descending' : 'ascending' }
       : { key, direction: 'ascending' })
+  }
+  function navigateTo(nextTab: Tab) {
+    if (tab === 'overview' && nextTab !== 'overview') {
+      setOverviewView({
+        query,
+        strategyIdQuery,
+        magicQuery,
+        statusFilter,
+        linkFilter,
+        backtestStatusFilter,
+        sort,
+        pageScrollY: window.scrollY,
+        tableScrollLeft: overviewTableScrollRef.current?.scrollLeft ?? overviewTopScrollRef.current?.scrollLeft ?? 0,
+      })
+      restoreOverviewViewRef.current = true
+    }
+    setTab(nextTab)
   }
   function toggleSidebar() {
     setSidebarCollapsed(current => {
@@ -1213,51 +1601,87 @@ export default function App() {
     <aside className="sidebar"><Logo/><nav>{([
       ['overview','Overview',LayoutDashboard],['performance','Performance',TrendingUp],['journal','Journal analysis',BookOpen],['detail','Strategy',Activity],['chart','Chart',CandlestickChart],
       ['backtests','Backtests',FlaskConical],['settings','Settings',SettingsIcon],
-    ] as const).map(([key,label,Icon]) => <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}><Icon size={15}/>{label}</button>)}</nav><div className="sidebar-footer"><div className="pulse"/><div><strong>Local system</strong><small>Refresh every 5 min</small></div></div></aside>
-    <main className={tab === 'overview' ? 'overview-main' : undefined}><header><div><span className="eyebrow">STRATEGY PORTFOLIO</span><h1>{tab === 'overview' ? 'Operational status' : tab === 'performance' ? 'Normalized performance' : tab === 'journal' ? 'Journal analysis' : tab === 'detail' ? 'Strategy detail' : tab === 'chart' ? 'Market trades' : tab === 'backtests' ? 'MT5 backtests' : 'Settings'}</h1></div><div className="header-actions"><AccountFilter accounts={brokerAccountOptions} hasUnassigned={data?.has_unassigned_broker_account || false} selected={brokerAccounts} onChange={setBrokerAccounts}/><select value={windowName} onChange={e => setWindowName(e.target.value)}><option value="30d">30 days</option><option value="90d">90 days</option><option value="all">All</option><option value="custom">Custom</option></select>{windowName === 'custom' && <><input aria-label="Start date" type="date" value={customStart} onChange={e => setCustomStart(e.target.value)}/><input aria-label="End date" type="date" value={customEnd} onChange={e => setCustomEnd(e.target.value)}/></>}<button className="button refresh icon-command" onClick={load}><RefreshCw size={14}/>Refresh</button></div></header>
+    ] as const).map(([key,label,Icon]) => <button key={key} className={tab === key ? 'active' : ''} onClick={() => navigateTo(key)}><Icon size={15}/>{label}</button>)}</nav><div className="sidebar-footer"><div className="pulse"/><div><strong>Local system</strong><small>Refresh every 5 min</small></div></div></aside>
+    <main className={tab === 'overview' ? 'overview-main' : undefined}><header><div><span className="eyebrow">STRATEGY PORTFOLIO</span><h1>{tab === 'overview' ? 'Operational status' : tab === 'performance' ? 'Normalized performance' : tab === 'journal' ? 'Journal analysis' : tab === 'detail' ? 'Strategy detail' : tab === 'chart' ? 'Market trades' : tab === 'backtests' ? 'MT5 backtests' : 'Settings'}</h1></div>{tab !== 'overview' && <div className="header-actions"><AccountFilter accounts={brokerAccountOptions} aliases={accountAliases} hasUnassigned={data?.has_unassigned_broker_account || false} selected={brokerAccounts} onChange={setBrokerAccounts}/><AssetFilter assets={assetOptions} selected={assets} onChange={setAssets}/><select value={windowName} onChange={e => setWindowName(e.target.value)}><option value="30d">30 days</option><option value="90d">90 days</option><option value="all">All</option><option value="custom">Custom</option></select>{windowName === 'custom' && <><input aria-label="Start date" type="date" value={customStart} onChange={e => setCustomStart(e.target.value)}/><input aria-label="End date" type="date" value={customEnd} onChange={e => setCustomEnd(e.target.value)}/></>}<button className="button refresh icon-command" onClick={load}><RefreshCw size={14}/>Refresh</button></div>}</header>
       {error && <div className="error-banner">{error}</div>}
       {tab === 'overview' && <>
-        <section className="metrics-grid"><MetricCard label="Realized P/L" value={money(t?.net_profit)} detail={`${t?.trades || 0} closed trades`} tone={(t?.net_profit || 0) >= 0 ? 'positive' : 'negative'}/><MetricCard label="Floating P/L" value={money(t?.floating_profit)} detail="Open positions"/><MetricCard label="Active strategies" value={`${t?.active || 0} / ${t?.strategies || 0}`} detail="Full catalog"/><MetricCard label="Critical alerts" value={`${t?.red || 0}`} detail="Red deviations" tone={t?.red ? 'negative' : 'positive'}/></section>
         <section className="terminal-strip">{data?.terminals.map(terminal => <div key={terminal.id}><HealthDot status={terminal.status === 'connected' ? 'green' : 'gray'}/><strong>{terminal.name}</strong><span>{terminal.status === 'connected' ? `Account ${terminal.account_login}` : 'Disconnected'}</span>{terminal.last_seen && <small>{new Date(terminal.last_seen).toLocaleString('en-US')}</small>}</div>)}</section>
-        <section className="panel table-panel">
+        <details className="overview-summary"><summary><span>Resumen general</span><small>Métricas e inventario VPS</small></summary><div className="overview-summary-content"><section className="metrics-grid"><MetricCard label="Realized P/L" value={money(t?.net_profit)} detail={`${t?.trades || 0} closed trades`} tone={(t?.net_profit || 0) >= 0 ? 'positive' : 'negative'}/><MetricCard label="Floating P/L" value={money(t?.floating_profit)} detail="Open positions"/><MetricCard label="Active strategies" value={`${t?.active || 0} / ${t?.strategies || 0}`} detail="Full catalog"/><MetricCard label="Critical alerts" value={`${t?.red || 0}`} detail="Red deviations" tone={t?.red ? 'negative' : 'positive'}/></section>
+        {!!data?.inventory_summary?.length && <section className="inventory-summary">{data.inventory_summary.map(item => <div className="inventory-summary-card" key={`${item.account_login}-${item.server}`}><strong>VPS {item.account_login}</strong><span>{item.server}</span><small>{item.inventoried} inventariados · {item.linked} vinculados · {item.pending} pendientes</small><small>{item.active} activos · {item.inactive} inactivos · {item.without_recent_trades} sin trades · {item.activity_undetermined} indeterminados</small><small>Último inventario: {new Date(item.last_inventory_at).toLocaleString()}</small></div>)}</section>}
+        </div></details><section className="panel table-panel">
+          <div className="overview-sticky-header">
           <div className="panel-heading">
             <div><span className="eyebrow">MONITORING</span><h2>All bots</h2></div>
-            <div className="filters"><input aria-label="Search strategies" placeholder="Search strategy or symbol…" value={query} onChange={e => setQuery(e.target.value)}/><input className="magic-filter" aria-label="Search MN" placeholder="Search MN…" value={magicQuery} onChange={e => setMagicQuery(e.target.value.replace(/\D/g, ''))}/><AccountFilter compact accounts={brokerAccountOptions} hasUnassigned={data?.has_unassigned_broker_account || false} selected={brokerAccounts} onChange={setBrokerAccounts}/><select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}><option value="all">All states</option>{Object.entries(stateLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select><select value={linkFilter} onChange={e => setLinkFilter(e.target.value)}><option value="all">All sources</option>{Object.entries(linkLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select></div>
+            <div className="filters"><input aria-label="Search strategies" placeholder="Search strategy or symbol…" value={query} onChange={e => setQuery(e.target.value)}/><input className="magic-filter" aria-label="Search MN" placeholder="Search MN…" value={magicQuery} onChange={e => setMagicQuery(e.target.value.replace(/\D/g, ''))}/><input className="strategy-id-filter" aria-label="Filtrar por ID interno" placeholder="IDs internos: 12, 34…" inputMode="numeric" value={strategyIdQuery} onChange={e => setStrategyIdQuery(e.target.value.replace(/[^\d,\s]/g, ''))}/><AccountFilter compact accounts={brokerAccountOptions} aliases={accountAliases} hasUnassigned={data?.has_unassigned_broker_account || false} selected={brokerAccounts} onChange={setBrokerAccounts}/><AssetFilter compact assets={assetOptions} selected={assets} onChange={setAssets}/><select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}><option value="all">All states</option>{Object.entries(stateLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select><select aria-label="Backtest status or audit" value={backtestStatusFilter} onChange={e => setBacktestStatusFilter(e.target.value as BacktestFilter)}><option value="all">All backtests</option><optgroup label="Backtest status">{Object.entries(backtestLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</optgroup><optgroup label="Risk audit">{Object.entries(backtestAuditFilterLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</optgroup></select><select value={linkFilter} onChange={e => setLinkFilter(e.target.value)}><option value="all">All sources</option>{Object.entries(linkLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select></div>
+            <div className="overview-global-filters"><select aria-label="Time range" value={windowName} onChange={e => setWindowName(e.target.value)}><option value="30d">30 days</option><option value="90d">90 days</option><option value="all">All</option><option value="custom">Custom</option></select>{windowName === 'custom' && <><input aria-label="Start date" type="date" value={customStart} onChange={e => setCustomStart(e.target.value)}/><input aria-label="End date" type="date" value={customEnd} onChange={e => setCustomEnd(e.target.value)}/></>}<button className="button refresh icon-command" onClick={load}><RefreshCw size={14}/>Refresh</button></div>
           </div>
-          <div ref={overviewTopScrollRef} className={`table-scroll-top${overviewHasOverflow ? '' : ' hidden'}`} aria-label="Horizontal table scroll" tabIndex={overviewHasOverflow ? 0 : -1} onScroll={() => syncOverviewScroll('top')}>
-            <div className="table-scroll-top-spacer" style={{ width: overviewScrollWidth }}/>
+          <div ref={overviewTopScrollRef} className="table-scroll-top" aria-label="Scrollable table columns" tabIndex={0} onScroll={() => syncOverviewScroll('top')}>
+            <table className="overview-table">
+              <OverviewTableColGroup />
+              <thead><OverviewTableHead sort={sort} onSort={changeSort}/></thead>
+            </table>
+          </div>
           </div>
           <div ref={overviewTableScrollRef} className="table-scroll" aria-label="Scrollable strategy table" tabIndex={0} onScroll={() => syncOverviewScroll('table')}>
-            <table ref={overviewTableRef}>
-              <thead><tr><th className="selection-column">Selection</th><SortableHeader label="State" sortKey="state" sort={sort} onSort={changeSort}/><SortableHeader label="Source" sortKey="source" sort={sort} onSort={changeSort}/><SortableHeader label="Backtest" sortKey="backtest" sort={sort} onSort={changeSort}/><SortableHeader label="Edge" sortKey="edge" sort={sort} onSort={changeSort}/><SortableHeader label="EGT" sortKey="egt" sort={sort} onSort={changeSort}/><SortableHeader label="Strategy" sortKey="strategy" sort={sort} onSort={changeSort}/><SortableHeader label="Symbol" sortKey="symbol" sort={sort} onSort={changeSort}/><SortableHeader label="Account" sortKey="account" sort={sort} onSort={changeSort}/><SortableHeader label="Magic" sortKey="magic" sort={sort} onSort={changeSort}/><SortableHeader label="Net P/L" sortKey="net_profit" sort={sort} onSort={changeSort}/><SortableHeader label="Trades" sortKey="trades" sort={sort} onSort={changeSort}/><SortableHeader label="Win %" sortKey="win_rate" sort={sort} onSort={changeSort}/><SortableHeader label="Avg W/L" sortKey="avg_wl" sort={sort} onSort={changeSort}/><SortableHeader label="Best trade" sortKey="best_trade" sort={sort} onSort={changeSort}/><SortableHeader label="P/L today" sortKey="today_profit" sort={sort} onSort={changeSort}/><SortableHeader label="Factor P" sortKey="profit_factor" sort={sort} onSort={changeSort}/><SortableHeader label="Max DD" sortKey="max_drawdown" sort={sort} onSort={changeSort}/><SortableHeader label="History" sortKey="history" sort={sort} onSort={changeSort}/><th aria-label="Open panel"></th></tr></thead>
+            <table ref={overviewTableRef} className="overview-table">
+              <OverviewTableColGroup />
               <tbody>{sortedStrategies.map(strategy => {
                 const p = performanceMetrics(strategy)
                 const h = strategy.historical_metrics
-                const alias = accountAlias(strategy.account_login)
-                return <tr key={strategy.id} className={panelStrategyId === strategy.id ? 'selected-row' : ''} onClick={() => { setSelectedId(strategy.id); setPanelStrategyId(strategy.id) }}><td className="selection-column"><input type="checkbox" aria-label={`Select ${displayName(strategy)} for monitoring`} checked={strategy.selection} disabled={selectionSaving.has(strategy.id)} onClick={event => event.stopPropagation()} onChange={event => updateStrategySelection(strategy.id, event.target.checked)}/></td><td><span className={`state-tag ${strategy.state}`}><HealthDot status={strategy.health.status}/>{stateLabels[strategy.state] || strategy.state}</span></td><td><span className={`link-tag ${strategy.link_state}`}>{linkLabels[strategy.link_state] || strategy.link_state}</span>{strategy.sqx?.missing_from_sqx_at && <small className="sqx-missing">MISSING FROM SQX</small>}</td><td className="backtest-cell"><BacktestBadge summary={strategy.backtest}/></td><td><SQXAnalyticsBadge strategy={strategy} kind="edge"/></td><td><SQXAnalyticsBadge strategy={strategy} kind="egt"/></td><td><strong>{displayName(strategy)}</strong><small>{strategy.sqx_name}</small></td><td>{strategy.symbol || '—'}</td><td>{strategy.account_login ? <><strong>{strategy.account_login}</strong>{alias && <small>{alias}</small>}</> : '—'}</td><td className="magic-numbers">{primaryMagicLabel(strategy)}</td><td className={p.net_profit >= 0 ? 'value-good' : 'value-bad'}>{money(p.net_profit)}</td><td>{p.trades}</td><td>{(p.win_rate * 100).toFixed(1)}%</td><td>{money(p.avg_win)} / {money(p.avg_loss)}</td><td className={(p.best_trade || 0) >= 0 ? 'value-good' : 'value-bad'}>{money(p.best_trade)}</td><td className={strategy.metrics.today_profit >= 0 ? 'value-good' : 'value-bad'}>{money(strategy.metrics.today_profit)}</td><td>{number(p.profit_factor)}</td><td>{money(p.max_drawdown)}</td><td>{h.trades ? <span className={h.net_profit >= 0 ? 'history-badge positive' : 'history-badge negative'}>{h.trades} / {signedMoney(h.net_profit)}</span> : '—'}</td><td className="row-action">›</td></tr>
+                const alias = accountAlias(accountAliases, strategy.account_login)
+                const stateLabel = stateLabels[strategy.state] || strategy.state
+                const healthTitle = strategy.health.reasons.join(', ') || 'No active alerts'
+                return <tr key={strategy.id} className={selectedId === strategy.id ? 'selected-row' : ''} onClick={() => { setSelectedId(strategy.id); setPanelStrategyId(strategy.id) }}>
+                  <td>{strategy.id}</td>
+                  <td className="selection-column"><input type="checkbox" aria-label={`Select ${displayName(strategy)} for monitoring`} checked={strategy.selection} disabled={selectionSaving.has(strategy.id)} onClick={event => event.stopPropagation()} onChange={event => updateStrategySelection(strategy.id, event.target.checked)}/></td>
+                  <td className="backtest-cell"><BacktestBadge summary={strategy.backtest}/></td>
+                  <td><strong>{displayName(strategy)}</strong>{selectedId === strategy.id && <span className="selected-row-indicator">Selected</span>}<small>{strategy.sqx_name}</small></td>
+                  <td className="overview-symbol-column" title={strategy.symbol || '—'}>{strategy.symbol || '—'}</td>
+                  <td>{strategy.account_login ? <><strong>{strategy.account_login}</strong>{alias && <small>{alias}</small>}</> : '—'}</td>
+                  <td className="magic-numbers">{primaryMagicLabel(strategy)}</td>
+                  <td><SQXAnalyticsBadge strategy={strategy} kind="edge"/></td><td><SQXAnalyticsBadge strategy={strategy} kind="egt"/></td>
+                  <td className={p.net_profit >= 0 ? 'value-good' : 'value-bad'}>{money(p.net_profit)}</td><td className={p.expectancy >= 0 ? 'value-good' : 'value-bad'}>{money(p.expectancy)}</td>
+                  <td>{p.trades}</td><td>{(p.win_rate * 100).toFixed(1)}%</td><td>{money(p.avg_win)} / {money(p.avg_loss)}</td>
+                  <td className={(p.best_trade || 0) >= 0 ? 'value-good' : 'value-bad'}>{money(p.best_trade)}</td>
+                  <td className={strategy.metrics.today_profit >= 0 ? 'value-good' : 'value-bad'}>{money(strategy.metrics.today_profit)}</td>
+                  <td>{money(p.max_drawdown)}</td><td className={strategy.metrics.floating_profit >= 0 ? 'value-good' : 'value-bad'}>{signedMoney(strategy.metrics.floating_profit)}</td>
+                  <td className={(strategy.account_pl_percent ?? 0) >= 0 ? 'value-good' : 'value-bad'}>{signedPercent(strategy.account_pl_percent)}</td><td className={(strategy.initial_capital_pl_percent ?? 0) >= 0 ? 'value-good' : 'value-bad'}>{signedPercent(strategy.initial_capital_pl_percent)}</td>
+                  <td title={healthTitle}><span className={`health-badge ${strategy.health.status}`}><HealthDot status={strategy.health.status}/>{healthLabel(strategy.health.status)}</span></td>
+                  <td>{h.trades ? <span className={h.net_profit >= 0 ? 'history-badge positive' : 'history-badge negative'}>{h.trades} / {signedMoney(h.net_profit)}</span> : '—'}</td>
+                  <td><span className={`link-tag ${strategy.link_state}`}>{linkLabels[strategy.link_state] || strategy.link_state}</span>{strategy.sqx?.missing_from_sqx_at && <small className="sqx-missing">MISSING FROM SQX</small>}</td>
+                  <td className="overview-state-column"><span className={`state-tag ${strategy.state}`}><span className="state-tag-label" title={stateLabel}>{stateLabel}</span></span>{strategy.deployment_state && <span className={`deployment-badge ${strategy.deployment_state}`} title={strategy.last_inventory_at ? `Último inventario: ${new Date(strategy.last_inventory_at).toLocaleString()}` : ''}>{deploymentLabels[strategy.deployment_state]}</span>} {strategy.deployment_state && <span className={`activity-badge ${strategy.activity_state}`}>{activityLabels[strategy.activity_state]}</span>}</td>
+                  <td className="row-action">›</td>
+                </tr>
+              })}{false && sortedStrategies.map(strategy => {
+                const p = performanceMetrics(strategy)
+                const h = strategy.historical_metrics
+                const alias = accountAlias(accountAliases, strategy.account_login)
+                const stateLabel = stateLabels[strategy.state] || strategy.state
+                const healthTitle = strategy.health.reasons.join(', ') || 'No active alerts'
+                return <tr key={strategy.id} className={selectedId === strategy.id ? 'selected-row' : ''} onClick={() => { setSelectedId(strategy.id); setPanelStrategyId(strategy.id) }}><td className="selection-column"><input type="checkbox" aria-label={`Select ${displayName(strategy)} for monitoring`} checked={strategy.selection} disabled={selectionSaving.has(strategy.id)} onClick={event => event.stopPropagation()} onChange={event => updateStrategySelection(strategy.id, event.target.checked)}/></td><td className="backtest-cell"><BacktestBadge summary={strategy.backtest}/></td><td><strong>{displayName(strategy)}</strong>{selectedId === strategy.id && <span className="selected-row-indicator">Selected</span>}<small>{strategy.sqx_name}</small></td><td className="overview-symbol-column" title={strategy.symbol || '—'}>{strategy.symbol || '—'}</td><td>{strategy.account_login ? <><strong>{strategy.account_login}</strong>{alias && <small>{alias}</small>}</> : '—'}</td><td className="magic-numbers">{primaryMagicLabel(strategy)}</td><td><SQXAnalyticsBadge strategy={strategy} kind="edge"/></td><td><SQXAnalyticsBadge strategy={strategy} kind="egt"/></td><td className={p.net_profit >= 0 ? 'value-good' : 'value-bad'}>{money(p.net_profit)}</td><td className={p.expectancy >= 0 ? 'value-good' : 'value-bad'}>{money(p.expectancy)}</td><td>{p.trades}</td><td>{(p.win_rate * 100).toFixed(1)}%</td><td>{money(p.avg_win)} / {money(p.avg_loss)}</td><td className={(p.best_trade || 0) >= 0 ? 'value-good' : 'value-bad'}>{money(p.best_trade)}</td><td className={strategy.metrics.today_profit >= 0 ? 'value-good' : 'value-bad'}>{money(strategy.metrics.today_profit)}</td><td>{number(p.profit_factor)}</td><td>{money(p.max_drawdown)}</td><td className={strategy.metrics.floating_profit >= 0 ? 'value-good' : 'value-bad'}>{signedMoney(strategy.metrics.floating_profit)}</td><td className={(strategy.account_pl_percent ?? 0) >= 0 ? 'value-good' : 'value-bad'}>{signedPercent(strategy.account_pl_percent)}</td><td className={(strategy.initial_capital_pl_percent ?? 0) >= 0 ? 'value-good' : 'value-bad'}>{signedPercent(strategy.initial_capital_pl_percent)}</td><td title={healthTitle}><span className={`health-badge ${strategy.health.status}`}><HealthDot status={strategy.health.status}/>{healthLabel(strategy.health.status)}</span></td><td>{h.trades ? <span className={h.net_profit >= 0 ? 'history-badge positive' : 'history-badge negative'}>{h.trades} / {signedMoney(h.net_profit)}</span> : '—'}</td><td><span className={`link-tag ${strategy.link_state}`}>{linkLabels[strategy.link_state] || strategy.link_state}</span>{strategy.sqx?.missing_from_sqx_at && <small className="sqx-missing">MISSING FROM SQX</small>}</td><td className="overview-state-column"><span className={`state-tag ${strategy.state}`}><span className="state-tag-label" title={stateLabel}>{stateLabel}</span></span>{strategy.deployment_state && <span className={`deployment-badge ${strategy.deployment_state}`} title={strategy.last_inventory_at ? `Último inventario: ${new Date(strategy.last_inventory_at).toLocaleString()}` : ''}>{deploymentLabels[strategy.deployment_state]}</span>} {strategy.deployment_state && <span className={`activity-badge ${strategy.activity_state}`}>{activityLabels[strategy.activity_state]}</span>}</td><td>{strategy.id}</td><td className="row-action">›</td></tr>
               })}</tbody>
             </table>
           </div>
         </section>
       </>}
-      {tab === 'overview' && panelStrategy && <StrategySidePanel strategy={panelStrategy} query={dashboardQuery} onClose={() => setPanelStrategyId(null)} onDeleted={handleDeleted} onNoteSaved={handleNoteSaved} />}
+      {tab === 'overview' && panelStrategy && <StrategySidePanel strategy={panelStrategy} query={dashboardQuery} onClose={() => setPanelStrategyId(null)} onDeleted={handleDeleted} onNoteSaved={handleNoteSaved} onDisplayNameSaved={handleDisplayNameSaved} />}
       {tab === 'performance' && <Performance
         strategies={brokerFilteredStrategies}
-        onSelect={strategyId => { setSelectedId(strategyId); setTab('detail') }}
+        onSelect={strategyId => { setSelectedId(strategyId); navigateTo('detail') }}
         windowName={windowName}
         onWindowChange={setWindowName}
         customStart={customStart}
         onCustomStartChange={setCustomStart}
         customEnd={customEnd}
         onCustomEndChange={setCustomEnd}
-        journalData={journalData}
+        journalData={filteredJournalData}
         accountLabel={activeAccountLabel}
       />}
-      {tab === 'journal' && <JournalAnalysis data={journalData}/>}
+      {tab === 'journal' && <JournalAnalysis data={filteredJournalData}/>}
       {tab === 'detail' && <><div className="strategy-selector"><label>Strategy</label><select value={selectedId || ''} disabled={!brokerFilteredStrategies.length} onChange={e => setSelectedId(Number(e.target.value))}>{brokerFilteredStrategies.map(strategy => <option key={strategy.id} value={strategy.id}>{strategy.symbol} — {displayName(strategy)}</option>)}</select></div>{selected ? <StrategyDetail strategy={selected} onDeleted={handleDeleted} onNoteSaved={handleNoteSaved}/> : <div className="empty-state">No strategy selected for this broker account.</div>}</>}
       {tab === 'chart' && <><div className="strategy-selector"><label>Strategy</label><select value={selectedId || ''} disabled={!brokerFilteredStrategies.length} onChange={e => setSelectedId(Number(e.target.value))}>{brokerFilteredStrategies.map(strategy => <option key={strategy.id} value={strategy.id}>{strategy.symbol} — {displayName(strategy)}</option>)}</select></div>{selected ? <ChartPanel strategyId={selected.id} accountQuery={dashboardQuery}/> : <div className="empty-state">Select a strategy for the selected broker accounts.</div>}</>}
       {tab === 'backtests' && <Backtests strategies={brokerFilteredStrategies} initialStrategyId={selectedId} onCompleted={load}/>}
-      {tab === 'settings' && <Settings reload={load}/>}<footer>EA Observatory · Local data · {data ? `Updated ${new Date(data.generated_at).toLocaleTimeString('en-US')}` : 'Connecting…'}</footer>
+      {tab === 'settings' && <Settings reload={load} aliases={accountAliases} onAliasesSaved={setAccountAliases}/>}<footer>EA Observatory · Local data · {data ? `Updated ${new Date(data.generated_at).toLocaleTimeString('en-US')}` : 'Connecting…'}</footer>
     </main>
   </div>
 }
