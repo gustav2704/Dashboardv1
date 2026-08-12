@@ -26,8 +26,62 @@ CREATE TABLE IF NOT EXISTS terminals (
   last_sync TEXT,
   last_error TEXT,
   cursor_msc INTEGER NOT NULL DEFAULT 0,
+  transport TEXT NOT NULL DEFAULT 'local',
+  ssh_host TEXT,
+  ssh_port INTEGER,
+  ssh_username TEXT,
+  ssh_key_path TEXT,
+  ssh_host_fingerprint TEXT,
+  remote_data_dir TEXT,
   created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS terminal_log_sources (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  terminal_id INTEGER NOT NULL REFERENCES terminals(id) ON DELETE CASCADE,
+  label TEXT NOT NULL,
+  data_dir TEXT NOT NULL,
+  account_login TEXT,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  UNIQUE(terminal_id, data_dir)
+);
+
+CREATE INDEX IF NOT EXISTS idx_terminal_log_sources_terminal
+ON terminal_log_sources(terminal_id, enabled);
+
+CREATE TABLE IF NOT EXISTS terminal_log_cursors (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_id INTEGER NOT NULL REFERENCES terminal_log_sources(id) ON DELETE CASCADE,
+  log_kind TEXT NOT NULL CHECK(log_kind IN ('journal','experts')),
+  log_name TEXT NOT NULL,
+  byte_offset INTEGER NOT NULL DEFAULT 0,
+  trailing_bytes BLOB,
+  updated_at TEXT NOT NULL,
+  UNIQUE(source_id, log_kind, log_name)
+);
+
+CREATE TABLE IF NOT EXISTS terminal_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_id INTEGER NOT NULL REFERENCES terminal_log_sources(id) ON DELETE CASCADE,
+  terminal_id INTEGER NOT NULL REFERENCES terminals(id) ON DELETE CASCADE,
+  account_login TEXT,
+  severity TEXT NOT NULL CHECK(severity IN ('warning','error')),
+  log_kind TEXT NOT NULL CHECK(log_kind IN ('journal','experts')),
+  log_name TEXT NOT NULL,
+  byte_offset INTEGER NOT NULL,
+  occurred_at TEXT,
+  captured_at TEXT NOT NULL,
+  message TEXT NOT NULL,
+  context TEXT NOT NULL,
+  UNIQUE(source_id, log_kind, log_name, byte_offset)
+);
+
+CREATE INDEX IF NOT EXISTS idx_terminal_events_recent
+ON terminal_events(captured_at DESC, severity);
+
+CREATE INDEX IF NOT EXISTS idx_terminal_events_account
+ON terminal_events(account_login, captured_at DESC);
 
 CREATE TABLE IF NOT EXISTS strategies (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,6 +100,14 @@ CREATE TABLE IF NOT EXISTS strategies (
   note TEXT NOT NULL DEFAULT '',
   note_updated_at TEXT,
   monitoring_selected INTEGER NOT NULL DEFAULT 0,
+  favorite INTEGER NOT NULL DEFAULT 0,
+  no_mm_accepted INTEGER NOT NULL DEFAULT 0,
+  no_mm_accepted_at TEXT,
+  backtest_risk_accepted_run_id INTEGER,
+  backtest_risk_accepted_at TEXT,
+  operational_server TEXT,
+  operational_asset_key TEXT,
+  operational_expert_key TEXT,
   created_at TEXT NOT NULL,
   UNIQUE(sqx_name, account_login)
 );
@@ -100,6 +162,7 @@ CREATE TABLE IF NOT EXISTS mappings (
   comment_pattern TEXT,
   role TEXT NOT NULL DEFAULT 'live',
   historical_magic_flexible INTEGER NOT NULL DEFAULT 0,
+  historical_until_msc INTEGER,
   confidence REAL NOT NULL DEFAULT 1.0,
   confirmed INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
@@ -141,6 +204,10 @@ CREATE TABLE IF NOT EXISTS bot_deployments (
   activity_status TEXT,
   first_trade_at TEXT,
   last_trade_at TEXT,
+  order_count INTEGER NOT NULL DEFAULT 0,
+  first_order_at TEXT,
+  last_order_at TEXT,
+  order_states TEXT,
   strategy_id INTEGER REFERENCES strategies(id) ON DELETE SET NULL,
   confirmed INTEGER NOT NULL DEFAULT 0,
   observed_at TEXT NOT NULL,
@@ -323,6 +390,7 @@ CREATE TABLE IF NOT EXISTS sqx_analytics_snapshots (
 CREATE INDEX IF NOT EXISTS idx_baseline_strategy ON baseline_snapshots(strategy_id, sample_type, synced_at DESC);
 CREATE INDEX IF NOT EXISTS idx_deals_position ON deals(terminal_id, position_id, time_msc);
 CREATE INDEX IF NOT EXISTS idx_deals_magic ON deals(terminal_id, magic, symbol);
+CREATE INDEX IF NOT EXISTS idx_deals_terminal_sequence ON deals(terminal_id, id);
 CREATE INDEX IF NOT EXISTS idx_sqx_links_source ON sqx_strategy_links(project, databank, strategy_name);
 CREATE INDEX IF NOT EXISTS idx_sqx_analytics_strategy ON sqx_analytics_snapshots(strategy_id, synced_at DESC);
 
@@ -344,6 +412,31 @@ CREATE TABLE IF NOT EXISTS settings (
   value_json TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS alert_episodes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  strategy_id INTEGER NOT NULL REFERENCES strategies(id) ON DELETE CASCADE,
+  alert_type TEXT NOT NULL,
+  sample_type TEXT,
+  severity TEXT NOT NULL CHECK(severity IN ('yellow','red')),
+  max_severity TEXT NOT NULL CHECK(max_severity IN ('yellow','red')),
+  reason TEXT NOT NULL,
+  actual REAL,
+  threshold REAL,
+  status TEXT NOT NULL CHECK(status IN ('active','recovering','resolved')),
+  recovery_wins INTEGER NOT NULL DEFAULT 0,
+  first_detected_at TEXT NOT NULL,
+  last_detected_at TEXT NOT NULL,
+  resolved_at TEXT,
+  details_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_alert_episode_active
+ON alert_episodes(strategy_id,alert_type,COALESCE(sample_type,''))
+WHERE resolved_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_alert_episode_history
+ON alert_episodes(strategy_id,first_detected_at DESC,id DESC);
 
 CREATE TABLE IF NOT EXISTS symbol_mappings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -381,6 +474,9 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
   run_dir TEXT,
   report_path TEXT,
   log_path TEXT,
+  execution_target TEXT NOT NULL DEFAULT 'local',
+  remote_run_dir TEXT,
+  transfer_manifest_json TEXT,
   error TEXT
 );
 
@@ -402,6 +498,9 @@ CREATE TABLE IF NOT EXISTS backtest_batches (
   started_at TEXT,
   finished_at TEXT,
   current_strategy_id INTEGER REFERENCES strategies(id) ON DELETE SET NULL,
+  execution_target TEXT NOT NULL DEFAULT 'local',
+  pilot_required INTEGER NOT NULL DEFAULT 0,
+  pilot_validated INTEGER NOT NULL DEFAULT 0,
   error TEXT
 );
 
@@ -442,6 +541,10 @@ ON backtest_batch_items(batch_id,status,id);
 
 DEFAULT_ALERTS = {
     "min_trades": 20,
+    "loss_streak_yellow": 3,
+    "loss_streak_red": 5,
+    "loss_streak_relative_yellow": 0.80,
+    "loss_streak_relative_red": 1.00,
     "drawdown_yellow": 0.80,
     "drawdown_red": 1.00,
     "performance_yellow": 0.85,
@@ -516,10 +619,40 @@ def init_db(path: Path | None = None) -> None:
                 """ALTER TABLE strategies
                    ADD COLUMN monitoring_selected INTEGER NOT NULL DEFAULT 0"""
             )
+        if "favorite" not in strategy_columns:
+            conn.execute(
+                "ALTER TABLE strategies ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0"
+            )
+        if "no_mm_accepted" not in strategy_columns:
+            conn.execute(
+                """ALTER TABLE strategies
+                   ADD COLUMN no_mm_accepted INTEGER NOT NULL DEFAULT 0"""
+            )
+        if "no_mm_accepted_at" not in strategy_columns:
+            conn.execute("ALTER TABLE strategies ADD COLUMN no_mm_accepted_at TEXT")
+        if "backtest_risk_accepted_run_id" not in strategy_columns:
+            conn.execute("ALTER TABLE strategies ADD COLUMN backtest_risk_accepted_run_id INTEGER")
+        if "backtest_risk_accepted_at" not in strategy_columns:
+            conn.execute("ALTER TABLE strategies ADD COLUMN backtest_risk_accepted_at TEXT")
         if "archived_at" not in strategy_columns:
             conn.execute("ALTER TABLE strategies ADD COLUMN archived_at TEXT")
         if "archive_reason" not in strategy_columns:
             conn.execute("ALTER TABLE strategies ADD COLUMN archive_reason TEXT")
+        if "operational_server" not in strategy_columns:
+            conn.execute("ALTER TABLE strategies ADD COLUMN operational_server TEXT")
+        if "operational_asset_key" not in strategy_columns:
+            conn.execute("ALTER TABLE strategies ADD COLUMN operational_asset_key TEXT")
+        if "operational_expert_key" not in strategy_columns:
+            conn.execute("ALTER TABLE strategies ADD COLUMN operational_expert_key TEXT")
+        conn.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_strategy_operational_identity
+               ON strategies(LOWER(operational_server), account_login,
+                             operational_asset_key, operational_expert_key)
+               WHERE operational_server IS NOT NULL
+                 AND account_login IS NOT NULL
+                 AND operational_asset_key IS NOT NULL
+                 AND operational_expert_key IS NOT NULL"""
+        )
         conn.execute(
             "UPDATE strategies SET identity_strategy_id=id WHERE identity_strategy_id IS NULL"
         )
@@ -541,6 +674,23 @@ def init_db(path: Path | None = None) -> None:
             conn.execute(
                 "ALTER TABLE mappings ADD COLUMN historical_magic_flexible INTEGER NOT NULL DEFAULT 0"
             )
+        if "historical_until_msc" not in mapping_columns:
+            conn.execute("ALTER TABLE mappings ADD COLUMN historical_until_msc INTEGER")
+        terminal_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(terminals)").fetchall()
+        }
+        terminal_additions = {
+            "transport": "TEXT NOT NULL DEFAULT 'local'",
+            "ssh_host": "TEXT",
+            "ssh_port": "INTEGER",
+            "ssh_username": "TEXT",
+            "ssh_key_path": "TEXT",
+            "ssh_host_fingerprint": "TEXT",
+            "remote_data_dir": "TEXT",
+        }
+        for column, definition in terminal_additions.items():
+            if column not in terminal_columns:
+                conn.execute(f"ALTER TABLE terminals ADD COLUMN {column} {definition}")
         deployment_columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(bot_deployments)").fetchall()
         }
@@ -548,6 +698,14 @@ def init_db(path: Path | None = None) -> None:
             conn.execute("ALTER TABLE bot_deployments ADD COLUMN first_trade_at TEXT")
         if "last_trade_at" not in deployment_columns:
             conn.execute("ALTER TABLE bot_deployments ADD COLUMN last_trade_at TEXT")
+        if "order_count" not in deployment_columns:
+            conn.execute("ALTER TABLE bot_deployments ADD COLUMN order_count INTEGER NOT NULL DEFAULT 0")
+        if "first_order_at" not in deployment_columns:
+            conn.execute("ALTER TABLE bot_deployments ADD COLUMN first_order_at TEXT")
+        if "last_order_at" not in deployment_columns:
+            conn.execute("ALTER TABLE bot_deployments ADD COLUMN last_order_at TEXT")
+        if "order_states" not in deployment_columns:
+            conn.execute("ALTER TABLE bot_deployments ADD COLUMN order_states TEXT")
         sqx_link_columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(sqx_strategy_links)").fetchall()
         }
@@ -560,11 +718,27 @@ def init_db(path: Path | None = None) -> None:
             conn.execute(
                 "ALTER TABLE backtest_runs ADD COLUMN batch_id INTEGER REFERENCES backtest_batches(id)"
             )
+        run_additions = {
+            "execution_target": "TEXT NOT NULL DEFAULT 'local'",
+            "remote_run_dir": "TEXT",
+            "transfer_manifest_json": "TEXT",
+        }
+        for column, definition in run_additions.items():
+            if column not in run_columns:
+                conn.execute(f"ALTER TABLE backtest_runs ADD COLUMN {column} {definition}")
         batch_columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(backtest_batches)").fetchall()
         }
         if "broker" not in batch_columns:
             conn.execute("ALTER TABLE backtest_batches ADD COLUMN broker TEXT NOT NULL DEFAULT 'FPM'")
+        batch_additions = {
+            "execution_target": "TEXT NOT NULL DEFAULT 'local'",
+            "pilot_required": "INTEGER NOT NULL DEFAULT 0",
+            "pilot_validated": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for column, definition in batch_additions.items():
+            if column not in batch_columns:
+                conn.execute(f"ALTER TABLE backtest_batches ADD COLUMN {column} {definition}")
         for strategy in conn.execute(
             "SELECT id,sqx_name,mql5_name,created_at FROM strategies"
         ).fetchall():

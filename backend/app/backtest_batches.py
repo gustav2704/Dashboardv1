@@ -31,7 +31,9 @@ SYMBOL_FALLBACKS = {
     "us30": "US30",
 }
 CUSTOM_HISTORY_SOURCE = "Custom"
-CUSTOM_START_DATE = "2016-01-01"
+# Backtests requested for the current Darwinex comparison begin in 2025.  The
+# end date remains bounded by the broker's available Custom history.
+CUSTOM_START_DATE = "2025-01-01"
 # User-approved exclusions.  Keep both the persisted strategy identity and a
 # normalized name rule: the second bot is not currently catalogued, but must
 # remain excluded if it is imported later.
@@ -43,6 +45,57 @@ EXCLUDED_BACKTEST_NAMES = {
 # valid FPM reference run to clone.  Keep this deliberately narrow: these
 # strategies have a hash-verified EX5 and an SQX link of their own.
 EXPLICIT_DARWINEX_RERUN_STRATEGY_IDS = {130, 138}
+
+# Explicit user confirmations take precedence over fuzzy filename matching.
+# These source files are staged under the Darwinex terminal before each run;
+# the original files are never moved or altered.
+USER_CONFIRMED_EXPERTS: dict[int, Path] = {
+    # Explicit pairings confirmed by the user from the AXI_10025867 VPS archive.
+    141: Path(r"C:\Users\Admin\AppData\Roaming\MetaQuotes\Terminal\9265798B599F649497F9A17BEC9C76C6\MQL5\Experts\vps\AXI_10025867\KeltnerMomentumBuyEA_v2.ex5"),
+    148: Path(r"C:\Users\Admin\AppData\Roaming\MetaQuotes\Terminal\9265798B599F649497F9A17BEC9C76C6\MQL5\Experts\vps\AXI_10025867\Hobbiecode_ORB_Strategy.ex5"),
+    153: Path(r"C:\Users\Admin\AppData\Roaming\MetaQuotes\Terminal\9265798B599F649497F9A17BEC9C76C6\MQL5\Experts\vps\AXI_10025867\DailyHL.ex5"),
+    155: Path(r"C:\Users\Admin\AppData\Roaming\MetaQuotes\Terminal\9265798B599F649497F9A17BEC9C76C6\MQL5\Experts\vps\AXI_10025867\ParabolicDailyHLv2.ex5"),
+    242: Path(r"C:\Users\Admin\AppData\Roaming\MetaQuotes\Terminal\9265798B599F649497F9A17BEC9C76C6\MQL5\Experts\vps\AXI_10025867\AltisimaPrecision-V2.ex5"),
+    245: Path(r"C:\Users\Admin\AppData\Roaming\MetaQuotes\Terminal\9265798B599F649497F9A17BEC9C76C6\MQL5\Experts\vps\AXI_10025867\Parabolic_Pivot.ex5"),
+    253: Path(r"C:\Users\Admin\AppData\Roaming\MetaQuotes\Terminal\9265798B599F649497F9A17BEC9C76C6\MQL5\Experts\vps\AXI_10025867\AltisimaPrecision-V2.ex5"),
+    269: Path(r"C:\Users\Admin\AppData\Roaming\MetaQuotes\Terminal\9265798B599F649497F9A17BEC9C76C6\MQL5\Experts\vps\AXI_10025867\AltisimaPrecision-V2.ex5"),
+    270: Path(r"C:\Users\Admin\AppData\Roaming\MetaQuotes\Terminal\9265798B599F649497F9A17BEC9C76C6\MQL5\Experts\vps\AXI_10025867\AltisimaPrecision-V2.ex5"),
+    277: Path(r"C:\Users\Admin\AppData\Roaming\MetaQuotes\Terminal\9265798B599F649497F9A17BEC9C76C6\MQL5\Experts\vps\AXI_10025867\AltisimaPrecision-V2.ex5"),
+    279: Path(r"C:\Users\Admin\AppData\Roaming\MetaQuotes\Terminal\9265798B599F649497F9A17BEC9C76C6\MQL5\Experts\vps\AXI_10025867\ProfitTar_B_WF_9_34_DAXS_3.11.24dwnx.ex5"),
+    281: Path(r"C:\Users\Admin\AppData\Roaming\MetaQuotes\Terminal\9265798B599F649497F9A17BEC9C76C6\MQL5\Experts\vps\AXI_10025867\ProfitTar_B_WF_9_34_DAXS_3.11.24dwnx.ex5"),
+    284: Path(r"C:\Users\Admin\AppData\Roaming\MetaQuotes\Terminal\9265798B599F649497F9A17BEC9C76C6\MQL5\Experts\vps\AXI_10025867\KeltnerMomentumBuyEA_v2.ex5"),
+    286: Path(r"C:\Users\Admin\AppData\Roaming\MetaQuotes\Terminal\9265798B599F649497F9A17BEC9C76C6\MQL5\Experts\vps\AXI_10025867\Hobbiecode_ORB_Strategy.ex5"),
+    288: Path(r"C:\Users\Admin\AppData\Roaming\MetaQuotes\Terminal\9265798B599F649497F9A17BEC9C76C6\MQL5\Experts\vps\AXI_10025867\ParabolicDailyHLv2.ex5"),
+    91: Path(r"C:\Users\Admin\AppData\Roaming\MetaQuotes\Terminal\9265798B599F649497F9A17BEC9C76C6\MQL5\Experts\vps\cuenta_7396577\WF Matrix - Strategy 3.8.23(1).ex5"),
+    92: Path(r"C:\Users\Admin\AppData\Roaming\MetaQuotes\Terminal\9265798B599F649497F9A17BEC9C76C6\MQL5\Experts\vps\cuenta_7396577\WF Matrix - Strategy 3.8.23(1).ex5"),
+    109: Path(r"C:\Users\Admin\AppData\Roaming\MetaQuotes\Terminal\9265798B599F649497F9A17BEC9C76C6\MQL5\Experts\XAU\XAU M15 GWF Optimization - Strategy 3.69.192.ex5"),
+    118: Path(r"C:\Users\Admin\AppData\Roaming\MetaQuotes\Terminal\9265798B599F649497F9A17BEC9C76C6\MQL5\Experts\vps\infinox_100121894\GER30_optimiza.ex5"),
+    123: Path(r"C:\Users\Admin\AppData\Roaming\MetaQuotes\Terminal\9265798B599F649497F9A17BEC9C76C6\MQL5\Experts\vps\infinox_00121894_2\nqm5 Strategy 1.64.191.ex5"),
+    124: Path(r"C:\Users\Admin\AppData\Roaming\MetaQuotes\Terminal\9265798B599F649497F9A17BEC9C76C6\MQL5\Experts\vps\infinox_00121894_2\VitalSignsEA.ex5"),
+    125: Path(r"C:\Users\Admin\AppData\Roaming\MetaQuotes\Terminal\9265798B599F649497F9A17BEC9C76C6\MQL5\Experts\vps\infinox_100121894\GER30_optimiza.ex5"),
+    132: Path(r"C:\Users\Admin\AppData\Roaming\MetaQuotes\Terminal\9265798B599F649497F9A17BEC9C76C6\MQL5\Experts\vps\darwinex_3000097316\Parabolic_Pivot.ex5"),
+}
+USER_CONFIRMED_CONFIGS: dict[int, dict[str, str]] = {
+    # User confirmed the source chart for this known EX5 build.
+    119: {"timeframe": "M15"},  # Darwinex rerun identity of the same build.
+    134: {"timeframe": "M15"},
+    # The following AXI VPS builds were explicitly confirmed as H1.
+    141: {"timeframe": "H1"},
+    153: {"timeframe": "H1"}, 155: {"timeframe": "H1"},
+    245: {"timeframe": "H1"},
+    253: {"timeframe": "M5"},
+    270: {"timeframe": "M5"}, 277: {"timeframe": "M5"},
+    279: {"timeframe": "H1"}, 281: {"timeframe": "H1"},
+    284: {"timeframe": "H1"},
+    288: {"timeframe": "H1"},
+    118: {"target_symbol": "GDAXI_M1", "timeframe": "M15"},
+    123: {"target_symbol": "NDX_M1", "timeframe": "M5"},
+    124: {"target_symbol": "SP500_tick_2025_26jun", "timeframe": "H1"},
+    125: {"target_symbol": "WS30_DK_2016", "timeframe": "M15"},
+    132: {"target_symbol": "NDX_M1", "timeframe": "H1"},
+    120: {"target_symbol": "XAUUSD_M1", "timeframe": "H1"},
+    126: {"target_symbol": "XAUUSD_M1", "timeframe": "M15"},
+}
 
 
 def _custom_history_end(symbol: str, broker: str) -> str | None:
@@ -228,6 +281,12 @@ def discover_candidates(broker: str = ACTIVE_BACKTEST_BROKER, history_source: st
         source_symbol = str(strategy.get("sqx_symbol") or strategy.get("symbol") or "")
         target_symbol = symbol_maps.get(source_symbol.casefold())
         names = _candidate_names(strategy)
+        confirmed_expert = USER_CONFIRMED_EXPERTS.get(int(strategy["id"]))
+        confirmed_config = USER_CONFIRMED_CONFIGS.get(int(strategy["id"]), {})
+        if confirmed_config.get("target_symbol"):
+            target_symbol = confirmed_config["target_symbol"]
+        if confirmed_config.get("timeframe"):
+            strategy["timeframe"] = confirmed_config["timeframe"]
         exact_paths: list[Path] = []
         for name in names:
             exact_paths.extend(by_name.get(normalize(name), []))
@@ -236,7 +295,10 @@ def discover_candidates(broker: str = ACTIVE_BACKTEST_BROKER, history_source: st
         method = ""
         confidence = 0.0
         selected: tuple[Path, str] | None = None
-        if exact:
+        if confirmed_expert and confirmed_expert.is_file():
+            selected = (confirmed_expert, _sha256(confirmed_expert))
+            method, confidence = "user_confirmed_ex5", 1.0
+        elif exact:
             selected = _prefer_default_terminal(exact)
             method, confidence = "exact_name", 1.0
         else:
@@ -270,16 +332,16 @@ def discover_candidates(broker: str = ACTIVE_BACKTEST_BROKER, history_source: st
                     })
                     continue
 
-        if not strategy.get("strategy_name"):
+        if not strategy.get("strategy_name") and not selected:
             state, reason = "blocked", "No SQX configuration is linked"
         elif not target_symbol:
-            state, reason = "blocked", "No Darwinex Custom symbol mapping exists"
+            state, reason = "blocked", f"No {profile['broker']} symbol mapping exists"
         elif history_source == CUSTOM_HISTORY_SOURCE and not _custom_history_end(target_symbol, profile["broker"]):
             state, reason = "blocked", f"Custom history is unavailable for {target_symbol}"
         elif not strategy.get("timeframe"):
             state, reason = "blocked", "No timeframe could be recovered"
         elif selected:
-            state = "eligible" if method in {"exact_name", "exact_identity_suffix"} else "resolvable"
+            state = "eligible" if method in {"exact_name", "exact_identity_suffix", "user_confirmed_ex5"} else "resolvable"
             reason = "Exact EX5 match" if state == "eligible" else "Requires SQX parameter fingerprint"
         else:
             state, reason = "resolvable", "Will request MQ5 source from SQX"
@@ -373,8 +435,8 @@ def _resolve_item(item_id: int, model: int, broker: str = ACTIVE_BACKTEST_BROKER
                ORDER BY finished_at DESC,id DESC LIMIT 1""",
             (item["strategy_id"],),
         ).fetchone() if item else None
-    if not item or not item["strategy_name"]:
-        raise RuntimeError("SQX strategy link is unavailable")
+    if not item:
+        raise RuntimeError("Backtest batch item is unavailable")
 
     needs_source = item["resolution_method"] == "generated_from_sqx"
     expert_path = Path(item["expert_path"]) if item["expert_path"] else None
@@ -382,7 +444,12 @@ def _resolve_item(item_id: int, model: int, broker: str = ACTIVE_BACKTEST_BROKER
     snapshot: dict[str, Any] = {}
     # A completed FPM run already contains the exact EX5 and reference
     # configuration.  Reuse it for Darwinex instead of waiting on SQX again.
-    if reference and reference["expert_path"] and Path(reference["expert_path"]).is_file():
+    confirmed_expert = USER_CONFIRMED_EXPERTS.get(int(item["strategy_id"]))
+    if confirmed_expert and confirmed_expert.is_file():
+        expert_path = confirmed_expert
+        expert_hash = _sha256(confirmed_expert)
+        needs_source = False
+    elif reference and reference["expert_path"] and Path(reference["expert_path"]).is_file():
         expert_path = Path(reference["expert_path"])
         expert_hash = str(reference["expert_hash"] or expert_hash)
         try:
@@ -430,10 +497,24 @@ def _resolve_item(item_id: int, model: int, broker: str = ACTIVE_BACKTEST_BROKER
             inputs = mt5_backtests.parse_report(Path(reference["report_path"]))["configuration"].get("inputs", {})
         except (OSError, UnicodeError):
             inputs = {}
-    # These are the user-approved Darwinex test overrides.  They are persisted
-    # in the run snapshot so the broker comparison can disclose them.
+    # These are the user-approved Darwinex test overrides.  Standard SQX EAs
+    # accept these inputs; EAs that do not expose money management ignore them
+    # and are explicitly configured with the requested fixed-lot fallback.
+    inputs["UseMoneyManagement"] = "true"
+    inputs["mmRiskedMoney"] = "200"
     inputs["mmDecimals"] = "2"
-    inputs["mmLotsIfNoMM"] = "0.01"
+    inputs["mmLotsIfNoMM"] = "0.1"
+    inputs["mmLots"] = "0.1"
+    # A small set of confirmed non-SQX EAs exposes an equivalent fixed-lot
+    # interface under different names.  Apply the approved 0.1 fallback to
+    # that native interface rather than relying on ignored SQX inputs.
+    if "UseFixedLot" in inputs:
+        inputs["UseFixedLot"] = "true"
+        inputs["BaseLotSize"] = "0.1"
+        inputs["MinLotSize"] = "0.1"
+    if "MM_Mode" in inputs:
+        inputs["MM_Mode"] = "0"
+        inputs["FixedLot"] = "0.1"
     # MT5 rejects an EA during OnInit when its order comment exceeds the
     # platform's 30-character limit.  The comment is audit metadata only; a
     # bounded value preserves strategy/risk behaviour while allowing the run.
@@ -448,6 +529,10 @@ def _resolve_item(item_id: int, model: int, broker: str = ACTIVE_BACKTEST_BROKER
         raise RuntimeError("SQX and FPM periods do not overlap")
     snapshot["resolution_method"] = item["resolution_method"]
     snapshot["expert_hash"] = expert_hash
+    snapshot["risk_policy"] = {
+        "preferred": {"UseMoneyManagement": True, "mmRiskedMoney": 200, "mmDecimals": 2},
+        "fallback": {"mmLots": 0.1, "mmLotsIfNoMM": 0.1},
+    }
     if history_source:
         snapshot["history_source"] = history_source
         snapshot["custom_symbol"] = target_symbol
@@ -459,7 +544,7 @@ def _resolve_item(item_id: int, model: int, broker: str = ACTIVE_BACKTEST_BROKER
         "expert_path": str(expert_path),
         "sqx_symbol": item["sqx_symbol"],
         "symbol": target_symbol,
-        "timeframe": item["timeframe"] or _snapshot_setting(snapshot, "Timeframe") or "H1",
+        "timeframe": item["timeframe"] or (reference["timeframe"] if reference else None) or _snapshot_setting(snapshot, "Timeframe") or "H1",
         "from_date": from_date,
         "to_date": to_date,
         "deposit": float(reference["deposit"] if reference else 100000),
@@ -620,9 +705,23 @@ def _safe_for_maintenance(broker: str = "FPM") -> tuple[bool, str]:
         return False, f"Waiting for {positions} open position(s)"
     if orders and not profile.get("isolated"):
         return False, f"Waiting for {orders} pending order(s)"
-    if mt5_backtests._terminal_is_running(Path(profile["terminal_exe"])) and (not terminal or terminal["status"] != "connected"):
+    if (
+        not profile.get("isolated")
+        and mt5_backtests._terminal_is_running(Path(profile["terminal_exe"]))
+        and (not terminal or terminal["status"] != "connected")
+    ):
         return False, "Waiting for a fresh DashboardBridge safety snapshot"
     return True, ""
+
+
+def _safe_for_execution(batch: Any) -> tuple[bool, str]:
+    if str(batch["execution_target"] or "local") == "ssh_darwinex_demo":
+        from . import remote_backtests
+        return remote_backtests.safety_preflight(
+            authorized_isolated_runner=remote_backtests.isolated_runner_authorized()
+        )
+    broker = str(batch["broker"] or "FPM")
+    return _safe_for_maintenance() if broker == "FPM" else _safe_for_maintenance(broker)
 
 
 def _close_terminal_gracefully(broker: str = "FPM") -> bool:
@@ -677,14 +776,18 @@ def _restart_live_terminal(broker: str = "FPM") -> None:
         )
 
 
-def _finish_batch(batch_id: int, status: str = "completed", error: str | None = None, broker: str = "FPM") -> None:
+def _finish_batch(
+    batch_id: int, status: str = "completed", error: str | None = None,
+    broker: str = "FPM", execution_target: str = "local",
+) -> None:
     with session() as conn:
         conn.execute(
             """UPDATE backtest_batches
                SET status=?,finished_at=?,current_strategy_id=NULL,error=? WHERE id=?""",
             (status, utcnow(), error, batch_id),
         )
-    _restart_live_terminal(broker)
+    if execution_target == "local":
+        _restart_live_terminal(broker)
 
 
 def process_once() -> bool:
@@ -733,11 +836,14 @@ def process_once() -> bool:
         return True
 
     if not queued:
-        _finish_batch(batch_id, broker=str(batch["broker"] or "FPM"))
+        _finish_batch(
+            batch_id, broker=str(batch["broker"] or "FPM"),
+            execution_target=str(batch["execution_target"] or "local"),
+        )
         return True
 
     broker = str(batch["broker"] or "FPM")
-    safe, reason = _safe_for_maintenance(broker)
+    safe, reason = _safe_for_execution(batch)
     if not safe:
         with session() as conn:
             conn.execute(
@@ -745,7 +851,10 @@ def process_once() -> bool:
                 (reason, batch_id),
             )
         return False
-    if not _close_terminal_gracefully(broker):
+    closed = True
+    if str(batch["execution_target"] or "local") == "local":
+        closed = _close_terminal_gracefully() if broker == "FPM" else _close_terminal_gracefully(broker)
+    if not closed:
         with session() as conn:
             conn.execute(
                 "UPDATE backtest_batches SET status='waiting_terminal',error=? WHERE id=?",
@@ -788,13 +897,24 @@ def process_once() -> bool:
         current_batch = conn.execute(
             "SELECT status FROM backtest_batches WHERE id=?", (batch_id,)
         ).fetchone()
-        if systemic_report_failure and current_batch and current_batch["status"] != "cancelled":
+        pilot_failed = bool(batch["pilot_required"] and not batch["pilot_validated"] and run["status"] != "completed")
+        if pilot_failed and current_batch and current_batch["status"] != "cancelled":
+            conn.execute(
+                """UPDATE backtest_batches
+                   SET status='paused',current_strategy_id=NULL,error=? WHERE id=?""",
+                (f"Pilot backtest failed: {run.get('error') or run['status']}", batch_id),
+            )
+        elif systemic_report_failure and current_batch and current_batch["status"] != "cancelled":
             conn.execute(
                 """UPDATE backtest_batches
                    SET status='paused',current_strategy_id=NULL,error=? WHERE id=?""",
                 ("Automation paused: systemic MT5 tester failure", batch_id),
             )
         elif current_batch and current_batch["status"] not in ("cancelled", "paused"):
+            if batch["pilot_required"] and not batch["pilot_validated"] and run["status"] == "completed":
+                conn.execute(
+                    "UPDATE backtest_batches SET pilot_validated=1 WHERE id=?", (batch_id,)
+                )
             conn.execute(
                 "UPDATE backtest_batches SET status='queued',current_strategy_id=NULL WHERE id=?",
                 (batch_id,),
@@ -804,7 +924,7 @@ def process_once() -> bool:
                 "UPDATE backtest_batches SET current_strategy_id=NULL WHERE id=?",
                 (batch_id,),
             )
-    if current_batch and current_batch["status"] == "cancelled":
+    if current_batch and current_batch["status"] == "cancelled" and str(batch["execution_target"] or "local") == "local":
         _restart_live_terminal(str(batch["broker"] or "FPM"))
     return True
 
@@ -885,7 +1005,9 @@ def resume_batch(batch_id: int) -> dict[str, Any]:
 
 def cancel_batch(batch_id: int) -> dict[str, Any]:
     with session() as conn:
-        batch = conn.execute("SELECT broker FROM backtest_batches WHERE id=?", (batch_id,)).fetchone()
+        batch = conn.execute(
+            "SELECT broker,execution_target FROM backtest_batches WHERE id=?", (batch_id,)
+        ).fetchone()
         running = conn.execute(
             """SELECT run_id FROM backtest_batch_items
                WHERE batch_id=? AND status='running' AND run_id IS NOT NULL LIMIT 1""",
@@ -906,6 +1028,6 @@ def cancel_batch(batch_id: int) -> dict[str, Any]:
             mt5_backtests.cancel_run(int(running["run_id"]))
         except KeyError:
             pass
-    else:
+    elif not batch or str(batch["execution_target"] or "local") == "local":
         _restart_live_terminal(str(batch["broker"] if batch else "FPM"))
     return get_batch(batch_id)

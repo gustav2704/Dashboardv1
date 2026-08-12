@@ -12,9 +12,11 @@ from urllib.parse import quote
 from .config import DATA_DIR, STALE_SECONDS
 from . import db
 from .db import session, utcnow
+from .ssh_bridge import SSHBridge, SSHBridgeError
 
 
 BRIDGE_RELATIVE = Path("MQL5") / "Files" / "Dashboardv1"
+_latest_chart_response_ids: dict[int, str] = {}
 
 
 def _identity(account: Any, server: Any) -> tuple[str, str]:
@@ -122,17 +124,56 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
             os.unlink(tmp_name)
 
 
-def register_terminal(name: str, data_dir: str) -> dict[str, Any]:
-    path = Path(data_dir).expanduser().resolve()
-    if not (path / "origin.txt").is_file() or not (path / "MQL5").is_dir():
-        raise ValueError("Invalid DataDir: it must contain origin.txt and MQL5")
+def _is_remote(terminal: Any) -> bool:
+    return str(terminal["transport"] or "local") == "ssh"
+
+
+def register_terminal(
+    name: str,
+    data_dir: str,
+    *,
+    transport: str = "local",
+    ssh_host: str | None = None,
+    ssh_port: int | None = None,
+    ssh_username: str | None = None,
+    ssh_key_path: str | None = None,
+    ssh_host_fingerprint: str | None = None,
+) -> dict[str, Any]:
+    if transport not in {"local", "ssh"}:
+        raise ValueError("transport must be local or ssh")
+    if transport == "local":
+        path = Path(data_dir).expanduser().resolve()
+        if not (path / "origin.txt").is_file() or not (path / "MQL5").is_dir():
+            raise ValueError("Invalid DataDir: it must contain origin.txt and MQL5")
+        identity = str(path)
+        remote_data_dir = None
+    else:
+        required = (ssh_host, ssh_username, ssh_key_path, ssh_host_fingerprint, data_dir)
+        if not all(str(value or "").strip() for value in required):
+            raise ValueError("SSH terminals require host, username, key path, host fingerprint and remote DataDir")
+        if not Path(str(ssh_key_path)).is_file():
+            raise ValueError("SSH private-key file was not found")
+        port = int(ssh_port or 22)
+        if not 1 <= port <= 65535:
+            raise ValueError("Invalid SSH port")
+        remote_data_dir = data_dir
+        identity = f"ssh://{ssh_host}:{port}/{data_dir.replace('\\', '/')}"
     with session() as conn:
         conn.execute(
-            """INSERT INTO terminals(name,data_dir,status,created_at) VALUES(?,?,?,?)
-               ON CONFLICT(data_dir) DO UPDATE SET name=excluded.name""",
-            (name, str(path), "disconnected", utcnow()),
+            """INSERT INTO terminals(
+                 name,data_dir,status,transport,ssh_host,ssh_port,ssh_username,ssh_key_path,
+                 ssh_host_fingerprint,remote_data_dir,created_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(data_dir) DO UPDATE SET
+                 name=excluded.name,transport=excluded.transport,ssh_host=excluded.ssh_host,
+                 ssh_port=excluded.ssh_port,ssh_username=excluded.ssh_username,
+                 ssh_key_path=excluded.ssh_key_path,
+                 ssh_host_fingerprint=excluded.ssh_host_fingerprint,
+                 remote_data_dir=excluded.remote_data_dir""",
+            (name, identity, "disconnected", transport, ssh_host, ssh_port, ssh_username,
+             ssh_key_path, ssh_host_fingerprint, remote_data_dir, utcnow()),
         )
-        row = conn.execute("SELECT * FROM terminals WHERE data_dir=?", (str(path),)).fetchone()
+        row = conn.execute("SELECT * FROM terminals WHERE data_dir=?", (identity,)).fetchone()
     return dict(row)
 
 
@@ -141,7 +182,6 @@ def request_sync(terminal_id: int) -> dict[str, Any]:
         terminal = conn.execute("SELECT * FROM terminals WHERE id=?", (terminal_id,)).fetchone()
         if not terminal:
             raise KeyError("Terminal not found")
-        root = Path(terminal["data_dir"]) / BRIDGE_RELATIVE
         payload = {
             "schema_version": 1,
             "request_id": f"sync-{terminal_id}-{int(time.time())}",
@@ -149,7 +189,11 @@ def request_sync(terminal_id: int) -> dict[str, Any]:
             "since_msc": int(terminal["cursor_msc"] or 0),
             "requested_at": utcnow(),
         }
-        _atomic_json(root / "Requests" / "sync.request.json", payload)
+        if _is_remote(terminal):
+            SSHBridge(terminal).write_json_atomic(payload, "Requests", "sync.request.json")
+        else:
+            root = Path(terminal["data_dir"]) / BRIDGE_RELATIVE
+            _atomic_json(root / "Requests" / "sync.request.json", payload)
         conn.execute("UPDATE terminals SET last_error=NULL WHERE id=?", (terminal_id,))
     return payload
 
@@ -174,9 +218,23 @@ def request_chart(terminal_id: int, symbol: str, timeframe: str, start: int, end
             "to": int(end),
             "requested_at": utcnow(),
         }
-        root = Path(terminal["data_dir"]) / BRIDGE_RELATIVE
-        _atomic_json(root / "Requests" / "chart.request.json", payload)
+        if _is_remote(terminal):
+            SSHBridge(terminal).write_json_atomic(payload, "Requests", "chart.request.json")
+        else:
+            root = Path(terminal["data_dir"]) / BRIDGE_RELATIVE
+            _atomic_json(root / "Requests" / "chart.request.json", payload)
     return payload
+
+
+def run_remote_diagnostic(terminal_id: int, name: str) -> dict[str, str]:
+    """Run a predefined read-only diagnostic on an SSH terminal."""
+    with session() as conn:
+        terminal = conn.execute("SELECT * FROM terminals WHERE id=?", (terminal_id,)).fetchone()
+        if not terminal:
+            raise KeyError("Terminal not found")
+        if not _is_remote(terminal):
+            raise ValueError("Remote diagnostics are available only for SSH terminals")
+    return SSHBridge(terminal).diagnostic(name)
 
 
 def _upsert_sync_response(conn: Any, terminal: Any, payload: dict[str, Any]) -> None:
@@ -405,12 +463,38 @@ def repair_darwinex_live_demo_contamination(*, create_backup: bool = True) -> di
             ).fetchone()
             if not remaining:
                 cursor = conn.execute(
-                    """UPDATE strategies SET retired=1,archived_at=?,
+                    """UPDATE strategies SET retired=1,archived_at=?,monitoring_selected=0,
                        archive_reason='Removed contaminated Darwinex Demo history from Live'
-                       WHERE id=? AND account_login=? AND origin='mt5'""",
+                       WHERE id=? AND account_login=? AND (
+                         origin='mt5' OR (
+                           identity_strategy_id IS NOT NULL
+                           AND identity_strategy_id<>id
+                           AND INSTR('+' || origin || '+','+mt5+')>0
+                         )
+                       )""",
                     (utcnow(), strategy_id, live_account),
                 )
                 archived_strategies += max(cursor.rowcount, 0)
+        # Earlier versions removed the contaminated mapping first and then
+        # failed to archive mt5+sqx deployment clones.  Include those already
+        # orphaned rows so rerunning this repair also heals existing databases.
+        cursor = conn.execute(
+            """UPDATE strategies SET retired=1,archived_at=?,monitoring_selected=0,
+                 archive_reason='Orphaned after removing contaminated Darwinex Demo history from Live'
+               WHERE account_login=? AND retired=0 AND archived_at IS NULL
+                 AND identity_strategy_id IS NOT NULL AND identity_strategy_id<>id
+                 AND INSTR('+' || origin || '+','+mt5+')>0
+                 AND NOT EXISTS(SELECT 1 FROM mappings m WHERE m.strategy_id=strategies.id)
+                 AND NOT EXISTS(
+                   SELECT 1 FROM bot_deployments d
+                   WHERE d.strategy_id=strategies.id AND d.confirmed=1
+                 )
+                 AND NOT EXISTS(SELECT 1 FROM sqx_strategy_links l WHERE l.strategy_id=strategies.id)
+                 AND NOT EXISTS(SELECT 1 FROM backtest_runs r WHERE r.strategy_id=strategies.id)
+                 AND NOT EXISTS(SELECT 1 FROM baseline_snapshots b WHERE b.strategy_id=strategies.id)""",
+            (utcnow(), live_account),
+        )
+        archived_strategies += max(cursor.rowcount, 0)
     return {
         "backup_path": str(backup_path) if backup_path else None,
         "live_terminal_id": live_id,
@@ -424,6 +508,9 @@ def repair_darwinex_live_demo_contamination(*, create_backup: bool = True) -> di
 def _upsert_chart_response(conn: Any, terminal_id: int, payload: dict[str, Any]) -> None:
     symbol = str(payload.get("symbol", ""))
     timeframe = str(payload.get("timeframe", ""))
+    request_id = str(payload.get("request_id") or "")
+    if request_id:
+        _latest_chart_response_ids[terminal_id] = request_id
     for candle in payload.get("candles", []):
         conn.execute(
             """INSERT INTO candles(terminal_id,symbol,timeframe,time,open,high,low,close,tick_volume)
@@ -443,18 +530,41 @@ def _upsert_chart_response(conn: Any, terminal_id: int, payload: dict[str, Any])
         )
 
 
-def ingest_responses() -> dict[str, int]:
+def latest_chart_response_id(terminal_id: int) -> str | None:
+    """The most recent bridge chart response seen by this backend process."""
+    return _latest_chart_response_ids.get(terminal_id)
+
+
+def ingest_responses(*, terminal_ids: set[int] | None = None) -> dict[str, int]:
     sync_count = chart_count = errors = 0
     with session() as conn:
-        terminals = conn.execute("SELECT * FROM terminals").fetchall()
+        if terminal_ids is None:
+            terminals = conn.execute("SELECT * FROM terminals").fetchall()
+        else:
+            selected_ids = sorted(terminal_ids)
+            if not selected_ids:
+                return {"sync": 0, "charts": 0, "errors": 0, "strategies_created": 0, "strategies_linked": 0}
+            placeholders = ",".join("?" for _ in selected_ids)
+            terminals = conn.execute(
+                f"SELECT * FROM terminals WHERE id IN ({placeholders})", selected_ids
+            ).fetchall()
         for terminal in terminals:
-            root = Path(terminal["data_dir"]) / BRIDGE_RELATIVE / "Responses"
-            candidates = [("sync", root / "sync.response.json"), ("chart", root / "chart.response.json")]
-            for kind, path in candidates:
-                if not path.is_file():
-                    continue
+            remote = _is_remote(terminal)
+            root = Path(terminal["data_dir"]) / BRIDGE_RELATIVE / "Responses" if not remote else None
+            candidates = ("sync", "chart")
+            for kind in candidates:
                 try:
-                    payload = json.loads(path.read_text(encoding="utf-8-sig"))
+                    if remote:
+                        content = SSHBridge(terminal).read_text("Responses", f"{kind}.response.json")
+                        if content is None:
+                            continue
+                        payload = json.loads(content)
+                    else:
+                        assert root is not None
+                        path = root / f"{kind}.response.json"
+                        if not path.is_file():
+                            continue
+                        payload = json.loads(path.read_text(encoding="utf-8-sig"))
                     if payload.get("status", "ok") != "ok":
                         raise ValueError(str(payload.get("message", "MT5 response returned an error")))
                     if kind == "sync":
@@ -463,16 +573,20 @@ def ingest_responses() -> dict[str, int]:
                     else:
                         _upsert_chart_response(conn, terminal["id"], payload)
                         chart_count += 1
-                    archive = root / "Archive"
-                    archive.mkdir(parents=True, exist_ok=True)
-                    os.replace(path, archive / f"{kind}-{int(time.time() * 1000)}.json")
+                    if remote:
+                        SSHBridge(terminal).archive_response(kind)
+                    else:
+                        assert root is not None
+                        archive = root / "Archive"
+                        archive.mkdir(parents=True, exist_ok=True)
+                        os.replace(path, archive / f"{kind}-{int(time.time() * 1000)}.json")
                 except Exception as exc:
                     errors += 1
                     conn.execute(
                         "UPDATE terminals SET last_error=? WHERE id=?", (str(exc)[:500], terminal["id"])
                     )
         now = datetime.now(timezone.utc).timestamp()
-        refreshed_terminals = conn.execute("SELECT * FROM terminals").fetchall()
+        refreshed_terminals = terminals
         for terminal in refreshed_terminals:
             last_seen = terminal["last_seen"]
             stale = True

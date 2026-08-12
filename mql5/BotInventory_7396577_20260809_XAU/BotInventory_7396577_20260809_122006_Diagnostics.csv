@@ -1,0 +1,2 @@
+generated_utc,account_login,server,catalog_read,catalog_location,catalog_lines,catalog_valid_rows,catalog_exact_matches,history_read,activity_magic_groups,historical_orders,current_orders,charts_reported,script_charts_excluded,auto_matched_rows,ambiguous_auto_matches,warnings
+"2026-08-09T10:20:06Z","7396577","FirstPrudentialMarkets-Demo","SI","LOCAL_MQL5_FILES\BotInventoryReport\BotInventoryCatalog.csv","13","12","12","SI","48","16902","1","40","1","0","0","CHART_DEL_SCRIPT_EXCLUIDO: 1"

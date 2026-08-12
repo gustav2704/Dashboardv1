@@ -1,0 +1,6 @@
+profile_source,symbol,ex5_name,magic_number,expected_comment,activity_status,entry_deals,orders,first_trade,last_trade,first_order,last_order
+MQL5\Profiles\Charts\Default\chart04.chr,US30,DJ_H1_4.7.21(2)_opt.ex5,472122,US30_H1_47212_opt,SOLO_ORDENES,0,2,,,2026.08.06 17:00:00,2026.08.07 17:00:00
+MQL5\Profiles\Charts\Default\chart05.chr,US30,DJ_H1_5.1.22(1)_opt.ex5,512212,US30_H1_51221_opt,NUNCA_OPERO,0,0,,,,
+MQL5\Profiles\Charts\Default\chart01.chr,US30,WF Matrix - Strategy 3.8.23(1).ex5,38231,WF_Matrix_Strategy_3_8_23_1,SOLO_ORDENES,0,602,,,2026.06.09 01:01:00,2026.08.06 22:00:00
+MQL5\Profiles\Charts\Default\chart02.chr,US30,WF Matrix - Strategy 4.7.21(2).ex5,47212,WF_Matrix_Strategy_4_7_21_2,CON_OPERACIONES,25,83,2026.06.08 21:01:23,2026.07.13 12:26:27,2026.06.08 21:00:00,2026.08.07 17:00:00
+MQL5\Profiles\Charts\Default\chart03.chr,US30,WF Matrix - Strategy 5.1.22(1).ex5,51221,WF_Matrix_Strategy_5_1_22_1,SOLO_ORDENES,0,130,,,2026.06.10 10:00:00,2026.07.23 22:00:00

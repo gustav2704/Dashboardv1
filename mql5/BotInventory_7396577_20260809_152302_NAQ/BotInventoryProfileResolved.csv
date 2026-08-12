@@ -1,0 +1,10 @@
+profile_source,symbol,ex5_name,magic_number,expected_comment,activity_status,entry_deals,orders,first_trade,last_trade,first_order,last_order
+MQL5\Profiles\Charts\Default\chart05.chr,US100,NAQWF Matrix - NAQStrategy 2.8.22dwnxdwnx.ex5,2822,WF_NAQ_Strategy_2_8_22,CON_OPERACIONES,3,523,2026.06.22 17:08:08,2026.08.04 10:26:40,2026.06.04 17:14:39,2026.08.07 20:00:00
+MQL5\Profiles\Charts\Default\chart03.chr,US100,NAQWF Matrix - NAQStrategy 3.5.23(1)dwnxdwnx.ex5,35231,NAQWF_Matrix_NAQStrategy_3_5_2,CON_OPERACIONES,8,38,2026.06.19 09:52:42,2026.08.03 17:37:18,2026.06.05 01:01:00,2026.08.03 23:00:00
+MQL5\Profiles\Charts\Default\chart04.chr,US100,NAQ_B_Adx_3.14.14dwnx.ex5,31414,WF_Matrix_NAQStrategy_3_14_14d,CON_OPERACIONES,8,38,2026.06.19 09:52:42,2026.08.03 17:37:18,2026.06.05 01:01:00,2026.08.03 23:00:00
+MQL5\Profiles\Charts\Default\chart06.chr,US100,NAQ_Strategy 1.1.37.ex5,1137,WF_Matrix_Strategy_1_1_37,CON_OPERACIONES,3,6,2026.07.20 16:00:00,2026.08.03 01:01:00,2026.07.20 16:00:00,2026.08.03 07:00:00
+MQL5\Profiles\Charts\Default\chart07.chr,US100,NAQ_Strategy 1.9.63.ex5,1963,WF_Matrix_Strategy_1_9_63,CON_OPERACIONES,11,22,2026.07.17 14:00:00,2026.08.07 15:00:00,2026.07.17 14:00:00,2026.08.07 20:59:01
+MQL5\Profiles\Charts\Default\chart09.chr,US100,NAQ_Strategy 4.12.44.ex5,11111,WF_Matrix_Strategy_4_12_44,NUNCA_OPERO,0,0,,,,
+MQL5\Profiles\Charts\Default\chart10.chr,US100,NAQ_Strategy 5.10.59.ex5,51059,WF_Matrix_Strategy_5_10_59,CON_OPERACIONES,13,26,2026.07.16 18:49:21,2026.08.06 20:00:00,2026.07.16 18:49:21,2026.08.07 10:00:00
+MQL5\Profiles\Charts\Default\chart01.chr,US100,WF Matrix - NAQStrategy 1.11.24dwnx.ex5,1,WF_Matrix_NAQStrategy_1_11_24d,CON_OPERACIONES,21,613,2026.05.13 17:53:40,2026.08.05 16:30:15,2026.05.12 05:00:00,2026.08.07 09:00:00
+MQL5\Profiles\Charts\Default\chart02.chr,US100,WF Matrix - NAQStrategy 3.1.16dwnx.ex5,2,WF_Matrix_NAQStrategy_3_1_16dw,CON_OPERACIONES,9,40,2026.05.22 11:17:58,2026.07.21 07:00:00,2026.05.15 21:00:00,2026.08.06 18:00:00

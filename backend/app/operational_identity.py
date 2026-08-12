@@ -1,11 +1,12 @@
 """Operational bot identity helpers.
 
-An MT5 strategy is a research/catalogue record.  A deployed bot is narrower:
-one account, terminal, normalized asset and Magic Number.  Keeping this rule in
-one module prevents comments or display names from silently joining histories.
+The stable identity of a deployed EA is its broker server, account, normalized
+asset and normalized EX5 name.  Magic Numbers, terminal sessions, chart IDs and
+timeframes are observations owned by that identity, never identity fields.
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Iterable
 
 
@@ -15,15 +16,85 @@ def _value(mapping: Any, key: str, default: Any = None) -> Any:
     return mapping[key] if key in mapping.keys() else default
 
 
+def normalize_expert(value: object) -> str:
+    text = str(value or "").strip()
+    if text.casefold().endswith(".ex5"):
+        text = text[:-4]
+    return re.sub(r"[^a-z0-9]+", "", text.casefold())
+
+
 def terminal_session_id(mapping: Any) -> int:
-    """Treat an archived terminal and its active successor as one session."""
+    """Legacy presentation helper; terminal is no longer part of identity."""
     data_dir = str(_value(mapping, "terminal_data_dir", "") or "")
     marker = "archive://terminal/"
     if data_dir.startswith(marker):
         root = data_dir[len(marker):].split("/", 1)[0]
         if root.isdigit():
             return int(root)
-    return int(mapping["terminal_id"])
+    return int(_value(mapping, "terminal_id", 0) or 0)
+
+
+def _asset_key(symbol: str) -> str:
+    from .mapping import asset_key
+    return asset_key(symbol)
+
+
+def server_key(mapping: Any) -> str:
+    return str(
+        _value(mapping, "operational_server")
+        or _value(mapping, "terminal_server")
+        or _value(mapping, "server")
+        or ""
+    ).strip().casefold()
+
+
+def expert_key(mapping: Any) -> str:
+    for key in (
+        "operational_expert_key", "strategy_expert_key", "expert_key",
+        "normalized_ex5", "expert_name", "ex5_name", "mql5_name", "sqx_name",
+    ):
+        value = _value(mapping, key)
+        if str(value or "").strip():
+            return normalize_expert(value)
+    return ""
+
+
+def identity(mapping: Any) -> tuple[str, str, str, str]:
+    return (
+        server_key(mapping),
+        str(_value(mapping, "account_login", "") or "").strip(),
+        str(_value(mapping, "operational_asset_key", "") or "")
+        or _asset_key(str(_value(mapping, "symbol", "") or "")),
+        expert_key(mapping),
+    )
+
+
+def identity_dict(mapping: Any) -> dict[str, Any]:
+    server, account_login, normalized_asset, normalized_expert = identity(mapping)
+    return {
+        "server": str(
+            _value(mapping, "operational_server")
+            or _value(mapping, "terminal_server")
+            or _value(mapping, "server")
+            or server
+        ).strip(),
+        "account_login": account_login,
+        "asset_key": normalized_asset,
+        "expert_key": normalized_expert,
+        "expert_name": str(
+            _value(mapping, "expert_name")
+            or _value(mapping, "mql5_name")
+            or _value(mapping, "sqx_name")
+            or ""
+        ),
+        "symbol": str(_value(mapping, "symbol", "") or ""),
+    }
+
+
+def same_identity(left: Any, right: Any) -> bool:
+    left_identity = identity(left)
+    right_identity = identity(right)
+    return bool(left_identity[1] and left_identity[2] and left_identity[3]) and left_identity == right_identity
 
 
 def load_mappings(
@@ -33,7 +104,6 @@ def load_mappings(
     confirmed_only: bool = False,
     role: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Load mappings with the terminal metadata required for session identity."""
     conditions = ["m.strategy_id=?"]
     values: list[Any] = [strategy_id]
     if confirmed_only:
@@ -45,8 +115,11 @@ def load_mappings(
     return [dict(row) for row in conn.execute(
         f"""SELECT m.*,t.data_dir AS terminal_data_dir,
                    t.account_login AS terminal_account_login,t.server AS terminal_server,
-                   t.status AS terminal_status
+                   t.status AS terminal_status,
+                   s.operational_server,s.operational_asset_key,s.operational_expert_key,
+                   s.mql5_name,s.sqx_name
             FROM mappings m JOIN terminals t ON t.id=m.terminal_id
+            JOIN strategies s ON s.id=m.strategy_id
             WHERE {' AND '.join(conditions)}
             ORDER BY CASE WHEN t.data_dir LIKE 'archive://%' THEN 1 ELSE 0 END,m.id""",
         values,
@@ -54,107 +127,62 @@ def load_mappings(
 
 
 def enrich_terminal_identity(conn: Any, mapping: Any) -> dict[str, Any]:
-    """Attach terminal metadata to a mapping/candidate before identity checks."""
     result = dict(mapping)
-    if result.get("terminal_data_dir") is not None:
-        return result
-    terminal = conn.execute(
-        "SELECT data_dir,account_login,server,status FROM terminals WHERE id=?",
-        (int(result["terminal_id"]),),
-    ).fetchone()
-    if terminal:
-        result.update({
-            "terminal_data_dir": terminal["data_dir"],
-            "terminal_account_login": terminal["account_login"],
-            "terminal_server": terminal["server"],
-            "terminal_status": terminal["status"],
-        })
+    if result.get("terminal_server") is None:
+        terminal = conn.execute(
+            "SELECT data_dir,account_login,server,status FROM terminals WHERE id=?",
+            (int(result.get("terminal_id") or 0),),
+        ).fetchone()
+        if terminal:
+            result.update({
+                "terminal_data_dir": terminal["data_dir"],
+                "terminal_account_login": terminal["account_login"],
+                "terminal_server": terminal["server"],
+                "terminal_status": terminal["status"],
+            })
     return result
 
-def _asset_key(symbol: str) -> str:
-    # Imported lazily because mapping.py also uses this validation module.
-    from .mapping import asset_key
-    return asset_key(symbol)
 
-
-def identity(mapping: Any) -> tuple[str, int, str, int]:
-    return (
-        str(mapping["account_login"] or "").strip(),
-        terminal_session_id(mapping),
-        _asset_key(str(mapping["symbol"] or "")),
-        int(mapping["magic"] or 0),
-    )
-
-
-def identity_dict(mapping: Any) -> dict[str, Any]:
-    account_login, terminal_id, normalized_asset, magic = identity(mapping)
-    return {
-        "account_login": account_login,
-        "terminal_id": terminal_id,
-        "asset_key": normalized_asset,
-        "magic": magic,
-        "symbol": str(mapping["symbol"] or ""),
-    }
-
-
-def same_identity(left: Any, right: Any) -> bool:
-    return identity(left) == identity(right)
-
-
-def identity_groups(mappings: Iterable[Any]) -> dict[tuple[str, int, str, int], list[Any]]:
-    grouped: dict[tuple[str, int, str, int], list[Any]] = {}
+def identity_groups(mappings: Iterable[Any]) -> dict[tuple[str, str, str, str], list[Any]]:
+    grouped: dict[tuple[str, str, str, str], list[Any]] = {}
     for mapping in mappings:
         grouped.setdefault(identity(mapping), []).append(mapping)
     return grouped
 
 
 def primary_mapping(strategy: Any, mappings: Iterable[Any]) -> Any | None:
-    """Choose a deterministic operational identity for legacy multi-mapped IDs.
-
-    New writes are rejected before an ID can become ambiguous.  This fallback is
-    deliberately conservative so legacy bad associations stop affecting normal
-    history until they are split by the repair tool.
-    """
     candidates = list(mappings)
     if not candidates:
         return None
-    strategy_asset = _asset_key(str(strategy["symbol"] or ""))
-    strategy_account = str(strategy["account_login"] or "").strip()
-    candidates.sort(
-        key=lambda mapping: (
-            0 if _asset_key(str(mapping["symbol"] or "")) == strategy_asset else 1,
-            0 if str(mapping["account_login"] or "").strip() == strategy_account else 1,
-            0 if str(mapping["role"] or "live") == "live" else 1,
-            1 if str(mapping.get("terminal_data_dir", "") if isinstance(mapping, dict) else "").startswith("archive://") else 0,
-            int(mapping["magic"] or 0),
-            int(mapping["id"]),
-        )
-    )
+    strategy_asset = str(_value(strategy, "operational_asset_key", "") or "") or _asset_key(str(_value(strategy, "symbol", "") or ""))
+    strategy_account = str(_value(strategy, "account_login", "") or "").strip()
+    strategy_expert = expert_key(strategy)
+    strategy_server = str(_value(strategy, "operational_server", "") or "").strip().casefold()
+    candidates.sort(key=lambda mapping: (
+        0 if _asset_key(str(_value(mapping, "symbol", "") or "")) == strategy_asset else 1,
+        0 if str(_value(mapping, "account_login", "") or "").strip() == strategy_account else 1,
+        0 if not strategy_server or server_key(mapping) == strategy_server else 1,
+        0 if not strategy_expert or expert_key(mapping) == strategy_expert else 1,
+        0 if str(_value(mapping, "role", "live") or "live") == "live" else 1,
+        int(_value(mapping, "id", 0) or 0),
+    ))
     return candidates[0]
 
 
 def mappings_for_primary(strategy: Any, mappings: Iterable[Any]) -> list[Any]:
-    """Return only mappings that describe the selected operational bot."""
     values = list(mappings)
     primary = primary_mapping(strategy, values)
     if primary is None:
         return []
-    return [
-        mapping for mapping in values
-        if str(mapping["account_login"] or "") == str(primary["account_login"] or "")
-        and _asset_key(str(mapping["symbol"] or "")) == _asset_key(str(primary["symbol"] or ""))
-        and int(mapping["magic"] or 0) == int(primary["magic"] or 0)
-        and str(mapping["role"] or "live") == str(primary["role"] or "live")
-        and terminal_session_id(mapping) == terminal_session_id(primary)
-    ]
+    primary_identity = identity(primary)
+    return [mapping for mapping in values if identity(mapping) == primary_identity]
 
 
 def conflicts(strategy: Any, mappings: Iterable[Any]) -> list[dict[str, Any]]:
-    # Predecessor/history mappings are lineage, not competing live bot identities.
     values = [
         mapping for mapping in mappings
-        if int(mapping["confirmed"] or 0) == 1
-        and str(mapping["role"] or "live") == "live"
+        if int(_value(mapping, "confirmed", 0) or 0) == 1
+        and str(_value(mapping, "role", "live") or "live") == "live"
     ]
     groups = identity_groups(values)
     if len(groups) <= 1:
@@ -164,8 +192,8 @@ def conflicts(strategy: Any, mappings: Iterable[Any]) -> list[dict[str, Any]]:
     return [
         {
             "identity": {
-                "account_login": key[0], "terminal_id": key[1],
-                "asset_key": key[2], "magic": key[3],
+                "server": key[0], "account_login": key[1],
+                "asset_key": key[2], "expert_key": key[3],
             },
             "primary": key == primary_key,
             "mapping_ids": sorted(int(item["id"]) for item in group),
@@ -176,9 +204,15 @@ def conflicts(strategy: Any, mappings: Iterable[Any]) -> list[dict[str, Any]]:
 
 
 def assert_compatible_with_strategy(conn: Any, strategy_id: int, candidate: dict[str, Any]) -> None:
-    """Reject a write that would make a bot ID own a second identity."""
     existing = load_mappings(conn, strategy_id, confirmed_only=True, role="live")
     enriched_candidate = enrich_terminal_identity(conn, candidate)
+    strategy = conn.execute("SELECT * FROM strategies WHERE id=?", (strategy_id,)).fetchone()
+    if strategy:
+        enriched_candidate.setdefault("operational_server", strategy["operational_server"])
+        enriched_candidate.setdefault("operational_asset_key", strategy["operational_asset_key"])
+        enriched_candidate.setdefault("operational_expert_key", strategy["operational_expert_key"])
+        enriched_candidate.setdefault("mql5_name", strategy["mql5_name"])
+        enriched_candidate.setdefault("sqx_name", strategy["sqx_name"])
     incompatible = [mapping for mapping in existing if not same_identity(mapping, enriched_candidate)]
     if not incompatible:
         return
@@ -186,8 +220,8 @@ def assert_compatible_with_strategy(conn: Any, strategy_id: int, candidate: dict
     received = identity_dict(enriched_candidate)
     raise ValueError(
         "Operational identity conflict: strategy "
-        f"{strategy_id} is {expected['account_login']} / terminal {expected['terminal_id']} / "
-        f"{expected['asset_key']} / MN {expected['magic']}; cannot attach "
-        f"{received['account_login']} / terminal {received['terminal_id']} / "
-        f"{received['asset_key']} / MN {received['magic']}"
+        f"{strategy_id} is {expected['server']} / {expected['account_login']} / "
+        f"{expected['asset_key']} / {expected['expert_key']}; cannot attach "
+        f"{received['server']} / {received['account_login']} / "
+        f"{received['asset_key']} / {received['expert_key']}"
     )

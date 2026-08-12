@@ -79,6 +79,7 @@ def test_normalized_performance_metrics_use_a_one_month_floor():
 
     assert metrics["performance_months"] == 1
     assert metrics["performance_trades_per_month"] == 4
+    assert metrics["trades_per_month"] == 4
     assert math.isclose(metrics["trade_edge"], expected_edge)
     assert math.isclose(metrics["monthly_sqn"], expected_edge * math.sqrt(4))
 
@@ -181,7 +182,12 @@ def test_risk_guard_evaluates_is_and_oos_independently():
 
 
 def test_risk_guard_marks_equal_limits_yellow_without_stop_recommendation():
-    live = {**compute_metrics([]), "max_drawdown": 100, "max_consecutive_losses": 2}
+    live = {
+        **compute_metrics([]),
+        "max_drawdown": 100,
+        "max_consecutive_losses": 2,
+        "current_consecutive_losses": 2,
+    }
     baselines = [
         {"sample_type": sample, "source": "sqx", "metrics": {"MaxDD": 100, "MaxConsecLoss": 2}}
         for sample in ("is", "oos")
@@ -193,7 +199,8 @@ def test_risk_guard_marks_equal_limits_yellow_without_stop_recommendation():
     assert result["stop_recommended"] is False
     assert all(
         check["status"] == "yellow"
-        for sample in result["checks"].values()
+        for sample_name, sample in result["checks"].items()
+        if sample_name != "mt5"
         for check in sample.values()
     )
 
@@ -212,23 +219,23 @@ def test_risk_guard_ignores_zero_limits_and_uses_valid_source_fallback():
     assert result["checks"]["oos"]["loss_streak"]["source"] == "excel"
 
 
-def test_mt5_snake_case_baseline_is_used_for_health_and_risk_limits():
+def test_mt5_snake_case_full_baseline_is_used_for_health_and_risk_limits():
     combined = {
         **compute_metrics([]),
         "max_drawdown": 50,
         "max_consecutive_losses": 2,
+        "current_consecutive_losses": 2,
     }
     baselines = [
         {
-            "sample_type": sample,
+            "sample_type": "full",
             "source": "mt5_backtest",
             "metrics": {"max_drawdown": 100, "max_consecutive_losses": 3},
         }
-        for sample in ("is", "oos")
     ]
     risk_guard = risk_guard_status(combined, baselines, RULES)
     assert risk_guard["status"] == "green"
-    assert risk_guard["checks"]["oos"]["drawdown"]["source"] == "mt5_backtest"
+    assert risk_guard["checks"]["mt5"]["drawdown"]["source"] == "mt5_backtest"
 
     observed = compute_metrics([
         {"net_profit": value, "open_time_msc": index * 1000, "close_time_msc": (index + 1) * 1000, "commission": 0, "swap": 0}
@@ -243,6 +250,49 @@ def test_mt5_snake_case_baseline_is_used_for_health_and_risk_limits():
     assert health["status"] == "red"
     assert "profit_factor" in health["red"]
     assert "expectancy" in health["red"]
+
+
+def test_mt5_full_baseline_falls_back_only_when_oos_limit_is_missing():
+    live = {
+        **compute_metrics([]),
+        "max_drawdown": 90,
+        "max_consecutive_losses": 2,
+        "current_consecutive_losses": 2,
+    }
+    baselines = [
+        {"sample_type": "is", "source": "sqx", "metrics": {"MaxDD": 200, "MaxConsecLoss": 4}},
+        {"sample_type": "full", "source": "mt5_backtest", "metrics": {"max_drawdown": 100, "max_consecutive_losses": 3}},
+    ]
+
+    result = risk_guard_status(live, baselines, RULES)
+
+    assert result["checks"]["is"]["drawdown"]["source"] == "sqx"
+    assert result["checks"]["oos"]["drawdown"]["status"] == "gray"
+    assert result["checks"]["mt5"]["drawdown"]["source"] == "mt5_backtest"
+    assert result["checks"]["mt5"]["drawdown"]["status"] == "yellow"
+    assert result["checks"]["mt5"]["loss_streak"]["status"] == "green"
+
+
+def test_mt5_full_baseline_is_not_used_when_oos_is_available():
+    live = {**compute_metrics([]), "max_drawdown": 90, "current_consecutive_losses": 0}
+    baselines = [
+        {"sample_type": "oos", "source": "sqx", "metrics": {"MaxDD": 120}},
+        {"sample_type": "full", "source": "mt5_backtest", "metrics": {"max_drawdown": 100}},
+    ]
+
+    result = risk_guard_status(live, baselines, RULES)
+
+    assert result["checks"]["oos"]["drawdown"]["source"] == "sqx"
+    assert result["checks"]["mt5"]["drawdown"]["status"] == "gray"
+
+
+def test_risk_guard_reports_missing_baseline_when_no_limit_is_valid():
+    live = {**compute_metrics([]), "max_drawdown": 20, "current_consecutive_losses": 1}
+    result = risk_guard_status(live, [{"sample_type": "full", "source": "mt5_backtest", "metrics": {"max_drawdown": 0}}], RULES)
+
+    assert result["status"] == "gray"
+    assert result["baseline_available"] is False
+    assert "No valid StrategyQuant or MT5" in result["missing_message"]
 
 
 def test_risk_guard_overrides_insufficient_performance_sample():

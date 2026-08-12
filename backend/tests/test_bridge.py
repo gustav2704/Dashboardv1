@@ -11,6 +11,24 @@ from app.mt5_bridge import (
 )
 
 
+def test_register_ssh_terminal_keeps_remote_settings(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "ssh-terminal.db")
+    db.init_db()
+    key = tmp_path / "id_ed25519"
+    key.write_text("test key", encoding="utf-8")
+    terminal = register_terminal(
+        "VPS Darwinex", r"C:\\Users\\Administrator\\AppData\\Roaming\\MetaQuotes\\Terminal\\ABC",
+        transport="ssh", ssh_host="vps.example.test", ssh_port=2222,
+        ssh_username="Administrator", ssh_key_path=str(key),
+        ssh_host_fingerprint="SHA256:example",
+    )
+    assert terminal["transport"] == "ssh"
+    assert terminal["ssh_host"] == "vps.example.test"
+    assert terminal["ssh_port"] == 2222
+    assert terminal["remote_data_dir"].endswith(r"Terminal\\ABC")
+    assert terminal["data_dir"].startswith("ssh://vps.example.test:2222/")
+
+
 def test_reusing_data_dir_archives_old_account_rows(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "reuse.db")
     db.init_db()
@@ -76,21 +94,17 @@ def test_sync_response_is_ingested_and_deduplicated(tmp_path, monkeypatch):
         assert conn.execute("SELECT COUNT(*) FROM deals").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM positions").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM pending_orders").fetchone()[0] == 1
-        assert conn.execute("SELECT COUNT(*) FROM strategies").fetchone()[0] == 1
-        strategy = conn.execute(
-            "SELECT origin,mql5_name FROM strategies"
-        ).fetchone()
-        assert tuple(strategy) == ("mt5", "XAU bot")
-        assert conn.execute("SELECT COUNT(*) FROM mappings").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM strategies").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM mappings").fetchone()[0] == 0
         row = conn.execute("SELECT status,account_login,cursor_msc FROM terminals WHERE id=?", (terminal["id"],)).fetchone()
         assert tuple(row) == ("disconnected", "123", 1000)
 
     assert ingest_responses()["strategies_created"] == 0
     with db.session() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM strategies").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM strategies").fetchone()[0] == 0
 
 
-def test_open_position_discovers_mt5_strategy_without_deals(tmp_path, monkeypatch):
+def test_open_position_without_confirmed_ex5_remains_unassigned(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "position.db")
     db.init_db()
     data_dir = tmp_path / "terminal"
@@ -127,12 +141,10 @@ def test_open_position_discovers_mt5_strategy_without_deals(tmp_path, monkeypatc
 
     result = ingest_responses()
 
-    assert result["strategies_created"] == 1
+    assert result["strategies_created"] == 0
     with db.session() as conn:
-        strategy = conn.execute(
-            "SELECT symbol,sqx_name,origin,account_login FROM strategies"
-        ).fetchone()
-        assert tuple(strategy) == ("US100.cash", "New MT5 bot", "mt5", "456")
+        assert conn.execute("SELECT COUNT(*) FROM strategies").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM positions").fetchone()[0] == 1
 
 
 def test_pending_order_can_confirm_existing_strategy_mapping(tmp_path, monkeypatch):
@@ -336,7 +348,9 @@ def test_repair_removes_only_demo_duplicates_from_live(tmp_path, monkeypatch):
     with db.session() as conn:
         live_id = conn.execute("INSERT INTO terminals(name,data_dir,account_login,server,status,created_at) VALUES(?,?,?,?,?,?)", ("Live", "C:/live", "4000094894", "Darwinex-Live", "connected", now)).lastrowid
         demo_id = conn.execute("INSERT INTO terminals(name,data_dir,account_login,server,status,created_at) VALUES(?,?,?,?,?,?)", ("Demo", "C:/demo", "3000097316", "Darwinex-Demo", "connected", now)).lastrowid
-        wrong_strategy = conn.execute("INSERT INTO strategies(symbol,sqx_name,account_login,origin,created_at) VALUES(?,?,?,?,?)", ("XAUUSD", "Demo bot", "4000094894", "mt5", now)).lastrowid
+        canonical_strategy = conn.execute("INSERT INTO strategies(symbol,sqx_name,account_login,origin,created_at) VALUES(?,?,?,?,?)", ("XAUUSD", "Canonical demo bot", "3000097316", "sqx", now)).lastrowid
+        wrong_strategy = conn.execute("INSERT INTO strategies(identity_strategy_id,symbol,sqx_name,account_login,origin,created_at) VALUES(?,?,?,?,?,?)", (canonical_strategy, "XAUUSD", "Demo bot", "4000094894", "mt5+sqx", now)).lastrowid
+        orphan_strategy = conn.execute("INSERT INTO strategies(identity_strategy_id,symbol,sqx_name,account_login,origin,created_at) VALUES(?,?,?,?,?,?)", (canonical_strategy, "XAUUSD", "Previously orphaned bot", "4000094894", "mt5+sqx", now)).lastrowid
         valid_strategy = conn.execute("INSERT INTO strategies(symbol,sqx_name,account_login,origin,created_at) VALUES(?,?,?,?,?)", ("NDX", "Live bot", "4000094894", "mt5", now)).lastrowid
         for strategy_id, symbol, magic, comment in ((wrong_strategy, "XAUUSD", 7, "Demo bot"), (valid_strategy, "NDX", 8, "Live bot")):
             conn.execute("INSERT INTO mappings(strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,role,confirmed,created_at) VALUES(?,?,?,?,?,?, 'live',1,?)", (strategy_id, live_id, "4000094894", symbol, magic, comment, now))
@@ -353,5 +367,6 @@ def test_repair_removes_only_demo_duplicates_from_live(tmp_path, monkeypatch):
         assert conn.execute("SELECT COUNT(*) FROM deals WHERE terminal_id=?", (live_id,)).fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM deals WHERE terminal_id=?", (demo_id,)).fetchone()[0] == 1
         wrong = conn.execute("SELECT retired FROM strategies WHERE id=?", (wrong_strategy,)).fetchone()[0]
+        orphan = conn.execute("SELECT retired FROM strategies WHERE id=?", (orphan_strategy,)).fetchone()[0]
         valid = conn.execute("SELECT retired FROM strategies WHERE id=?", (valid_strategy,)).fetchone()[0]
-        assert (wrong, valid) == (1, 0)
+        assert (wrong, orphan, valid) == (1, 1, 0)

@@ -10,6 +10,7 @@
 input string CatalogFile = "BotInventoryReport\\BotInventoryCatalog.csv";
 input string OutputFolder = "BotInventoryReport";
 input bool   TrySharedCatalog = true;
+input bool   AutoSeedCatalogFromHistory = true;
 
 struct CatalogRow
 {
@@ -43,6 +44,7 @@ string catalog_location="NO_ENCONTRADO";
 int catalog_lines=0;
 int catalog_valid_rows=0;
 int catalog_exact_matches=0;
+int catalog_auto_added=0;
 ulong observed_order_tickets[];
 int historical_orders_loaded=0;
 int current_orders_loaded=0;
@@ -232,6 +234,54 @@ bool LoadCatalog()
    }
    if(catalog_valid_rows==0)
       AddWarning("CATALOGO_SIN_FILAS_VALIDAS: "+catalog_location);
+   return true;
+}
+
+bool CatalogContainsPair(const string ex5,const long magic)
+{
+   string normalized=NormalizeEx5Name(ex5);
+   for(int i=0;i<ArraySize(catalog);i++)
+      if(catalog[i].normalized_name==normalized && catalog[i].magic==magic) return true;
+   return false;
+}
+
+void AddCatalogPairInMemory(const string ex5,const long magic,const string expected_comment)
+{
+   int size=ArraySize(catalog);
+   ArrayResize(catalog,size+1);
+   catalog[size].ex5_name=DisplayEx5Name(ex5);
+   catalog[size].normalized_name=NormalizeEx5Name(ex5);
+   catalog[size].magic=magic;
+   catalog[size].expected_comment=Trim(expected_comment);
+   catalog[size].duplicate=false;
+   catalog[size].shared_magic=false;
+   catalog_lines++;
+   catalog_valid_rows++;
+}
+
+// MQL5 cannot inspect the input parameters of an EA attached to another chart.
+// Only persist a unique association recovered from an executed-deal signature.
+bool AppendAutoCatalogPair(const string ex5,const long magic,const string expected_comment)
+{
+   if(ex5=="" || NormalizeEx5Name(ex5)=="" || CatalogContainsPair(ex5,magic)) return false;
+
+   ResetLastError();
+   int handle=FileOpen(CatalogFile,FILE_READ|FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_SHARE_READ,',');
+   if(handle==INVALID_HANDLE)
+   {
+      AddWarning("CATALOGO_AUTO_NO_ESCRIBIBLE: "+CatalogFile+" (error "+IntegerToString(GetLastError())+")");
+      return false;
+   }
+
+   if(FileSize(handle)==0)
+      FileWrite(handle,"ex5_name","magic_number","expected_comment");
+   FileSeek(handle,0,SEEK_END);
+   FileWrite(handle,DisplayEx5Name(ex5),(string)magic,Trim(expected_comment));
+   FileFlush(handle);
+   FileClose(handle);
+
+   AddCatalogPairInMemory(ex5,magic,expected_comment);
+   catalog_auto_added++;
    return true;
 }
 
@@ -853,6 +903,12 @@ void OnStart()
             pending_rows+=CsvEscape(ex5)+","+CsvEscape((string)history_stats[stat].magic)+","+
                           CsvEscape(observed)+","+CsvEscape(symbol)+","+CsvEscape(confidence)+","+
                           CsvEscape(reason)+"\r\n";
+            if(AutoSeedCatalogFromHistory && mapping_source=="HISTORIAL_DEALS_AUTO")
+            {
+               string catalog_comment=StrategySignature(ex5);
+               if(AppendAutoCatalogPair(ex5,history_stats[stat].magic,catalog_comment))
+                  AddWarning("CATALOGO_AUTO_AGREGADO: "+ex5+" / MN "+(string)history_stats[stat].magic);
+            }
             auto_rows++;
             total_rows++;
             if(status=="ACTIVO") active_rows++;
@@ -893,6 +949,8 @@ void OnStart()
       AddWarning("CATALOGO_LEIDO_SIN_COINCIDENCIAS_EXACTAS: revisar nombres EX5 o usar sugerencias del historial");
    if(excluded_script_charts>0)
       AddWarning("CHART_DEL_SCRIPT_EXCLUIDO: "+(string)excluded_script_charts);
+   if(catalog_auto_added>0)
+      AddWarning("CATALOGO_AUTO_AGREGADOS_TOTAL: "+(string)catalog_auto_added);
 
    string history_path=base+"_History.csv";
    string diagnostics_path=base+"_Diagnostics.csv";

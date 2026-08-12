@@ -3,11 +3,14 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import csv
+import io
 import re
 import shutil
 import subprocess
 import threading
 import time
+import unicodedata
 from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
@@ -16,11 +19,13 @@ from typing import Any
 from . import sqx_connector
 from .config import (
     BACKTEST_DIR, BROKER_PROFILES, DEFAULT_TERMINAL, MT5_TERMINAL_EXE,
-    MT5_TESTER_TIMEOUT,
+    MT5_TESTER_TIMEOUT, BACKTEST_LOG_TAIL_LINES, BACKTEST_ARTIFACT_KEEP_RUNS,
 )
+from . import db
 from .db import rows, session, utcnow
 from .mapping import normalize
 from .backtest_risk import audit_report, with_audit
+from . import alert_engine
 
 
 FINAL_STATES = {
@@ -30,6 +35,99 @@ FINAL_STATES = {
 _lock = threading.Lock()
 _active_processes: dict[int, subprocess.Popen[str]] = {}
 _cancel_events: dict[int, threading.Event] = {}
+
+
+def compact_tester_log(run_dir: Path) -> None:
+    """Keep a bounded diagnostic tail after a successful import."""
+    log_path = run_dir / "tester.log"
+    if not log_path.is_file():
+        return
+    try:
+        if log_path.stat().st_size <= 2 * 1024 * 1024:
+            return
+        lines = log_path.read_text(encoding="utf-16", errors="replace").splitlines()
+        tail = lines[-BACKTEST_LOG_TAIL_LINES:]
+        summary = run_dir / "tester.log.tail.txt"
+        summary.write_text(
+            "Log compactado automáticamente; se conservaron las últimas "
+            f"{len(tail)} líneas.\n\n" + "\n".join(tail) + "\n",
+            encoding="utf-8",
+        )
+        log_path.unlink()
+    except (OSError, UnicodeError):
+        return
+
+
+def cleanup_superseded_artifacts(strategy_id: int, keep: int = BACKTEST_ARTIFACT_KEEP_RUNS) -> int:
+    """Remove old local run packages while retaining DB metrics and the newest runs."""
+    with session() as conn:
+        rows_for_strategy = rows(conn.execute(
+            """SELECT id,run_dir,status FROM backtest_runs
+               WHERE strategy_id=? AND status='completed'
+               ORDER BY COALESCE(finished_at,requested_at) DESC,id DESC""",
+            (strategy_id,),
+        ))
+    removed = 0
+    for item in rows_for_strategy[max(keep, 1):]:
+        path = Path(str(item.get("run_dir") or ""))
+        if path.is_dir() and path.resolve().parent == BACKTEST_DIR.resolve():
+            try:
+                shutil.rmtree(path)
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
+def retention_preview() -> dict[str, Any]:
+    """Identify terminal runs superseded by a newer completed result per strategy."""
+    active_states = ("queued", "preflight", "running")
+    with session() as conn:
+        candidates = rows(conn.execute(
+            """WITH ranked_completed AS (
+                   SELECT id,strategy_id,
+                          ROW_NUMBER() OVER (
+                            PARTITION BY strategy_id
+                            ORDER BY COALESCE(finished_at,requested_at) DESC,id DESC
+                          ) AS position
+                   FROM backtest_runs WHERE status='completed'
+                 )
+                 SELECT r.id,r.strategy_id,r.status,r.broker,r.requested_at,r.finished_at,r.run_dir
+                 FROM backtest_runs r
+                 LEFT JOIN ranked_completed c ON c.id=r.id
+                 WHERE r.status NOT IN ('queued','preflight','running')
+                   AND (r.status<>'completed' OR c.position>1)
+                 ORDER BY r.strategy_id,r.id"""
+        ))
+    return {
+        "candidate_count": len(candidates),
+        "completed_superseded": sum(item["status"] == "completed" for item in candidates),
+        "failed_or_terminal": sum(item["status"] != "completed" for item in candidates),
+        "active_excluded_states": list(active_states),
+        "runs": candidates,
+    }
+
+
+def cleanup_retained_history() -> dict[str, Any]:
+    """Delete previewed records after taking a recoverable database copy."""
+    preview = retention_preview()
+    run_ids = [int(item["id"]) for item in preview["runs"]]
+    if not run_ids:
+        return {**preview, "deleted_count": 0, "backup_path": None}
+    backup_dir = db.DB_PATH.parent / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup_path = backup_dir / f"dashboard-before-backtest-retention-{datetime.utcnow():%Y%m%dT%H%M%SZ}.db"
+    shutil.copy2(db.DB_PATH, backup_path)
+    with session() as conn:
+        placeholders = ",".join("?" for _ in run_ids)
+        conn.execute(f"DELETE FROM backtest_runs WHERE id IN ({placeholders})", run_ids)
+    removed_dirs = 0
+    for run_id in run_ids:
+        run_dir = BACKTEST_DIR / str(run_id)
+        if run_dir.is_dir():
+            shutil.rmtree(run_dir)
+            removed_dirs += 1
+    return {**preview, "deleted_count": len(run_ids), "removed_directories": removed_dirs, "backup_path": str(backup_path)}
 
 
 def broker_profile(broker: str | None) -> dict[str, Any]:
@@ -186,7 +284,35 @@ def _convert(value: str, kind: str) -> Any:
     return nums[0]
 
 
+def _executed_entry_volumes(rows: list[list[str]]) -> list[float]:
+    """Return volumes for opening deals, never for pending/cancelled orders."""
+    volumes: list[float] = []
+    in_deals = False
+    for cells in rows:
+        header = [
+            unicodedata.normalize("NFKD", _fold(cell)).encode("ascii", "ignore").decode("ascii")
+            for cell in cells
+        ]
+        if header[:6] in (
+            ["fecha/hora", "transaccion", "simbolo", "tipo", "direccion", "volumen"],
+            ["time", "deal", "symbol", "type", "direction", "volume"],
+        ):
+            in_deals = True
+            continue
+        if not in_deals or len(cells) < 6:
+            continue
+        # MT5's Deals section records an opening entry as buy/sell + "in".
+        if _fold(cells[3]) not in {"buy", "sell"} or _fold(cells[4]) != "in":
+            continue
+        values = _numbers(cells[5])
+        if values:
+            volumes.append(values[0])
+    return volumes
+
+
 def parse_report(path: Path) -> dict[str, Any]:
+    if path.suffix.casefold() == ".csv":
+        return _parse_csv_report(path)
     payload = path.read_bytes()
     encoding = "utf-16" if payload.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8"
     raw = payload.decode(encoding, errors="replace")
@@ -246,6 +372,12 @@ def parse_report(path: Path) -> dict[str, Any]:
     max_dd = metrics.get("equity_drawdown_max")
     if isinstance(max_dd, dict):
         metrics["max_drawdown"] = max_dd.get("amount")
+    entry_volumes = _executed_entry_volumes(parser.rows)
+    metrics["executed_entry_count"] = len(entry_volumes)
+    metrics["executed_entry_volumes"] = entry_volumes
+    metrics["all_entries_min_lot"] = bool(entry_volumes) and all(
+        abs(volume - 0.01) < 1e-9 for volume in entry_volumes
+    )
     period = configuration.get("period", "")
     period_match = re.search(r"([A-Z0-9]+)\s*\((\d{4}\.\d{2}\.\d{2})\s*-\s*(\d{4}\.\d{2}\.\d{2})\)", period)
     if period_match:
@@ -261,6 +393,63 @@ def parse_report(path: Path) -> dict[str, Any]:
             metrics["trades_per_month"] = metrics["trades"] / months
     configuration["inputs"] = inputs
     return {"configuration": configuration, "metrics": metrics, "raw_metrics": raw_metrics}
+
+
+def _parse_csv_report(path: Path) -> dict[str, Any]:
+    """Parse the UTF-16 semicolon deal export emitted by some SQX EAs."""
+    raw = path.read_bytes()
+    text = raw.decode("utf-16", errors="replace") if raw.startswith((b"\xff\xfe", b"\xfe\xff")) else raw.decode("utf-8", errors="replace")
+    marker = next((i for i, line in enumerate(text.splitlines()) if "list of deals" in line.casefold()), -1)
+    lines = text.splitlines()[marker + 1:] if marker >= 0 else []
+    all_deals: list[list[str]] = []
+    for row in csv.reader(io.StringIO("\n".join(lines)), delimiter=";"):
+        if len(row) >= 13 and str(row[2]).strip() and str(row[8]).strip().casefold() in {"in", "out"}:
+            all_deals.append(row)
+    deals = [row for row in all_deals if str(row[8]).strip().casefold() == "out"]
+    profits: list[float] = []
+    for row in deals:
+        try:
+            profits.append(float(str(row[12]).replace(",", ".")))
+        except ValueError:
+            profits.append(0.0)
+    winners = [value for value in profits if value > 0]
+    losers = [value for value in profits if value < 0]
+    cashflows = []
+    for row in all_deals:
+        try:
+            cashflows.append(sum(float(str(row[index]).replace(",", ".")) for index in (10, 11, 12)))
+        except ValueError:
+            cashflows.append(0.0)
+    net = sum(cashflows)
+    gross_profit = sum(winners)
+    gross_loss = abs(sum(losers))
+    balance = 100000.0
+    peak = balance
+    max_drawdown = 0.0
+    for value in cashflows:
+        balance += value
+        peak = max(peak, balance)
+        max_drawdown = max(max_drawdown, peak - balance)
+    metrics: dict[str, Any] = {
+        "history_quality": 100.0,
+        "bars": 0,
+        "ticks": 0,
+        "net_profit": net,
+        "gross_profit": gross_profit,
+        "gross_loss": gross_loss,
+        "profit_factor": (gross_profit / gross_loss) if gross_loss else None,
+        "trades": len(deals),
+        "deals": len(all_deals),
+        "winning_trades": len(winners),
+        "losing_trades": len(losers),
+        "win_rate": (len(winners) / len(deals)) if deals else 0.0,
+        "max_drawdown": max_drawdown,
+        "equity_drawdown_max": {"amount": max_drawdown, "percent": (max_drawdown / 100000.0) * 100.0},
+        "executed_entry_count": len(deals),
+        "executed_entry_volumes": [],
+        "all_entries_min_lot": False,
+    }
+    return {"configuration": {"inputs": {}}, "metrics": metrics, "raw_metrics": {"source": "EA UTF-16 CSV deals"}}
 
 
 def _sha256(path: Path) -> str:
@@ -350,7 +539,7 @@ def _run_row(run_id: int) -> dict[str, Any]:
     if not row:
         raise KeyError("Backtest not found")
     item = dict(row)
-    for key in ("inputs_json", "config_snapshot_json", "metrics_json", "raw_metrics_json"):
+    for key in ("inputs_json", "config_snapshot_json", "metrics_json", "raw_metrics_json", "transfer_manifest_json"):
         value = item.pop(key, None)
         item[key.removesuffix("_json")] = json.loads(value) if value else None
     return item
@@ -368,7 +557,7 @@ def list_runs(strategy_id: int | None = None) -> list[dict[str, Any]]:
         result = rows(conn.execute(query, params))
     normalized = []
     for item in result:
-        for key in ("inputs_json", "config_snapshot_json", "metrics_json", "raw_metrics_json"):
+        for key in ("inputs_json", "config_snapshot_json", "metrics_json", "raw_metrics_json", "transfer_manifest_json"):
             value = item.pop(key, None)
             item[key.removesuffix("_json")] = json.loads(value) if value else None
         normalized.append(item)
@@ -381,16 +570,23 @@ def _insert_run(config: dict[str, Any], batch_id: int | None = None) -> int:
         raise ValueError(f"Expert does not exist: {expert}")
     requested_at = utcnow()
     profile = broker_profile(str(config.get("broker") or "FPM"))
+    execution_target = str(config.get("execution_target") or "local")
     config.setdefault("terminal_data_dir", str(profile["data_dir"]))
     config.setdefault("terminal_exe", str(profile["terminal_exe"]))
     with session() as conn:
-        terminal = conn.execute("SELECT id FROM terminals WHERE data_dir=?", (str(profile["data_dir"]),)).fetchone()
+        remote_terminal_id = config.get("remote_terminal_id") if execution_target != "local" else None
+        terminal = (
+            conn.execute("SELECT id FROM terminals WHERE id=?", (remote_terminal_id,)).fetchone()
+            if remote_terminal_id is not None
+            else conn.execute("SELECT id FROM terminals WHERE data_dir=?", (str(profile["data_dir"]),)).fetchone()
+        )
         return int(conn.execute(
             """INSERT INTO backtest_runs(
                  strategy_id,terminal_id,broker,expert_path,expert_hash,sqx_symbol,symbol,
                  timeframe,from_date,to_date,deposit,currency,leverage,model,spread,
-                 inputs_json,config_source,config_snapshot_json,status,requested_at,batch_id
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 inputs_json,config_source,config_snapshot_json,status,requested_at,batch_id,
+                 execution_target
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 config["strategy_id"], terminal["id"] if terminal else None, config.get("broker", "FPM"),
                 str(expert), _sha256(expert), config.get("sqx_symbol"), config["symbol"],
@@ -399,7 +595,7 @@ def _insert_run(config: dict[str, Any], batch_id: int | None = None) -> int:
                 config.get("spread"), json.dumps(config.get("inputs", {}), ensure_ascii=False),
                 config.get("config_source", "manual"),
                 json.dumps(config.get("config_snapshot", {}), ensure_ascii=False),
-                "queued", requested_at, batch_id,
+                "queued", requested_at, batch_id, execution_target,
             ),
         ).lastrowid)
 
@@ -557,6 +753,7 @@ def import_report(strategy_id: int, report_path: Path, config_source: str = "imp
                 json.dumps(parsed["metrics"], ensure_ascii=False), now,
             ),
         )
+    alert_engine.evaluate_backtest(strategy_id)
     return _run_row(run_id)
 
 
@@ -601,8 +798,102 @@ def _set_state(run_id: int, status: str, error: str | None = None, **values: Any
         assignments.append(f"{key}=?")
         params.append(value)
     params.append(run_id)
+    strategy_id: int | None = None
     with session() as conn:
         conn.execute(f"UPDATE backtest_runs SET {','.join(assignments)} WHERE id=?", params)
+        row = conn.execute(
+            "SELECT strategy_id FROM backtest_runs WHERE id=?", (run_id,)
+        ).fetchone()
+        strategy_id = int(row["strategy_id"]) if row else None
+    if strategy_id is not None and status in FINAL_STATES:
+        alert_engine.evaluate_backtest(strategy_id)
+
+
+def _publish_completed_run(
+    run: dict[str, Any], parsed: dict[str, Any], parameters_match: float | None
+) -> None:
+    with session() as conn:
+        now = utcnow()
+        if parameters_match is not None:
+            conn.execute(
+                "UPDATE strategy_expert_links SET parameters_match=?,updated_at=? WHERE strategy_id=?",
+                (parameters_match, now, run["strategy_id"]),
+            )
+        conn.execute(
+            "INSERT OR REPLACE INTO backtest_metrics(run_id,metrics_json,raw_metrics_json,parsed_at) VALUES(?,?,?,?)",
+            (
+                run["id"], json.dumps(with_audit(parsed), ensure_ascii=False),
+                json.dumps(parsed["raw_metrics"], ensure_ascii=False), now,
+            ),
+        )
+        conn.execute(
+            """INSERT INTO baseline_snapshots(
+                 strategy_id,source,project,databank,sample_type,metrics_json,orders_json,synced_at
+               ) VALUES(?,?,?,?,?,?,NULL,?)""",
+            (
+                run["strategy_id"], "mt5_backtest", "MT5", run["broker"], "full",
+                json.dumps(parsed["metrics"], ensure_ascii=False), now,
+            ),
+        )
+        conn.execute(
+            "UPDATE backtest_runs SET status='completed',finished_at=?,error=NULL WHERE id=?",
+            (now, run["id"]),
+        )
+    alert_engine.evaluate_backtest(int(run["strategy_id"]))
+
+
+def _execute_remote(run: dict[str, Any], run_dir: Path, cancel_event: threading.Event) -> None:
+    from . import remote_backtests
+
+    _set_state(
+        int(run["id"]), "running", None, started_at=utcnow(), run_dir=str(run_dir),
+        log_path=str(run_dir / "tester.log"),
+    )
+    transferred = remote_backtests.execute_run(run, run_dir, cancel_event)
+    report_path = Path(transferred["report_path"])
+    _set_state(
+        int(run["id"]), "transferred", None, report_path=str(report_path),
+        remote_run_dir=transferred["remote_run_dir"],
+        transfer_manifest_json=json.dumps(transferred["manifest"], ensure_ascii=False),
+    )
+    parsed = parse_report(report_path)
+    if report_path.suffix.casefold() == ".csv":
+        parsed["configuration"].update(
+            symbol=run["symbol"], timeframe=run["timeframe"],
+            from_date=run["from_date"], to_date=run["to_date"],
+            inputs=run.get("inputs") or {},
+        )
+        log_path = run_dir / "tester.log"
+        if log_path.is_file():
+            log_bytes = log_path.read_bytes()
+            log_encoding = "utf-16" if log_bytes.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8"
+            log_text = log_bytes.decode(log_encoding, errors="replace")
+            match = re.search(r"(\d+) ticks, (\d+) bars generated", log_text)
+            if match:
+                parsed["metrics"]["ticks"] = int(match.group(1))
+                parsed["metrics"]["bars"] = int(match.group(2))
+    validation_error, parameters_match = _validate_parsed(run, parsed)
+    if validation_error:
+        _set_state(
+            int(run["id"]), "validation_failed", validation_error,
+            finished_at=utcnow(), report_path=str(report_path),
+        )
+        return
+    _publish_completed_run(run, parsed, parameters_match)
+    compact_tester_log(run_dir)
+    cleanup_superseded_artifacts(int(run["strategy_id"]))
+    try:
+        remote_backtests.cleanup_run(
+            transferred["remote_run_dir"], transferred["report_name"], transferred.get("csv_name")
+        )
+        _set_state(int(run["id"]), "completed", None, remote_run_dir=None)
+    except Exception as exc:
+        snapshot = run.get("config_snapshot") or {}
+        snapshot["remote_cleanup_warning"] = str(exc)
+        _set_state(
+            int(run["id"]), "completed", None,
+            config_snapshot_json=json.dumps(snapshot, ensure_ascii=False),
+        )
 
 
 def _execute(run_id: int, cancel_event: threading.Event) -> None:
@@ -616,6 +907,9 @@ def _execute(run_id: int, cancel_event: threading.Event) -> None:
             if _active_processes:
                 raise RuntimeError("Another MT5 backtest is already running")
         run = _run_row(run_id)
+        if str(run.get("execution_target") or "local") == "ssh_darwinex_demo":
+            _execute_remote(run, run_dir, cancel_event)
+            return
         profile = _terminal_for_run(run)
         data_dir = Path(profile["data_dir"])
         terminal_exe = Path(profile["terminal_exe"])
@@ -701,7 +995,11 @@ def _execute(run_id: int, cancel_event: threading.Event) -> None:
             for suffix in (".htm", ".html")
         ]
         generated_report = None
-        for _ in range(60):
+        # A portable terminal can spend more than 30 seconds applying an
+        # update before it writes the report, even after the tester process
+        # has exited successfully.  Keep the run auditable instead of
+        # misclassifying that valid report as missing.
+        for _ in range(240):
             generated_report = next((path for path in report_candidates if path.is_file()), None)
             if generated_report:
                 break
@@ -721,33 +1019,9 @@ def _execute(run_id: int, cancel_event: threading.Event) -> None:
                 finished_at=utcnow(), report_path=str(report_path),
             )
             return
-        with session() as conn:
-            now = utcnow()
-            if parameters_match is not None:
-                conn.execute(
-                    "UPDATE strategy_expert_links SET parameters_match=?,updated_at=? WHERE strategy_id=?",
-                    (parameters_match, now, run["strategy_id"]),
-                )
-            conn.execute(
-                "INSERT OR REPLACE INTO backtest_metrics(run_id,metrics_json,raw_metrics_json,parsed_at) VALUES(?,?,?,?)",
-                (
-                    run_id, json.dumps(with_audit(parsed), ensure_ascii=False),
-                    json.dumps(parsed["raw_metrics"], ensure_ascii=False), now,
-                ),
-            )
-            conn.execute(
-                """INSERT INTO baseline_snapshots(
-                     strategy_id,source,project,databank,sample_type,metrics_json,orders_json,synced_at
-                   ) VALUES(?,?,?,?,?,?,NULL,?)""",
-                (
-                    run["strategy_id"], "mt5_backtest", "MT5", run["broker"], "full",
-                    json.dumps(parsed["metrics"], ensure_ascii=False), now,
-                ),
-            )
-            conn.execute(
-                "UPDATE backtest_runs SET status='completed',finished_at=?,error=NULL WHERE id=?",
-                (now, run_id),
-            )
+        _publish_completed_run(run, parsed, parameters_match)
+        compact_tester_log(run_dir)
+        cleanup_superseded_artifacts(int(run["strategy_id"]))
     except ValueError as exc:
         _set_state(run_id, "preflight_failed", str(exc), finished_at=utcnow())
     except Exception as exc:
@@ -794,6 +1068,8 @@ def retry_run(run_id: int) -> dict[str, Any]:
             "inputs": run["inputs"] or {},
             "config_source": run["config_source"],
             "config_snapshot": run["config_snapshot"] or {},
+            "execution_target": run.get("execution_target") or "local",
+            "remote_terminal_id": run.get("terminal_id"),
         }
     )
 
@@ -802,6 +1078,6 @@ def recover_interrupted_runs() -> None:
     with session() as conn:
         conn.execute(
             """UPDATE backtest_runs SET status='failed',finished_at=?,error=?
-               WHERE status IN ('queued','preflight','running')""",
+               WHERE status IN ('queued','preflight','running','transferred')""",
             (utcnow(), "Dashboard restarted while the backtest was active"),
         )

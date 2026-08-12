@@ -1,0 +1,54 @@
+.magic-number-entry {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+  min-width: 0;
+}
+
+.magic-number-entry-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.magic-number-entry-header > strong {
+  color: #e2f5ff;
+  font: 700 13px Consolas, monospace;
+}
+
+.magic-number-entry-header > span {
+  flex: 0 0 auto;
+  padding: 3px 6px;
+  border: 1px solid #245f79;
+  background: #0d202b;
+  color: #7dd3fc;
+  font: 9px Consolas, monospace;
+  text-transform: uppercase;
+}
+
+.magic-number-entry-details {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding-top: 7px;
+  border-top: 1px solid #1b2d39;
+}
+
+.magic-number-entry-details > small {
+  display: block;
+  min-width: 0;
+  color: #90a4b8;
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: break-word;
+}
+
+.magic-number-entry-evidence {
+  color: #afc7d4 !important;
+  font-variant-numeric: tabular-nums;
+}
+
+.magic-number-entry-mappings {
+  color: #839aaa !important;
+}

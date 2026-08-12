@@ -1,4 +1,5 @@
 from pathlib import Path
+from zipfile import ZipFile
 
 from app import bot_inventory, db, main
 
@@ -33,13 +34,13 @@ def _setup(tmp_path, monkeypatch):
     return root, strategy_id
 
 
-def _write_inventory(root: Path, *, magic: str = "", name: str = "BotInventory_100121894_20260712.csv") -> Path:
+def _write_inventory(root: Path, *, magic: str = "", name: str = "BotInventory_100121894_20260712.csv", chart_id: str = "42", server: str = "InfinoxLimited-MT5Demo") -> Path:
     folder = root / "100121894"
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / name
     path.write_text(
         HEADER
-        + '"2026-07-12T20:03:49Z","100121894","InfinoxLimited-MT5Demo","42",'
+        + f'"2026-07-12T20:03:49Z","100121894","{server}","{chart_id}",'
           '"NAS100","M15","NN_15_991531386_L_Ke_CF_SQX.ex5","'
         + magic
         + '","SIN_COINCIDENCIA","SIN_COINCIDENCIA","","","SI","SI","SI","SI",'
@@ -101,6 +102,45 @@ def test_known_magic_creates_scoped_mapping_and_reports_no_recent_trades(tmp_pat
     assert row["activity_state"] == "without_recent_trades"
 
 
+def test_same_ex5_account_server_and_asset_reuses_id_across_magic_numbers(tmp_path, monkeypatch):
+    root, strategy_id = _setup(tmp_path, monkeypatch)
+    _write_inventory(root, magic="11", chart_id="42")
+    bot_inventory.scan()
+    first = bot_inventory.candidates()[0]
+    assert bot_inventory.confirm(first["id"], strategy_id)["strategy_id"] == strategy_id
+
+    _write_inventory(root, magic="22", chart_id="43", name="BotInventory_100121894_20260713.csv")
+    bot_inventory.scan()
+    second = bot_inventory.candidates()[0]
+    result = bot_inventory.confirm(second["id"], strategy_id)
+
+    assert result["strategy_id"] == strategy_id
+    with db.session() as conn:
+        assert [row[0] for row in conn.execute("SELECT magic FROM mappings ORDER BY magic")] == [11, 22]
+    row = next(item for item in main.dashboard_data()["strategies"] if item["id"] == strategy_id)
+    assert row["magic_numbers"] == [11, 22]
+    assert row["operational_identity"]["expert_key"] == "nn15991531386lkecfsqx"
+
+
+def test_same_login_asset_and_ex5_on_another_server_gets_a_separate_id(tmp_path, monkeypatch):
+    root, strategy_id = _setup(tmp_path, monkeypatch)
+    _write_inventory(root, magic="11", chart_id="42")
+    bot_inventory.scan()
+    bot_inventory.confirm(bot_inventory.candidates()[0]["id"], strategy_id)
+
+    _write_inventory(root, magic="22", chart_id="43", server="OtherBroker-Demo",
+                     name="BotInventory_100121894_20260713.csv")
+    bot_inventory.scan()
+    result = bot_inventory.confirm(bot_inventory.candidates()[0]["id"], strategy_id)
+
+    assert result["strategy_id"] != strategy_id
+    with db.session() as conn:
+        servers = [row[0] for row in conn.execute(
+            "SELECT operational_server FROM strategies WHERE operational_expert_key IS NOT NULL ORDER BY operational_server"
+        )]
+    assert servers == ["InfinoxLimited-MT5Demo", "OtherBroker-Demo"]
+
+
 def test_malformed_inventory_is_recorded_without_deployments(tmp_path, monkeypatch):
     root, _ = _setup(tmp_path, monkeypatch)
     folder = root / "100121894"
@@ -111,3 +151,64 @@ def test_malformed_inventory_is_recorded_without_deployments(tmp_path, monkeypat
         imported = conn.execute("SELECT status,error FROM bot_inventory_imports").fetchone()
         assert imported["status"] == "failed"
         assert conn.execute("SELECT COUNT(*) FROM bot_deployments").fetchone()[0] == 0
+
+
+def test_evidence_zip_auto_links_unique_magic_and_creates_mt5_only_for_unmatched(tmp_path, monkeypatch):
+    root, _ = _setup(tmp_path, monkeypatch)
+    now = db.utcnow()
+    with db.session() as conn:
+        terminal_id = conn.execute(
+            """INSERT INTO terminals(name,data_dir,account_login,server,status,created_at)
+               VALUES('Live','live://1','7396577','FirstPrudentialMarkets-Demo','connected',?)""",
+            (now,),
+        ).lastrowid
+        existing_ids = []
+        for name, magic in [("Strategy 3.8.23(1)", 38231), ("WF Matrix - Strategy 5.1.22(1)", 51221)]:
+            strategy_id = conn.execute(
+                """INSERT INTO strategies(symbol,sqx_name,account_login,origin,created_at)
+                   VALUES('US30',?,'7396577','sqx',?)""",
+                (name, now),
+            ).lastrowid
+            conn.execute("UPDATE strategies SET identity_strategy_id=? WHERE id=?", (strategy_id, strategy_id))
+            conn.execute(
+                """INSERT INTO mappings(strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,created_at)
+                   VALUES(?,?, '7396577','US30',?,'known',?)""",
+                (strategy_id, terminal_id, magic, now),
+            )
+            existing_ids.append(strategy_id)
+
+    folder = root / "7396577"
+    folder.mkdir(parents=True)
+    zip_path = folder / "MT5InventoryEvidence_20260809_141647.zip"
+    inventory = HEADER + '"2026-08-09T12:13:15Z","7396577","FirstPrudentialMarkets-Demo","1","US30","H1","x.ex5","","","","","SI","SI","SI","SI","ACTIVO","","0","","",""\n'
+    history_header = "generated_utc,account_login,server,symbol,magic_number,deal_comments,entry_deals,first_trade,last_trade,order_comments,orders,first_order,last_order,order_states,activity_status\n"
+    history = history_header + "\n".join([
+        '"","7396577","FirstPrudentialMarkets-Demo","US30","38231","","0","","","a","602","2026.06.09 01:01:00","2026.08.06 22:00:00","ORDER_STATE_CANCELED","SOLO_ORDENES"',
+        '"","7396577","FirstPrudentialMarkets-Demo","US30","51221","","0","","","b","130","2026.06.10 10:00:00","2026.07.23 22:00:00","ORDER_STATE_CANCELED","SOLO_ORDENES"',
+        '"","7396577","FirstPrudentialMarkets-Demo","US30","472122","","0","","","c","2","2026.08.06 17:00:00","2026.08.07 17:00:00","ORDER_STATE_CANCELED","SOLO_ORDENES"',
+    ]) + "\n"
+    profiles = [
+        ("chart_profiles/a.chr", "WF Matrix - Strategy 3.8.23(1).ex5", "38231"),
+        ("chart_profiles/b.chr", "WF Matrix - Strategy 5.1.22(1).ex5", "51221"),
+        ("chart_profiles/c.chr", "DJ_H1_4.7.21(2)_opt.ex5", "472122"),
+    ]
+    with ZipFile(zip_path, "w") as archive:
+        archive.writestr("inventory/main.csv", inventory)
+        archive.writestr("inventory/sample_History.csv", history)
+        for path, ex5, magic in profiles:
+            archive.writestr(path, f"symbol=US30\x00path=MQL5\\Experts\\{ex5}\x00MagicNumber={magic}\x00CustomComment=test".encode("utf-16le"))
+
+    assert bot_inventory.scan() == {"imported": 1, "skipped": 0, "failed": 0}
+    assert bot_inventory.scan() == {"imported": 0, "skipped": 1, "failed": 0}
+    with db.session() as conn:
+        deployments = conn.execute(
+            "SELECT magic,order_count,activity_status,strategy_id,confirmed FROM bot_deployments ORDER BY magic"
+        ).fetchall()
+        assert [(row["magic"], row["order_count"], row["activity_status"], row["confirmed"]) for row in deployments] == [
+            (38231, 602, "SOLO_ORDENES", 1), (51221, 130, "SOLO_ORDENES", 1), (472122, 2, "SOLO_ORDENES", 1),
+        ]
+        assert [row["strategy_id"] for row in deployments[:2]] == existing_ids
+        created = conn.execute("SELECT * FROM strategies WHERE mql5_name='DJ_H1_4.7.21(2)_opt'").fetchone()
+        assert created and created["origin"] == "mt5"
+    dashboard = {row["id"]: row for row in main.dashboard_data()["strategies"]}
+    assert all(dashboard[row["strategy_id"]]["metrics"]["trades"] == 0 for row in deployments)

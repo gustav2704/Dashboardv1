@@ -1,0 +1,5 @@
+profile_source,symbol,ex5_name,magic_number,expected_comment,activity_status,entry_deals,orders,first_trade,last_trade,first_order,last_order
+MQL5\Profiles\Charts\Default\chart17.chr,XAUUSD.cyr,XAU M15 GWF Optimization - Strategy 1.77.154.ex5,177154,XAU_M15_GWF_Opt._Strategy_1_77,CON_OPERACIONES,7,61,2026.07.01 16:38:57,2026.08.07 11:33:52,2026.06.25 11:15:00,2026.08.07 15:29:46
+MQL5\Profiles\Charts\Default\chart39.chr,XAUUSD.cyr,XAU M15 GWF Optimization - Strategy 1.77.154.ex5,1771542,XAU_M15_1_77_154_opt,CON_OPERACIONES,1,4,2026.08.07 11:33:52,2026.08.07 11:33:52,2026.08.07 02:45:00,2026.08.07 15:29:46
+MQL5\Profiles\Charts\Default\chart26.chr,XAUUSD.cyr,XAU M15 GWF Optimization - Strategy 3.69.192.ex5,369192,XAU_M15_GWF_Opt._Strategy_3_69,CON_OPERACIONES,3,1790,2026.07.06 02:28:05,2026.08.05 05:37:54,2026.06.25 05:39:03,2026.08.05 14:35:47
+MQL5\Profiles\Charts\Default\chart40.chr,XAUUSD.cyr,XAU M15 GWF Optimization - Strategy 3.69.192.ex5,3691922,XAU_M15_3_69_192_opt,CON_OPERACIONES,1,15,2026.08.05 05:37:54,2026.08.05 05:37:54,2026.08.05 02:15:00,2026.08.05 14:35:47

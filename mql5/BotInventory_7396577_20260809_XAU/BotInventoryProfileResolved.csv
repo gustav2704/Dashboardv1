@@ -1,0 +1,36 @@
+profile_source,symbol,ex5_name,magic_number,expected_comment,activity_status,entry_deals,orders,first_trade,last_trade,first_order,last_order
+MQL5\Profiles\Charts\Default\chart37.chr,XAUUSD.cyr,Strategy 5.14.40.ex5,51440,Strategy_5_14_40,CON_OPERACIONES,23,68,2026.07.06 18:29:01,2026.08.07 18:09:43,2026.07.06 17:00:00,2026.08.07 18:00:00
+MQL5\Profiles\Charts\Default\chart07.chr,XAUUSD.cyr,WF Matrix - XAU_Strategy 1.4.70.ex5,1470,WF_Matrix_XAU_Strategy_1_4_70,CON_OPERACIONES,13,292,2026.06.15 05:16:18,2026.08.07 17:24:00,2026.06.02 19:35:19,2026.08.07 21:59:00
+MQL5\Profiles\Charts\Default\chart08.chr,XAUUSD.cyr,WF Matrix - XAU_Strategy 2.11.36.ex5,21136,WF_Matrix_XAU_Strategy_2_11_36,NUNCA_OPERO,0,0,,,,
+MQL5\Profiles\Charts\Default\chart09.chr,XAUUSD.cyr,WF Matrix - XAU_Strategy 3.9.66.ex5,3966,WF_Matrix_XAU_Strategy_3_9_66,CON_OPERACIONES,46,213,2026.06.16 03:56:48,2026.08.07 18:09:43,2026.06.15 18:00:00,2026.08.07 21:59:00
+MQL5\Profiles\Charts\Default\chart11.chr,XAUUSD.cyr,WF Matrix - XAU_Strategy 5.8.71.ex5,5871,WF_Matrix_XAU_Strategy_5_8_71,CON_OPERACIONES,29,75,2026.06.16 11:59:24,2026.08.07 19:05:33,2026.06.15 20:00:00,2026.08.07 21:59:00
+MQL5\Profiles\Charts\Default\chart17.chr,XAUUSD.cyr,XAU M15 GWF Optimization - Strategy 1.77.154.ex5,177154,XAU_M15_GWF_Opt._Strategy_1_77,CON_OPERACIONES,7,61,2026.07.01 16:38:57,2026.08.07 11:33:52,2026.06.25 11:15:00,2026.08.07 15:29:46
+MQL5\Profiles\Charts\Default\chart39.chr,XAUUSD.cyr,XAU M15 GWF Optimization - Strategy 1.77.154.ex5,1771542,XAU_M15_1_77_154_opt,CON_OPERACIONES,1,4,2026.08.07 11:33:52,2026.08.07 11:33:52,2026.08.07 02:45:00,2026.08.07 15:29:46
+MQL5\Profiles\Charts\Default\chart18.chr,XAUUSD.cyr,XAU M15 GWF Optimization - Strategy 2.49.173.ex5,249173,XAU_M15_GWF_Opt._Strategy_2_49,CON_OPERACIONES,5,1087,2026.07.22 04:08:49,2026.08.05 07:06:36,2026.06.25 20:45:00,2026.08.05 07:15:00
+MQL5\Profiles\Charts\Default\chart19.chr,XAUUSD.cyr,XAU M15 GWF Optimization - Strategy 3.35.174.ex5,335174,XAU_M15_GWF_Opt._Strategy_3_35,CON_OPERACIONES,8,960,2026.06.26 17:09:53,2026.08.07 12:45:32,2026.06.25 08:15:00,2026.08.07 22:58:00
+MQL5\Profiles\Charts\Default\chart20.chr,XAUUSD.cyr,XAU M15 GWF Optimization - Strategy 3.36.100.ex5,11111,XAU_M15_GWF_Opt._Strategy_3_36,CON_OPERACIONES,8,947,2026.06.26 17:09:53,2026.08.07 12:45:32,2026.06.25 07:00:00,2026.08.07 20:59:01
+MQL5\Profiles\Charts\Default\chart21.chr,XAUUSD.cyr,XAU M15 GWF Optimization - Strategy 3.37.175.ex5,337175,XAU_M15_GWF_Opt._Strategy_3_37,CON_OPERACIONES,8,987,2026.06.26 17:10:07,2026.08.07 12:45:07,2026.06.25 15:45:00,2026.08.07 22:58:00
+MQL5\Profiles\Charts\Default\chart22.chr,XAUUSD.cyr,XAU M15 GWF Optimization - Strategy 3.44.152.ex5,344152,XAU_M15_GWF_Opt._Strategy_3_44,CON_OPERACIONES,7,974,2026.06.26 17:10:07,2026.08.07 12:45:07,2026.06.25 07:00:00,2026.08.07 22:58:00
+MQL5\Profiles\Charts\Default\chart23.chr,XAUUSD.cyr,XAU M15 GWF Optimization - Strategy 3.53.123.ex5,353123,XAU_M15_GWF_Opt._Strategy_3_53,CON_OPERACIONES,3,710,2026.07.22 09:03:31,2026.08.05 07:12:17,2026.06.25 08:00:00,2026.08.05 08:47:02
+MQL5\Profiles\Charts\Default\chart24.chr,XAUUSD.cyr,XAU M15 GWF Optimization - Strategy 3.65.131.ex5,365131,XAU_M15_GWF_Opt._Strategy_3_65,CON_OPERACIONES,3,710,2026.07.22 09:03:31,2026.08.05 07:12:17,2026.06.25 08:00:00,2026.08.05 08:45:15
+MQL5\Profiles\Charts\Default\chart25.chr,XAUUSD.cyr,XAU M15 GWF Optimization - Strategy 3.68.185.ex5,368185,XAU_M15_GWF_Opt._Strategy_3_68,CON_OPERACIONES,3,710,2026.07.22 09:03:31,2026.08.05 07:12:17,2026.06.25 08:00:00,2026.08.05 08:45:15
+MQL5\Profiles\Charts\Default\chart26.chr,XAUUSD.cyr,XAU M15 GWF Optimization - Strategy 3.69.192.ex5,369192,XAU_M15_GWF_Opt._Strategy_3_69,CON_OPERACIONES,3,1790,2026.07.06 02:28:05,2026.08.05 05:37:54,2026.06.25 05:39:03,2026.08.05 14:35:47
+MQL5\Profiles\Charts\Default\chart40.chr,XAUUSD.cyr,XAU M15 GWF Optimization - Strategy 3.69.192.ex5,3691922,XAU_M15_3_69_192_opt,CON_OPERACIONES,1,15,2026.08.05 05:37:54,2026.08.05 05:37:54,2026.08.05 02:15:00,2026.08.05 14:35:47
+MQL5\Profiles\Charts\Default\chart01.chr,XAUUSD.cyr,XAUWF Matrix - Strategy 3.1.69(1)dwnx.ex5,3,XAUWF_Matrix_Strategy_3_1_69_1,CON_OPERACIONES,19,628,2026.05.19 02:13:47,2026.08.07 08:50:22,2026.05.18 22:00:00,2026.08.07 21:00:00
+MQL5\Profiles\Charts\Default\chart02.chr,XAUUSD.cyr,XAUWF Matrix - Strategy 3.11.46dwnx.ex5,4,XAUWF_Matrix_Strategy_3_11_46d,CON_OPERACIONES,29,1134,2026.05.20 17:55:31,2026.08.07 14:03:53,2026.05.18 21:21:44,2026.08.07 21:00:00
+MQL5\Profiles\Charts\Default\chart03.chr,XAUUSD.cyr,XAUWF Matrix - Strategy 3.13.39dwnx.ex5,5,XAUWF_Matrix_Strategy_3_13_39d,CON_OPERACIONES,28,831,2026.06.02 08:30:06,2026.08.07 11:33:52,2026.06.02 01:13:11,2026.08.07 13:02:28
+MQL5\Profiles\Charts\Default\chart28.chr,XAUUSD.cyr,XAU_7_24_Vortex_1.1.36.ex5,1136,WF_Matrix_XAU_Strategy_1_1_36,NUNCA_OPERO,0,0,,,,
+MQL5\Profiles\Charts\Default\chart27.chr,XAUUSD.cyr,XAU_7_24_currenthour_1.4.61.ex5,1461,WF_Matrix_XAU_Strategy_1_4_61,NUNCA_OPERO,0,0,,,,
+MQL5\Profiles\Charts\Default\chart29.chr,XAUUSD.cyr,XAU_7_26_ReflexFall_5.4.68.ex5,5468,WF_Matrix_XAU_Strategy_5_4_68,NUNCA_OPERO,0,0,,,,
+MQL5\Profiles\Charts\Default\chart30.chr,XAUUSD.cyr,XAU_7_32_Keltner_laguerre_4.1.38.ex5,4138,WF_Matrix_XAU_Strategy_4_1_38,NUNCA_OPERO,0,0,,,,
+MQL5\Profiles\Charts\Default\chart31.chr,XAUUSD.cyr,XAU_8-28_KelnertUpper_5.1.50.ex5,5150,WF_Matrix_XAU_Strategy_5_1_50,NUNCA_OPERO,0,0,,,,
+MQL5\Profiles\Charts\Default\chart32.chr,XAUUSD.cyr,XAU_8_24_RSI_5.6.36.ex5,5636,WF_Matrix_XAU_Strategy_5_6_36,NUNCA_OPERO,0,0,,,,
+MQL5\Profiles\Charts\Default\chart33.chr,XAUUSD.cyr,XAU_8_26_LWMA_4.7.68.ex5,4768,WF_Matrix_XAU_Strategy_4_7_68,NUNCA_OPERO,0,0,,,,
+MQL5\Profiles\Charts\Default\chart34.chr,XAUUSD.cyr,XAU_9_26_Ulcer_3.14.60.ex5,31460,WF_Matrix_XAU_Strategy_3_14_60,NUNCA_OPERO,0,0,,,,
+MQL5\Profiles\Charts\Default\chart35.chr,XAUUSD.cyr,XAU_9_28_PriceEntryHigh_4.14.48.ex5,41448,WF_Matrix_XAU_Strategy_4_14_48,NUNCA_OPERO,0,0,,,,
+MQL5\Profiles\Charts\Default\chart36.chr,XAUUSD.cyr,XAU_9_30_Stocha_1.6.64.ex5,11664,WF_Matrix_XAU_Strategy_1_6_64,NUNCA_OPERO,0,0,,,,
+MQL5\Profiles\Charts\Default\chart04.chr,XAUUSD.cyr,XAU_B_AweOscill_Strategy 4.1.62(1).ex5,41621,WF_Matrix_Strategy_4_1_62_1,CON_OPERACIONES,15,82,2026.06.09 16:48:48,2026.08.07 11:33:52,2026.06.03 04:00:00,2026.08.07 15:29:47
+MQL5\Profiles\Charts\Default\chart05.chr,XAUUSD.cyr,XAU_B_bar15_9_32_Strategy 5.14.71.ex5,51471,WF_Matrix_Strategy_5_14_71,CON_OPERACIONES,91,306,2026.06.02 23:18:05,2026.08.07 21:06:33,2026.06.02 19:28:49,2026.08.07 23:00:02
+MQL5\Profiles\Charts\Default\chart13.chr,XAUUSD.cyr,XAU_Strategy 5.13.42.ex5,51342,Strategy_5_13_42,CON_OPERACIONES,69,221,2026.06.15 17:06:43,2026.08.07 18:09:43,2026.06.15 17:00:00,2026.08.07 20:59:00
+MQL5\Profiles\Charts\Default\chart14.chr,XAUUSD.cyr,XAU_Strategy 5.15.46.ex5,51546,Strategy_5_15_46,CON_OPERACIONES,50,158,2026.06.15 17:06:43,2026.08.07 18:09:43,2026.06.15 17:00:00,2026.08.07 20:59:00
+MQL5\Profiles\Charts\Default\chart06.chr,XAUUSD.cyr,XAU_bullPower_B_Strategy 2.1.63.ex5,2163,WF_Matrix_Strategy_2_1_63,CON_OPERACIONES,11,512,2026.06.15 17:06:43,2026.08.07 11:33:52,2026.06.02 19:29:39,2026.08.07 19:00:00

@@ -1,10 +1,142 @@
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from app import db
 from app import main
 from app.display_names import seed_manual_display_names
-from app.main import dashboard_data, get_strategy
+from app.main import _last_closed_months, _latest_baselines, _monthly_net_profit, dashboard_data, get_strategy
+
+
+def test_unique_confirmed_magic_matches_a_trade_without_comment() -> None:
+    mapping = {
+        "terminal_id": 113,
+        "symbol": "WS30",
+        "magic": 857,
+        "role": "live",
+        "historical_until_msc": None,
+        "magic_scope_strategy_count": 1,
+        "comment_pattern": "US30v4 BUY",
+    }
+    trade = {
+        "terminal_id": 113,
+        "symbol": "WS30",
+        "magic": 857,
+        "comment": "",
+    }
+
+    assert main._matches(mapping, trade) is True
+
+
+def test_shared_magic_without_a_stable_comment_stays_unassigned() -> None:
+    mapping = {
+        "terminal_id": 113,
+        "symbol": "WS30",
+        "magic": 857,
+        "role": "live",
+        "historical_until_msc": None,
+        "magic_scope_strategy_count": 2,
+        "comment_pattern": "US30v4 BUY",
+    }
+
+    assert main._matches(mapping, {"terminal_id": 113, "symbol": "WS30", "magic": 857, "comment": "[sl 54000]"}) is False
+
+
+def test_candidate_trades_use_mapping_identity_without_losing_fallback_mappings() -> None:
+    trades = [
+        {"terminal_id": 1, "magic": 10, "symbol": "XAUUSD", "deal_ticket": 1, "close_time_msc": 1},
+        {"terminal_id": 1, "magic": 10, "symbol": "NAS100", "deal_ticket": 2, "close_time_msc": 2},
+        {"terminal_id": 1, "magic": 11, "symbol": "XAUUSD", "deal_ticket": 3, "close_time_msc": 3},
+        {"terminal_id": 2, "magic": 10, "symbol": "XAUUSD", "deal_ticket": 4, "close_time_msc": 4},
+    ]
+    by_terminal = {1: trades[:3], 2: trades[3:]}
+    by_terminal_magic = {(1, 10): trades[:2], (1, 11): [trades[2]], (2, 10): [trades[3]]}
+    by_terminal_magic_symbol = {
+        (1, 10, "xauusd"): [trades[0]], (1, 10, "nas100"): [trades[1]],
+        (1, 11, "xauusd"): [trades[2]], (2, 10, "xauusd"): [trades[3]],
+    }
+
+    exact = main._candidate_trades_for_mappings(
+        [{"terminal_id": 1, "magic": 10, "symbol": "XAUUSD"}],
+        by_terminal, by_terminal_magic, by_terminal_magic_symbol,
+    )
+    fallback = main._candidate_trades_for_mappings(
+        [{"terminal_id": 1, "magic": None, "symbol": ""}],
+        by_terminal, by_terminal_magic, by_terminal_magic_symbol,
+    )
+
+    assert [trade["deal_ticket"] for trade in exact] == [1]
+    assert [trade["deal_ticket"] for trade in fallback] == [1, 2, 3]
+
+
+def test_worker_cycle_runs_each_phase_and_releases_its_lock(monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(main, "sync_all", lambda: calls.append("sync"))
+    monkeypatch.setattr(main.bot_inventory, "scan", lambda: calls.append("inventory"))
+    monkeypatch.setattr(main, "dashboard_data", lambda window: calls.append(window) or {"strategies": []})
+
+    assert main._run_worker_cycle() is True
+    assert calls == ["sync", "inventory", "all"]
+    # A completed cycle must not prevent the next scheduled refresh.
+    assert main._run_worker_cycle() is True
+
+
+def test_worker_cycle_skips_when_another_cycle_owns_the_lock() -> None:
+    assert main._WORKER_CYCLE_LOCK.acquire(blocking=False)
+    try:
+        assert main._run_worker_cycle() is False
+    finally:
+        main._WORKER_CYCLE_LOCK.release()
+
+
+def test_monthly_net_profit_uses_three_completed_calendar_months() -> None:
+    months = _last_closed_months(datetime(2026, 7, 23, tzinfo=timezone.utc))
+    assert [(month["key"], month["label"]) for month in months] == [
+        ("2026-06", "Jun 2026"), ("2026-05", "May 2026"), ("2026-04", "Abr 2026"),
+    ]
+    as_msc = lambda value: int(value.replace(tzinfo=timezone.utc).timestamp() * 1000)
+    values = _monthly_net_profit([
+        {"close_time_msc": as_msc(datetime(2026, 6, 1)), "net_profit": 100},
+        {"close_time_msc": as_msc(datetime(2026, 5, 31, 23, 59, 59)), "net_profit": -25},
+        {"close_time_msc": as_msc(datetime(2026, 4, 15)), "net_profit": 10},
+        {"close_time_msc": as_msc(datetime(2026, 7, 1)), "net_profit": 999},
+    ], months)
+    assert [value["net_profit"] for value in values] == [100, -25, 10]
+
+
+def test_latest_baselines_includes_completed_backtests_from_identity_members(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "identity-baselines.db")
+    monkeypatch.setattr(main, "ACTIVE_BACKTEST_BROKER", "Darwinex")
+    db.init_db()
+    now = db.utcnow()
+
+    with db.session() as conn:
+        root_id = conn.execute(
+            "INSERT INTO strategies(symbol,sqx_name,created_at) VALUES(?,?,?)",
+            ("XAU", "Canonical", now),
+        ).lastrowid
+        conn.execute("UPDATE strategies SET identity_strategy_id=? WHERE id=?", (root_id, root_id))
+        child_id = conn.execute(
+            "INSERT INTO strategies(symbol,sqx_name,identity_strategy_id,created_at) VALUES(?,?,?,?)",
+            ("XAUUSD", "Operational alias", root_id, now),
+        ).lastrowid
+        conn.executemany(
+            """INSERT INTO baseline_snapshots(
+                 strategy_id,source,project,databank,sample_type,metrics_json,synced_at
+               ) VALUES(?,?,?,?,?,?,?)""",
+            [
+                (root_id, "sqx", "Retester", "Results", "oos", '{"ProfitFactor": 1.1}', now),
+                (child_id, "mt5_backtest", "MT5", "Darwinex", "full", '{"profit_factor": 1.4}', "2026-07-15T09:59:22+00:00"),
+                (child_id, "mt5_backtest", "MT5", "FPM", "full", '{"profit_factor": 1.6}', "2026-07-16T09:59:22+00:00"),
+            ],
+        )
+        baselines = _latest_baselines(conn, root_id)
+
+    assert [(item["source"], item["sample_type"]) for item in baselines] == [
+        ("sqx", "oos"), ("mt5_backtest", "full"),
+    ]
+    mt5_baseline = next(item for item in baselines if item["source"] == "mt5_backtest")
+    assert mt5_baseline["databank"] == "Darwinex"
+    assert mt5_baseline["metrics"]["profit_factor"] == 1.4
 
 
 def test_dashboard_returns_sorted_unique_magic_numbers(tmp_path, monkeypatch):
@@ -42,8 +174,9 @@ def test_dashboard_returns_sorted_unique_magic_numbers(tmp_path, monkeypatch):
     assert strategies["No magic"]["primary_magic_number"] is None
     assert strategies["One magic"]["magic_numbers"] == [77]
     assert strategies["One magic"]["primary_magic_number"] == 77
-    assert strategies["Many magics"]["magic_numbers"] == [100]
+    assert strategies["Many magics"]["magic_numbers"] == [100, 900]
     assert strategies["Many magics"]["primary_magic_number"] == 100
+    assert [item["magic"] for item in strategies["Many magics"]["magic_number_details"]] == [100, 900]
 
 
 def test_dashboard_uses_manual_display_names_only_for_exact_account_mappings(tmp_path, monkeypatch):
@@ -198,9 +331,11 @@ def test_dashboard_exposes_active_account_balance_and_bot_pl_percentage(tmp_path
     strategies = {item["id"]: item for item in dashboard_data()["strategies"]}
 
     assert strategies[strategy_id]["account_balance"] == 1000
-    assert strategies[strategy_id]["account_pl_percent"] == 5
+    # A position without a confirmed comment/EX5 alias remains raw and does
+    # not contribute to bot-level account P/L.
+    assert strategies[strategy_id]["account_pl_percent"] == 0
     assert strategies[strategy_id]["account_initial_capital"] == 1000
-    assert strategies[strategy_id]["initial_capital_pl_percent"] == 5
+    assert strategies[strategy_id]["initial_capital_pl_percent"] == 0
     assert strategies[no_balance_id]["account_balance"] is None
     assert strategies[no_balance_id]["account_pl_percent"] is None
     assert strategies[no_balance_id]["account_initial_capital"] is None
@@ -268,7 +403,7 @@ def test_dashboard_initial_capital_pl_uses_oldest_snapshot_and_current_account_o
     strategy = next(item for item in dashboard_data()["strategies"] if item["id"] == strategy_id)
 
     assert strategy["account_initial_capital"] == 1000
-    assert strategy["initial_capital_pl_percent"] == 5
+    assert strategy["initial_capital_pl_percent"] == 0
 
 
 def test_dashboard_initial_capital_pl_is_unavailable_for_zero_initial_balance(tmp_path, monkeypatch):
@@ -553,6 +688,11 @@ def test_dashboard_keeps_historical_mapping_out_of_current_magic_and_metrics(tmp
     journal = main.journal_analysis_data()
     assert len(journal["trades"]) == 4
     assert {trade["source_role"] for trade in journal["trades"]} == {"live"}
+    assert {trade["primary_magic_number"] for trade in journal["trades"]} == {1}
+    assert {trade["magic_number"] for trade in journal["trades"]} == {1}
+    assert {trade["is_stopped"] for trade in journal["trades"]} == {False}
+    assert {tuple(trade["magic_numbers"]) for trade in journal["trades"]} == {(1,)}
+    assert {tuple(trade["historical_magic_numbers"]) for trade in journal["trades"]} == {()}
     assert len({(trade["strategy_id"], trade["close_time_msc"], trade["net_profit"]) for trade in journal["trades"]}) == 4
 
     current_account = main.journal_analysis_data(account="100121894")
@@ -745,6 +885,7 @@ def test_dashboard_exposes_latest_sqx_analytics_summary(tmp_path, monkeypatch):
     analytics = {
         "edge": {"available": True, "score": 76, "grade": "B"},
         "egt": {"available": False, "reason": "Histórico no disponible"},
+        "doctor": {"available": False, "reason": "No disponible"},
         "streaks": {"losing_streaks": [{"length": 3}]},
     }
     with db.session() as conn:
@@ -767,6 +908,7 @@ def test_dashboard_exposes_latest_sqx_analytics_summary(tmp_path, monkeypatch):
         "synced_at": now,
         "edge": {"available": True, "score": 76, "grade": "B"},
         "egt": {"available": False, "reason": "Histórico no disponible"},
+        "doctor": {"available": False, "reason": "No disponible"},
     }
 
 
@@ -907,6 +1049,11 @@ def test_dashboard_exposes_latest_completed_backtest_risk_audit(tmp_path, monkey
             metrics = {"profit_factor": 1.4}
             if audit_status:
                 metrics["risk_audit"] = {"status": audit_status, "worst_loss": 120.0}
+                if name == "No money management":
+                    metrics["risk_audit"].update(
+                        no_mm_warning=True,
+                        no_mm_reasons=["UseMoneyManagement=false"],
+                    )
             conn.execute(
                 "INSERT INTO backtest_metrics(run_id,metrics_json,raw_metrics_json,parsed_at) VALUES(?,?,?,?)",
                 (run_id, json.dumps(metrics), "{}", now),
@@ -925,6 +1072,8 @@ def test_dashboard_exposes_latest_completed_backtest_risk_audit(tmp_path, monkey
     assert summaries["Risk alert"]["history_source"] == "Custom"
     assert summaries["Risk validated"]["risk_audit"]["status"] == "validated"
     assert summaries["No money management"]["risk_audit"]["status"] == "no_mm"
+    assert summaries["No money management"]["no_mm_warning"] is True
+    assert summaries["No money management"]["no_mm_reasons"] == ["UseMoneyManagement=false"]
     assert summaries["Risk not auditable"]["risk_audit"]["status"] == "not_auditable"
     assert summaries["No audit data"]["has_completed"] is True
     assert summaries["No audit data"]["risk_audit"] is None
@@ -1005,8 +1154,18 @@ def test_journal_combines_active_and_archived_terminal_and_keeps_unassigned_trad
     unassigned = next(trade for trade in journal["trades"] if trade["strategy_id"] == 0)
     assert unassigned["symbol"] == "GDAXI"
     assert unassigned["strategy_name"] == "Sin estrategia asignada"
+    assert unassigned["is_stopped"] is False
     assert unassigned["source_role"] == "unassigned"
+    assert unassigned["magic_number"] == 999
+    assert unassigned["open_time_msc"] == 3000
+    assert unassigned["close_time_msc"] == 3001
+    assert unassigned["direction"] == "Long"
     assert journal["balances"] == {"4000094894": 1000}
+    assert journal["range_start_msc"] == 1000
+    assert journal["range_end_msc"] >= journal["range_start_msc"]
+    assert isinstance(journal["daily_balances"], list)
+    assert journal["capital_coverage"]["accounts"] == ["4000094894"]
+    assert journal["capital_coverage"]["start"]["complete"] is False
     assert journal["reconciliation"] == {
         "raw_closed_trades": 3,
         "attributed_trades": 2,
@@ -1014,6 +1173,11 @@ def test_journal_combines_active_and_archived_terminal_and_keeps_unassigned_trad
         "displayed_trades": 3,
         "status": "reconciled",
     }
+    assert journal["unassigned_groups"] == [{
+        "account": "4000094894", "symbol": "GDAXI", "magic_number": 999,
+        "reason": "sin mapping", "count": 1,
+        "first_close_time_msc": 3001, "last_close_time_msc": 3001,
+    }]
     strategy = next(item for item in main.dashboard_data()["strategies"] if item["id"] == strategy_id)
     assert strategy["identity_conflicts"] == []
     chart = main.get_chart(strategy_id, timeframe="H1", start=0, end=10)
@@ -1022,3 +1186,53 @@ def test_journal_combines_active_and_archived_terminal_and_keeps_unassigned_trad
     assert len(chart["markers"]) == 4
     assert [candle["time"] for candle in chart["candles"]] == [1, 2, 3]
     assert next(candle for candle in chart["candles"] if candle["time"] == 2)["open"] == 20
+
+
+def test_journal_balance_series_uses_active_sources_and_complete_boundaries(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "journal-balance-series.db")
+    db.init_db()
+    now = db.utcnow()
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    end = start + timedelta(days=2)
+
+    with db.session() as conn:
+        terminals = {}
+        for account in ("100", "200"):
+            terminals[account] = conn.execute(
+                """INSERT INTO terminals(name,data_dir,account_login,server,status,created_at)
+                   VALUES(?,?,?,?,?,?)""",
+                (f"Live {account}", str(tmp_path / account), account, "Broker", "connected", now),
+            ).lastrowid
+        archived = conn.execute(
+            """INSERT INTO terminals(name,data_dir,account_login,server,status,created_at)
+               VALUES(?,?,?,?,?,?)""",
+            ("Archived 100", "archive://terminal/1/100", "100", "Broker", "history", now),
+        ).lastrowid
+        for account, terminal_id in terminals.items():
+            base = 1000 if account == "100" else 2000
+            for day, balance in ((0, base), (1, base + 10), (2, base + 20)):
+                captured = (start + timedelta(days=day) - timedelta(minutes=5)).isoformat()
+                conn.execute(
+                    """INSERT INTO account_snapshots(terminal_id,captured_at,balance,equity,margin,free_margin,raw_json)
+                       VALUES(?,?,?,?,?,?,?)""",
+                    (terminal_id, captured, balance, balance, 0, balance, "{}"),
+                )
+        conn.execute(
+            """INSERT INTO account_snapshots(terminal_id,captured_at,balance,equity,margin,free_margin,raw_json)
+               VALUES(?,?,?,?,?,?,?)""",
+            (archived, (start - timedelta(minutes=1)).isoformat(), 999999, 999999, 0, 999999, "{}"),
+        )
+        daily, coverage = main._journal_balance_series(
+            conn,
+            ["100", "200"],
+            int(start.timestamp() * 1000),
+            int(end.timestamp() * 1000),
+        )
+
+    assert coverage["start"]["complete"] is True
+    assert coverage["start"]["total_balance"] == 3000
+    assert coverage["start"]["max_age_msc"] == 5 * 60 * 1000
+    assert coverage["end"]["complete"] is True
+    assert coverage["end"]["total_balance"] == 3040
+    assert all(point["complete"] for point in daily)
+    assert all(point["total_balance"] < 100000 for point in daily)

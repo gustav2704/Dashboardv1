@@ -5,6 +5,10 @@ $python = Join-Path $root '.venv\Scripts\python.exe'
 $pnpm = 'C:\Users\Admin\.cache\codex-runtimes\codex-primary-runtime\dependencies\bin\pnpm.cmd'
 $basePython = 'C:\Users\Admin\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
 $backend = Join-Path $root 'backend'
+$listener = Get-NetTCPConnection -LocalAddress '127.0.0.1' -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($listener) {
+    throw "Dashboard already running on http://127.0.0.1:8765 (PID $($listener.OwningProcess)). Stop that process before starting another instance."
+}
 if (-not (Test-Path -LiteralPath $python)) {
     & $basePython -m venv (Join-Path $root '.venv')
     & $python -m pip install --disable-pip-version-check -r (Join-Path $root 'requirements.txt')

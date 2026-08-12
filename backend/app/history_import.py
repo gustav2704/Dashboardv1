@@ -469,12 +469,14 @@ def imported_history_trades(conn: Any, mappings: list[Any]) -> list[dict[str, An
     def matches_identity(row: dict[str, Any], mapping: Any) -> bool:
         pattern = str(mapping["comment_pattern"] or "").casefold().strip()
         flexible = bool(mapping.get("historical_magic_flexible", 0)) if isinstance(mapping, dict) else bool(mapping["historical_magic_flexible"] if "historical_magic_flexible" in mapping.keys() else 0)
+        historical_until_msc = int(mapping.get("historical_until_msc") or 0) if isinstance(mapping, dict) else int(mapping["historical_until_msc"] or 0) if "historical_until_msc" in mapping.keys() else 0
         return (
             str(row["source_account"] or "") == str(mapping["account_login"] or "")
             and asset_key(str(row["symbol"] or "")) == asset_key(str(mapping["symbol"] or ""))
             and bool(pattern)
             and pattern in str(row["comment"] or "").casefold()
             and (flexible or int(row["magic"] or 0) == int(mapping["magic"] or 0))
+            and (not historical_until_msc or int(row["close_time_msc"] or 0) <= historical_until_msc)
         )
     history = [row for row in history if any(matches_identity(row, mapping) for mapping in eligible_mappings)]
     result = []

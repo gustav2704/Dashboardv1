@@ -186,7 +186,10 @@ def compute_metrics(
         "max_consecutive_wins": _max_streak(profits, True),
         "max_consecutive_losses": _max_streak(profits, False),
         "current_consecutive_losses": _current_losing_streak(profits),
-        "trades_per_month": count / months if months else 0.0,
+        # A short observed sample must not be projected to a full month.  The
+        # comparison panel and the performance view therefore use the same
+        # one-month floor for trade frequency.
+        "trades_per_month": performance_trades_per_month,
         "trade_edge": trade_edge,
         "performance_months": performance_months,
         "performance_trades_per_month": performance_trades_per_month,
@@ -228,9 +231,34 @@ def _baseline_limit(
     for baseline in baselines:
         if str(baseline.get("sample_type", "")).lower() != sample_type:
             continue
+        # MT5 reports are full-period baselines.  Never present a legacy MT5
+        # snapshot labelled IS/OOS as though it were a SQX partition.
+        if str(baseline.get("source", "")).lower() == "mt5_backtest":
+            continue
         value = _number(baseline.get("metrics", baseline), *keys)
         if value is not None and value > 0:
             return value, str(baseline.get("source") or "unknown")
+    return None, None
+
+
+def _mt5_full_limit(
+    baselines: list[dict[str, Any]],
+    *keys: str,
+) -> tuple[float | None, str | None]:
+    """Return the newest usable MT5 full-backtest limit.
+
+    MT5 reports do not have IS/OOS partitions, so this is deliberately kept
+    separate from the SQX sample checks and is only used as an OOS fallback.
+    """
+    for baseline in baselines:
+        if (
+            str(baseline.get("source", "")).lower() != "mt5_backtest"
+            or str(baseline.get("sample_type", "")).lower() != "full"
+        ):
+            continue
+        value = _number(baseline.get("metrics", baseline), *keys)
+        if value is not None and value > 0:
+            return value, "mt5_backtest"
     return None, None
 
 
@@ -271,10 +299,11 @@ def risk_guard_status(
             float(rules["drawdown_red"]),
         )
         loss_streak = _risk_check(
-            float(live["max_consecutive_losses"]),
+            float(live["current_consecutive_losses"]),
             streak_limit,
             streak_source,
-            1.0,
+            float(rules.get("loss_streak_relative_yellow", 0.80)),
+            float(rules.get("loss_streak_relative_red", 1.00)),
         )
         sample_label = sample_type.upper()
         if drawdown["status"] == "red":
@@ -290,6 +319,33 @@ def risk_guard_status(
         elif loss_streak["status"] == "yellow":
             yellow.append(f"{sample_label} loss streak at limit")
         checks[sample_type] = {"drawdown": drawdown, "loss_streak": loss_streak}
+    # An MT5 report is a full-period backtest, never an OOS result. Use it
+    # only when the corresponding OOS check cannot be evaluated, while still
+    # exposing it separately so the UI never labels it as OOS.
+    mt5_checks: dict[str, Any] = {}
+    for metric, keys, actual, warning_key, red_key in (
+        ("drawdown", ("max_drawdown", "MaxDD", "Drawdown", "MaxDrawdown"), float(live["max_drawdown"]), "drawdown_yellow", "drawdown_red"),
+        ("loss_streak", ("max_consecutive_losses", "MaxConsecLoss", "MaxConsecutiveLosses"), float(live["current_consecutive_losses"]), "loss_streak_relative_yellow", "loss_streak_relative_red"),
+    ):
+        if checks["oos"][metric]["status"] != "gray":
+            mt5_checks[metric] = _risk_check(actual, None, None, 1.0)
+            continue
+        limit, source = _mt5_full_limit(baselines, *keys)
+        mt5_checks[metric] = _risk_check(
+            actual, limit, source,
+            float(rules.get(warning_key, 0.80)),
+            float(rules.get(red_key, 1.00)),
+        )
+        status = mt5_checks[metric]["status"]
+        label = "MT5 backtest"
+        if status == "red":
+            red.append(f"{label} {'drawdown' if metric == 'drawdown' else 'loss streak'} exceeded")
+        elif status == "yellow":
+            suffix = "drawdown at limit" if metric == "drawdown" and mt5_checks[metric]["ratio"] == 1 else (
+                "drawdown approaching limit" if metric == "drawdown" else "loss streak at limit"
+            )
+            yellow.append(f"{label} {suffix}")
+    checks["mt5"] = mt5_checks
     statuses = [
         check["status"]
         for sample in checks.values()
@@ -317,6 +373,10 @@ def risk_guard_status(
             "current_consecutive_losses": live["current_consecutive_losses"],
         },
         "checks": checks,
+        "baseline_available": any(status != "gray" for status in statuses),
+        "missing_message": None if any(status != "gray" for status in statuses) else (
+            "No valid StrategyQuant or MT5 backtest baseline is available for Risk Guard."
+        ),
     }
 
 

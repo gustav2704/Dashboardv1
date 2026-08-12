@@ -9,3 +9,4 @@ data/backtests/
 *.tsbuildinfo
 __pycache__/
 .pytest_cache/
+ssh_access/

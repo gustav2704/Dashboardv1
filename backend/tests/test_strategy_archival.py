@@ -62,11 +62,13 @@ def test_archive_blocks_open_positions_and_reactivates_on_mt5_activity(tmp_path,
     assert impact["allowed"] is False
     assert any("open positions" in blocker for blocker in impact["blockers"])
 
+    # A blank comment cannot prove which EX5 owns the position; keep the raw
+    # position but do not reactivate a dashboard bot from MN alone.
     ensure_mt5_strategies()
     with db.session() as conn:
         row = conn.execute("SELECT archived_at,archive_reason FROM strategies WHERE id=?", (strategy_id,)).fetchone()
-    assert row["archived_at"] is None
-    assert row["archive_reason"] is None
+    assert row["archived_at"] is not None
+    assert row["archive_reason"] == "sin_trades"
 
 
 def test_retired_strategy_without_magic_or_trades_can_be_archived(tmp_path, monkeypatch):

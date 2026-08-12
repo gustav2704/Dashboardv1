@@ -20,6 +20,9 @@ por simbolo y firma numerica del nombre/comentario. Por ejemplo,
    El script busca primero en el `DataDir` del terminal y luego en `FILE_COMMON`.
 4. Editar el catalogo con una fila por combinacion EX5/Magic Number. El archivo
    usa comas y admite campos entre comillas cuando un comentario contiene comas.
+   Con `AutoSeedCatalogFromHistory=true` (valor por defecto), el script agrega
+   automaticamente al catalogo local las coincidencias unicas basadas en deals
+   ejecutados. Nunca inventa un Magic Number para un EA sin historial.
 5. En MT5, arrastrar `Scripts > Dashboardv1 > BotInventoryReport` a cualquier
    chart del perfil que se desea inspeccionar.
 

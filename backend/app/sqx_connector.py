@@ -16,6 +16,7 @@ from .strategy_identity import (
     canonicalize_linked_name,
     parameter_fingerprint,
 )
+from .sqx_doctor import analyze as analyze_doctor
 
 
 class SQXUnavailable(RuntimeError):
@@ -107,6 +108,28 @@ def _items(payload: Any) -> list[dict[str, Any]]:
         if payload and all(isinstance(v, dict) for v in payload.values()):
             return list(payload.values())
     return []
+
+
+def _order_rows(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        rows = [item for item in payload if isinstance(item, dict)]
+    elif isinstance(payload, dict) and isinstance(payload.get("orders"), list):
+        rows = [item for item in payload["orders"] if isinstance(item, dict)]
+    else:
+        rows = []
+    fields = {"ProfitLoss", "Profit/Loss", "Profit", "PL", "NetProfit", "Pnl"}
+    return rows if any(any(field in row for field in fields) for row in rows) else []
+
+
+def _doctor_for_strategy(project: str, databank: str, name: str) -> tuple[str, dict[str, Any]]:
+    try:
+        orders = _order_rows(_run(
+            "orders", "--project", project, "--databank", databank,
+            "--strategy", name, timeout=90,
+        ))
+        return name.casefold(), analyze_doctor(orders, f"{project}|{databank}|{name}")
+    except Exception as exc:
+        return name.casefold(), {"available": False, "reason": str(exc)[:200]}
 
 
 def _identity_name(item: dict[str, Any]) -> str:
@@ -303,8 +326,14 @@ def sync(project: str, databank: str) -> dict[str, Any]:
         raise ValueError("project and databank are required")
     payload = _run("bulk", "--project", project, "--databank", databank, timeout=360)
     incoming = _items(payload)
+    doctor_names = [name for item in incoming if (name := _identity_name(item))]
+    # SQX's local API serializes Results-plugin reads. Keep one client request
+    # at a time so a Doctor refresh cannot exhaust its authenticated session.
+    doctor_by_name = dict(
+        _doctor_for_strategy(project, databank, name) for name in doctor_names
+    )
     imported = matched = variant_matched = created = unmatched = baselines = passed = 0
-    edge_available = egt_available = analytics_unavailable = 0
+    edge_available = egt_available = doctor_available = analytics_unavailable = 0
     marked_missing = restored = renamed = promoted = 0
     rename_conflicts: list[dict[str, Any]] = []
     synced_at = utcnow()
@@ -601,6 +630,10 @@ def sync(project: str, databank: str) -> dict[str, Any]:
                 baselines += 1
             analytics = item.get("analytics")
             if isinstance(analytics, dict):
+                analytics = dict(analytics)
+                analytics["doctor"] = doctor_by_name.get(
+                    name.casefold(), {"available": False, "reason": "Sin órdenes SQX"}
+                )
                 _upsert_analytics(
                     conn,
                     int(strategy["id"]),
@@ -611,8 +644,10 @@ def sync(project: str, databank: str) -> dict[str, Any]:
                 )
                 edge_ok = bool(analytics.get("edge", {}).get("available"))
                 egt_ok = bool(analytics.get("egt", {}).get("available"))
+                doctor_ok = bool(analytics.get("doctor", {}).get("available"))
                 edge_available += int(edge_ok)
                 egt_available += int(egt_ok)
+                doctor_available += int(doctor_ok)
                 analytics_unavailable += int(not edge_ok or not egt_ok)
             else:
                 analytics_unavailable += 1
@@ -647,6 +682,7 @@ def sync(project: str, databank: str) -> dict[str, Any]:
         "baselines": baselines,
         "edge_available": edge_available,
         "egt_available": egt_available,
+        "doctor_available": doctor_available,
         "analytics_unavailable": analytics_unavailable,
         "marked_missing": marked_missing,
         "restored": restored,

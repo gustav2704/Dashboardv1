@@ -14,7 +14,7 @@ OPEN_BATCH_STATES = {"resolving", "waiting_terminal", "queued", "running", "paus
 
 def _impact(conn: Any, strategy_id: int) -> dict[str, Any]:
     strategy = conn.execute(
-        "SELECT id,sqx_name,mql5_name FROM strategies WHERE id=?",
+        "SELECT id,sqx_name,mql5_name,monitoring_selected FROM strategies WHERE id=?",
         (strategy_id,),
     ).fetchone()
     if not strategy:
@@ -53,12 +53,19 @@ def _impact(conn: Any, strategy_id: int) -> dict[str, Any]:
         "alert_settings": int(conn.execute(
             "SELECT COUNT(*) FROM settings WHERE key=?", (f"alerts:{strategy_id}",)
         ).fetchone()[0]),
+        "alert_episodes": int(conn.execute(
+            "SELECT COUNT(*) FROM alert_episodes WHERE strategy_id=?", (strategy_id,)
+        ).fetchone()[0]),
     }
+    eligibility_reasons: list[str] = []
+    if bool(strategy["monitoring_selected"]):
+        eligibility_reasons.append("stopped")
+    if link and link["missing_from_sqx_at"]:
+        eligibility_reasons.append("missing_from_sqx")
+
     blockers: list[str] = []
-    if not link or not link["missing_from_sqx_at"]:
-        blockers.append("Strategy is not marked Missing from SQX")
-    if counts["mappings"]:
-        blockers.append("Strategy has an MT5 mapping")
+    if not eligibility_reasons:
+        blockers.append("Strategy is neither stopped nor marked Missing from SQX")
     run_placeholders = ",".join("?" for _ in ACTIVE_RUN_STATES)
     active_runs = int(conn.execute(
         f"""SELECT COUNT(*) FROM backtest_runs
@@ -81,6 +88,7 @@ def _impact(conn: Any, strategy_id: int) -> dict[str, Any]:
         "strategy_id": strategy_id,
         "name": str(strategy["mql5_name"] or strategy["sqx_name"]),
         "missing_from_sqx_at": link["missing_from_sqx_at"] if link else None,
+        "eligibility_reasons": eligibility_reasons,
         "allowed": not blockers,
         "blockers": blockers,
         "counts": counts,

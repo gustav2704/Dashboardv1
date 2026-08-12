@@ -18,7 +18,7 @@ def _missing_strategy(conn, name="Duplicate Bot"):
     return strategy_id
 
 
-def test_deletion_is_blocked_until_missing_and_for_operational_references(tmp_path, monkeypatch):
+def test_deletion_requires_stopped_or_missing_and_blocks_active_backtests(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "blocked.db")
     db.init_db()
     now = db.utcnow()
@@ -33,7 +33,10 @@ def test_deletion_is_blocked_until_missing_and_for_operational_references(tmp_pa
                ) VALUES(?,?,?,?,?)""",
             (present_id, "Retester", "Results", "Present", now),
         )
-        mapped_id = _missing_strategy(conn, "Mapped")
+        stopped_mapped_id = conn.execute(
+            "INSERT INTO strategies(sqx_name,origin,monitoring_selected,created_at) VALUES(?,'sqx',1,?)",
+            ("Stopped mapped", now),
+        ).lastrowid
         terminal_id = conn.execute(
             "INSERT INTO terminals(name,data_dir,created_at) VALUES('Test','T:/test',?)",
             (now,),
@@ -42,7 +45,7 @@ def test_deletion_is_blocked_until_missing_and_for_operational_references(tmp_pa
             """INSERT INTO mappings(
                  strategy_id,terminal_id,confirmed,created_at
                ) VALUES(?,?,1,?)""",
-            (mapped_id, terminal_id, now),
+            (stopped_mapped_id, terminal_id, now),
         )
         active_id = _missing_strategy(conn, "Active")
         conn.execute(
@@ -57,8 +60,16 @@ def test_deletion_is_blocked_until_missing_and_for_operational_references(tmp_pa
             ),
         )
 
-    assert "not marked Missing" in strategy_deletion.deletion_impact(present_id)["blockers"][0]
-    assert "MT5 mapping" in strategy_deletion.deletion_impact(mapped_id)["blockers"][0]
+    assert "neither stopped nor marked Missing" in strategy_deletion.deletion_impact(present_id)["blockers"][0]
+    stopped_impact = strategy_deletion.deletion_impact(stopped_mapped_id)
+    assert stopped_impact["allowed"] is True
+    assert stopped_impact["eligibility_reasons"] == ["stopped"]
+    assert stopped_impact["counts"]["mappings"] == 1
+    strategy_deletion.delete_strategy(stopped_mapped_id)
+    with db.session() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM strategies WHERE id=?", (stopped_mapped_id,)
+        ).fetchone()[0] == 0
     assert "active backtest" in strategy_deletion.deletion_impact(active_id)["blockers"][0]
 
 

@@ -40,11 +40,11 @@ def test_init_db_migrates_strategy_selection_as_unchecked(tmp_path):
             row["name"] for row in conn.execute("PRAGMA table_info(strategies)")
         }
         strategy = conn.execute(
-            "SELECT sqx_name,monitoring_selected FROM strategies"
+            "SELECT sqx_name,monitoring_selected,favorite FROM strategies"
         ).fetchone()
 
-    assert "monitoring_selected" in columns
-    assert tuple(strategy) == ("Legacy strategy", 0)
+    assert {"monitoring_selected", "favorite", "no_mm_accepted", "no_mm_accepted_at"} <= columns
+    assert tuple(strategy) == ("Legacy strategy", 0, 0)
 
 
 def test_strategy_selection_round_trip_and_dashboard_persistence(
@@ -91,6 +91,42 @@ def test_strategy_selection_returns_not_found(tmp_path, monkeypatch):
     response = TestClient(main.app).put(
         "/api/strategies/999999/selection", json={"selection": True}
     )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Strategy not found"}
+
+
+def test_strategy_favorite_round_trip_and_dashboard_persistence(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "favorite.db")
+    monkeypatch.setattr(main, "suggestions", lambda: [])
+    db.init_db()
+    with db.session() as conn:
+        strategy_id = conn.execute(
+            """INSERT INTO strategies(symbol,sqx_name,account_login,created_at)
+               VALUES(?,?,?,?)""",
+            ("US100", "Favorite strategy", "200", db.utcnow()),
+        ).lastrowid
+
+    client = TestClient(main.app)
+    checked = client.put(f"/api/strategies/{strategy_id}/favorite", json={"favorite": True})
+    assert checked.status_code == 200
+    assert checked.json() == {"strategy_id": strategy_id, "favorite": True}
+    assert main.dashboard_data()["strategies"][0]["favorite"] is True
+    assert main.get_strategy(strategy_id)["favorite"] is True
+
+    unchecked = client.put(f"/api/strategies/{strategy_id}/favorite", json={"favorite": False})
+    assert unchecked.status_code == 200
+    assert unchecked.json() == {"strategy_id": strategy_id, "favorite": False}
+    with db.connect() as conn:
+        persisted = conn.execute("SELECT favorite FROM strategies WHERE id=?", (strategy_id,)).fetchone()
+    assert persisted["favorite"] == 0
+
+
+def test_strategy_favorite_returns_not_found(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "missing-favorite.db")
+    db.init_db()
+
+    response = TestClient(main.app).put("/api/strategies/999999/favorite", json={"favorite": True})
 
     assert response.status_code == 404
     assert response.json() == {"detail": "Strategy not found"}

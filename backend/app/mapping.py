@@ -10,7 +10,10 @@ from .db import session, utcnow
 from .operational_identity import (
     assert_compatible_with_strategy,
     enrich_terminal_identity,
+    expert_key,
     load_mappings,
+    normalize_expert,
+    server_key,
     same_identity,
 )
 
@@ -154,6 +157,7 @@ def _candidate(
         strategy["mql5_name"] or "",
         *aliases,
     ]
+    normalized_names = {normalize(name) for name in names if normalize(name)}
     name_signatures = [version_signature(name) for name in names]
     name_score = max(
         SequenceMatcher(None, normalize(name), value).ratio()
@@ -168,11 +172,10 @@ def _candidate(
     comment_signature_match = bool(
         observed_signatures.intersection(signature for signature in name_signatures if signature)
     )
-    magic = str(abs(int(item["magic"] or 0)))
-    magic_signature_match = bool(magic and magic != "0") and any(
-        signature and "".join(str(part) for part in signature) == magic for signature in name_signatures
-    )
-    signature_match = comment_signature_match or magic_signature_match
+    # A Magic Number may disambiguate two already-confirmed aliases later in
+    # attribution, but it is never evidence that an observation belongs to an
+    # EX5 and must not make an automatic suggestion safe by itself.
+    signature_match = comment_signature_match
     score = 0.55 * max(name_score, prefix_score) + 0.25 + (0.20 if signature_match else 0.0)
     if signature_match:
         score = max(score, 0.90)
@@ -192,8 +195,6 @@ def _candidate(
     evidence = ["symbol_family"]
     if comment_signature_match:
         evidence.append("version_signature")
-    if magic_signature_match:
-        evidence.append("magic_signature")
     if account_match:
         evidence.append("account_deployment")
     return {
@@ -207,6 +208,9 @@ def _candidate(
             and strategy["account_login"]
             and strategy["account_login"] != item["account_login"]
         ),
+        # Unlike a score, this is deterministic evidence: a name reported by
+        # MT5 exactly matches the strategy or one of its registered aliases.
+        "exact_name": bool(normalized_names.intersection(observed)),
         "evidence": evidence,
         "expert_name": item.get("expert_names", [None])[0] if item.get("expert_names") else None,
     }
@@ -215,31 +219,32 @@ def _candidate(
 def _observed(conn: Any) -> list[Any]:
     observed = conn.execute(
         """WITH identities AS (
-             SELECT d.terminal_id,t.account_login,t.data_dir AS terminal_data_dir,d.symbol,d.magic,d.comment,1 deal_count,0 position_count,0 order_count
+             SELECT d.terminal_id,t.account_login,t.server AS terminal_server,t.data_dir AS terminal_data_dir,d.symbol,d.magic,d.comment,1 deal_count,0 position_count,0 order_count
              FROM deals d JOIN terminals t ON t.id=d.terminal_id
              WHERE UPPER(d.entry_type) IN ('IN','INOUT')
            UNION ALL
-             SELECT p.terminal_id,t.account_login,t.data_dir AS terminal_data_dir,p.symbol,p.magic,p.comment,0 deal_count,1 position_count,0 order_count
+              SELECT p.terminal_id,t.account_login,t.server AS terminal_server,t.data_dir AS terminal_data_dir,p.symbol,p.magic,p.comment,0 deal_count,1 position_count,0 order_count
              FROM positions p JOIN terminals t ON t.id=p.terminal_id
            UNION ALL
-             SELECT o.terminal_id,t.account_login,t.data_dir AS terminal_data_dir,o.symbol,o.magic,o.comment,0 deal_count,0 position_count,1 order_count
+              SELECT o.terminal_id,t.account_login,t.server AS terminal_server,t.data_dir AS terminal_data_dir,o.symbol,o.magic,o.comment,0 deal_count,0 position_count,1 order_count
              FROM pending_orders o JOIN terminals t ON t.id=o.terminal_id
            )
-           SELECT terminal_id,account_login,terminal_data_dir,symbol,magic,comment,SUM(deal_count) deal_count,
+           SELECT terminal_id,account_login,terminal_server,terminal_data_dir,symbol,magic,comment,SUM(deal_count) deal_count,
                   SUM(position_count) position_count,SUM(order_count) order_count
            FROM identities
-           GROUP BY terminal_id,account_login,terminal_data_dir,symbol,magic,comment
+           GROUP BY terminal_id,account_login,terminal_server,terminal_data_dir,symbol,magic,comment
            ORDER BY terminal_id,symbol,magic,comment"""
     ).fetchall()
     grouped: dict[tuple[Any, ...], dict[str, Any]] = {}
     for row in observed:
         comment = stable_comment(str(row["comment"] or ""), int(row["magic"] or 0))
         key = (
-            row["terminal_id"], row["account_login"], row["symbol"],
+            row["terminal_id"], row["account_login"], row["terminal_server"], row["symbol"],
             int(row["magic"] or 0), comment,
         )
         item = grouped.setdefault(key, {
             "terminal_id": row["terminal_id"], "account_login": row["account_login"],
+            "terminal_server": row["terminal_server"],
             "terminal_data_dir": row["terminal_data_dir"],
             "symbol": row["symbol"], "magic": int(row["magic"] or 0),
             "comment": comment, "deal_count": 0, "position_count": 0, "order_count": 0,
@@ -254,30 +259,97 @@ def _is_mapped(item: Any, mappings: list[Any]) -> bool:
     return bool(_mapped_strategy_ids(item, mappings))
 
 
-def _mapped_strategy_ids(item: Any, mappings: list[Any]) -> set[int]:
-    """Return strategies sharing the operational MT5 identity of an observation.
+def _same_magic_scope(left: Any, right: Any) -> bool:
+    """Whether two observations belong to the same account/asset/Magic scope."""
+    return bool(
+        int(left.get("magic") or 0)
+        and str(left.get("account_login") or "").strip()
+        == str(right.get("account_login") or "").strip()
+        and server_key(left) == server_key(right)
+        and asset_key(str(left.get("symbol") or ""))
+        == asset_key(str(right.get("symbol") or ""))
+        and int(left.get("magic") or 0) == int(right.get("magic") or 0)
+    )
 
-    MT5 comments identify a trade variation, not a separate trading wallet.  A
-    bot is therefore identified by its account, terminal, broker-independent
-    symbol family, and magic number.
+
+def _identity_comment(value: str, magic: int) -> str:
+    """Return a usable EA label, excluding broker-generated execution notes."""
+    comment = stable_comment(value, magic)
+    return "" if comment.startswith("[") else comment
+
+
+def annotate_magic_scope_counts(mappings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Mark mappings whose Magic is shared by distinct strategies.
+
+    Comment matching is necessary only for these exceptional scopes.  A normal
+    unique Magic identifies the bot even when MT5 replaces its close comment
+    with ``[sl ...]`` or the EA later changes its label.
     """
-    if not str(item["account_login"] or "").strip() or not asset_key(str(item["symbol"] or "")):
+    grouped: dict[tuple[str, str, str, int], set[int]] = {}
+    for mapping in mappings:
+        magic = int(mapping.get("magic") or 0)
+        key = (
+            server_key(mapping), str(mapping.get("account_login") or "").strip(),
+            asset_key(str(mapping.get("symbol") or "")), magic,
+        )
+        if magic:
+            grouped.setdefault(key, set()).add(int(mapping["strategy_id"]))
+    for mapping in mappings:
+        magic = int(mapping.get("magic") or 0)
+        key = (
+            server_key(mapping), str(mapping.get("account_login") or "").strip(),
+            asset_key(str(mapping.get("symbol") or "")), magic,
+        )
+        mapping["magic_scope_strategy_count"] = len(grouped.get(key, set())) if magic else 0
+    return mappings
+
+
+def _mapped_strategy_ids(item: Any, mappings: list[Any]) -> set[int]:
+    """Resolve an observation by account, asset and Magic.
+
+    A comment is a label, not an identity requirement, unless distinct
+    strategies deliberately share the same Magic in that operational scope.
+    """
+    if (
+        not int(item.get("magic") or 0)
+        or not str(item["account_login"] or "").strip()
+        or not _identity_comment(str(item.get("comment") or ""), int(item.get("magic") or 0))
+    ):
         return set()
-    return {
+    annotate_magic_scope_counts(mappings)
+    scoped = [row for row in mappings if _same_magic_scope(row, item)]
+    strategy_ids = {int(row["strategy_id"]) for row in scoped}
+    if len(strategy_ids) == 1:
+        return strategy_ids
+    observed_name = normalize_expert(_identity_comment(str(item.get("comment") or ""), int(item.get("magic") or 0)))
+    if not observed_name:
+        return set()
+    matched = {
         int(row["strategy_id"])
-        for row in mappings
-        if same_identity(row, item)
+        for row in scoped
+        if observed_name in {
+            alias for alias in (
+                expert_key(row),
+                normalize_expert(_identity_comment(str(row.get("comment_pattern") or ""), int(row.get("magic") or 0))),
+            ) if alias
+        }
     }
+    return matched if len(matched) == 1 else set()
 
 
 def _live_mappings(conn: Any) -> list[dict[str, Any]]:
-    return [dict(row) for row in conn.execute(
-        """SELECT m.strategy_id,m.terminal_id,m.account_login,m.symbol,m.magic,
-                  t.data_dir AS terminal_data_dir
+    mappings = [dict(row) for row in conn.execute(
+        """SELECT m.id,m.strategy_id,m.terminal_id,m.account_login,m.symbol,m.magic,
+                  m.comment_pattern,t.data_dir AS terminal_data_dir,
+                  t.server AS terminal_server,s.operational_server,
+                  s.operational_asset_key,s.operational_expert_key,
+                  s.mql5_name,s.sqx_name
            FROM mappings m JOIN terminals t ON t.id=m.terminal_id
+           JOIN strategies s ON s.id=m.strategy_id
            WHERE m.confirmed=1 AND COALESCE(m.role,'live')='live'
-             AND COALESCE(m.account_login,'')=COALESCE(t.account_login,'')"""
+              AND COALESCE(m.account_login,'')=COALESCE(t.account_login,'')"""
     )]
+    return annotate_magic_scope_counts(mappings)
 
 
 def _suppressed_observation(conn: Any, item: Any) -> bool:
@@ -305,7 +377,9 @@ def _suppressed_observation(conn: Any, item: Any) -> bool:
         rejected["terminal_data_dir"] = terminal.get("data_dir", "")
         rejected["account_login"] = rejected.get("account_login") or terminal.get("account_login", "")
         if (
-            same_identity(rejected, item)
+            str(rejected.get("account_login") or "") == str(item["account_login"] or "")
+            and asset_key(str(rejected.get("symbol") or "")) == asset_key(str(item["symbol"] or ""))
+            and int(rejected.get("magic") or 0) == int(item["magic"] or 0)
             and normalize(stable_comment(str(rejected.get("comment_pattern") or "")))
             == normalize(stable_comment(str(item["comment"] or "")))
         ):
@@ -397,11 +471,69 @@ def suggestions() -> list[dict[str, Any]]:
     return result
 
 
-def auto_confirm_suggestions() -> dict[str, int]:
+def _is_deterministic_suggestion(item: dict[str, Any]) -> bool:
+    """Whether an observation can safely bypass manual-account review.
+
+    A non-zero Magic alone is never enough to create a mapping.  The observed
+    EA name must be an exact, unambiguous match for one canonical strategy.
+    """
+    candidates = list(item.get("candidates") or [])
+    top = candidates[0] if candidates else None
+    return bool(
+        int(item.get("magic") or 0)
+        and top
+        and top.get("exact_name")
+        and sum(bool(candidate.get("exact_name")) for candidate in candidates) == 1
+    )
+
+
+def auto_confirm_suggestions(*, allow_deterministic_manual: bool = True) -> dict[str, int]:
     pending = suggestions()
+    # Some monitored accounts deliberately start with a reviewed mapping set.
+    # They still accept an exact, unambiguous EA identity; heuristic matches
+    # remain visible in Suggestions until a user confirms them explicitly.
+    with session() as conn:
+        row = conn.execute(
+            "SELECT value_json FROM settings WHERE key='manual_live_mapping_accounts'"
+        ).fetchone()
+        historical_scopes = {
+            (
+                int(mapping["terminal_id"]),
+                str(mapping["symbol"] or "").lower(),
+                int(mapping["magic"] or 0),
+                str(mapping["comment_pattern"] or ""),
+            )
+            for mapping in conn.execute(
+                """SELECT terminal_id,symbol,magic,comment_pattern FROM mappings
+                   WHERE confirmed=1 AND COALESCE(role,'live')='historical'"""
+            )
+        }
+    try:
+        manual_review_accounts = {
+            str(account).strip()
+            for account in json.loads(row["value_json"] if row else "[]")
+            if str(account).strip()
+        }
+    except (TypeError, json.JSONDecodeError):
+        manual_review_accounts = set()
     confirmed = 0
     for item in pending:
-        if not item["safe"] or not item["candidates"]:
+        scope = (
+            int(item["terminal_id"]), str(item["symbol"] or "").lower(),
+            int(item.get("magic") or 0), str(item.get("comment") or ""),
+        )
+        # A later scan of archived deals must never turn an explicitly
+        # historical mapping into a live deployment on the same terminal.
+        if scope in historical_scopes:
+            continue
+        manual_account = str(item.get("account_login") or "").strip() in manual_review_accounts
+        if manual_account and not (
+            allow_deterministic_manual and _is_deterministic_suggestion(item)
+        ):
+            continue
+        if not item["candidates"]:
+            continue
+        if not item["safe"] and not _is_deterministic_suggestion(item):
             continue
         candidate = item["candidates"][0]
         confirm_mapping(
@@ -419,20 +551,85 @@ def auto_confirm_suggestions() -> dict[str, int]:
     return {"confirmed": confirmed, "review_required": len(pending) - confirmed}
 
 
-def ensure_mt5_strategies() -> dict[str, int]:
-    """Make every observed MT5 identity visible, even without an Excel row."""
-    safe_matches = auto_confirm_suggestions()["confirmed"]
+def _observation_has_magic_collision(item: Any, observations: list[Any]) -> bool:
+    names = {
+        normalize_expert(_identity_comment(str(other.get("comment") or ""), int(other.get("magic") or 0)))
+        for other in observations
+        if _same_magic_scope(other, item)
+        and _identity_comment(str(other.get("comment") or ""), int(other.get("magic") or 0))
+    }
+    return len(names) > 1
+
+
+def _create_mt5_strategy(conn: Any, item: Any, observed_name: str, now: str) -> int:
+    """Create one standalone live deployment for a unique MT5 identity."""
+    account = str(item["account_login"] or "")
+    base_name = observed_name
+    display_name = base_name
+    suffix = 2
+    while conn.execute(
+        "SELECT 1 FROM strategies WHERE sqx_name=? AND COALESCE(account_login,'')=?",
+        (display_name, account),
+    ).fetchone():
+        display_name = f"{base_name} [{item['terminal_id']}-{suffix}]"
+        suffix += 1
+    strategy_id = int(conn.execute(
+        """INSERT INTO strategies(
+             symbol,sqx_name,mql5_name,account_login,origin,last_observed_at,
+             operational_server,operational_asset_key,operational_expert_key,created_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+        (
+            item["symbol"], display_name, observed_name, account, "mt5", now,
+            str(item.get("terminal_server") or ""), asset_key(str(item["symbol"] or "")),
+            normalize_expert(observed_name), now,
+        ),
+    ).lastrowid)
+    conn.execute(
+        "UPDATE strategies SET identity_strategy_id=id WHERE id=?", (strategy_id,)
+    )
+    return strategy_id
+
+
+def ensure_mt5_strategies(
+    allowed_scopes: set[tuple[str, str, str, int]] | None = None,
+    *,
+    allow_auto_confirm: bool = True,
+    allow_manual_accounts: bool = False,
+) -> dict[str, int]:
+    """Create or link one strategy for each unambiguous MT5 identity.
+
+    ``allowed_scopes`` is used only by the repair utility to constrain a
+    historical backfill. Normal syncs discover every newly observed safe bot.
+    """
+    safe_matches = auto_confirm_suggestions()["confirmed"] if allow_auto_confirm else 0
     created = linked = 0
     now = utcnow()
     with session() as conn:
+        row = conn.execute(
+            "SELECT value_json FROM settings WHERE key='manual_live_mapping_accounts'"
+        ).fetchone()
+        try:
+            manual_review_accounts = {
+                str(account).strip()
+                for account in json.loads(row["value_json"] if row else "[]")
+                if str(account).strip()
+            }
+        except (TypeError, json.JSONDecodeError):
+            manual_review_accounts = set()
         mappings = _live_mappings(conn)
         # Archived strategies stay in identity matching so MT5 activity can
         # reactivate the existing row instead of creating a duplicate.
         strategies = conn.execute("SELECT * FROM strategies WHERE retired=0").fetchall()
         aliases = _aliases_by_strategy(conn)
-        for item in _observed(conn):
+        observations = _observed(conn)
+        for item in observations:
             mapped_strategy_ids = _mapped_strategy_ids(item, mappings)
             if len(mapped_strategy_ids) == 1:
+                # A reviewed account may forbid automatic *discovery*, but a
+                # confirmed operational identity is safe to continue onto a
+                # replacement terminal.  The resolver has already required
+                # matching server, account, asset, Magic and (when needed)
+                # EA identity, so persist the new terminal session here.
                 strategy_id = next(iter(mapped_strategy_ids))
                 conn.execute(
                     """UPDATE strategies SET last_observed_at=?,
@@ -466,10 +663,30 @@ def ensure_mt5_strategies() -> dict[str, int]:
                 # identity.  Leave it untouched until it is explicitly merged.
                 continue
 
+            # This account is intentionally managed from a fixed, audited
+            # mapping set.  It may inherit a confirmed identity above, but it
+            # must not automatically discover or create a new one here.
+            if (
+                not allow_manual_accounts
+                and str(item["account_login"] or "").strip() in manual_review_accounts
+            ):
+                continue
+
             if _suppressed_observation(conn, item):
                 continue
 
-            observed_name = str(item["comment"] or "").strip()
+            observed_name = _identity_comment(str(item["comment"] or ""), int(item["magic"] or 0))
+            scope = (
+                server_key(item), str(item["account_login"] or "").strip(),
+                asset_key(str(item["symbol"] or "")), int(item["magic"] or 0),
+            )
+            if (
+                not observed_name
+                or not int(item["magic"] or 0)
+                or (allowed_scopes is not None and scope not in allowed_scopes)
+                or _observation_has_magic_collision(item, observations)
+            ):
+                continue
             exact = [
                 strategy
                 for strategy in strategies
@@ -477,6 +694,11 @@ def ensure_mt5_strategies() -> dict[str, int]:
                     not strategy["account_login"]
                     or not item["account_login"]
                     or strategy["account_login"] == item["account_login"]
+                )
+                and (
+                    not str(strategy["operational_server"] or "").strip()
+                    or str(strategy["operational_server"] or "").strip().casefold()
+                    == str(item["terminal_server"] or "").strip().casefold()
                 )
                 and symbol_family(strategy["symbol"] or "") == symbol_family(item["symbol"] or "")
                 and observed_name
@@ -491,7 +713,16 @@ def ensure_mt5_strategies() -> dict[str, int]:
                 }
             ]
             if len(exact) == 1:
-                strategy_id = exact[0]["id"]
+                strategy_id, _ = _deployment_for_mapping(
+                    conn,
+                    int(exact[0]["id"]),
+                    str(item["account_login"] or ""),
+                    int(item["terminal_id"]),
+                    str(item["symbol"] or ""),
+                    int(item["magic"] or 0),
+                    observed_name,
+                    now,
+                )
                 conn.execute(
                     """UPDATE strategies SET last_observed_at=?,
                        archived_at=CASE WHEN ? THEN NULL ELSE archived_at END,
@@ -506,39 +737,10 @@ def ensure_mt5_strategies() -> dict[str, int]:
                 # Leave the observation unmapped for manual review.
                 continue
             else:
-                # Closed history alone is not enough authority to invent a new
-                # bot identity. Keep it visible as unassigned until a mapping is
-                # confirmed, or until MT5 exposes an active position/order.
-                if not item["position_count"] and not item["order_count"]:
-                    continue
-                base_name = observed_name or f"{item['symbol']} Magic {item['magic']}"
-                display_name = base_name
-                suffix = 2
-                while conn.execute(
-                    "SELECT 1 FROM strategies WHERE sqx_name=? AND account_login=?",
-                    (display_name, str(item["account_login"] or "")),
-                ).fetchone():
-                    display_name = f"{base_name} [{item['terminal_id']}-{suffix}]"
-                    suffix += 1
-                strategy_id = conn.execute(
-                    """INSERT INTO strategies(
-                         symbol,sqx_name,mql5_name,account_login,origin,last_observed_at,created_at
-                       ) VALUES(?,?,?,?,?,?,?)""",
-                    (
-                        item["symbol"],
-                        display_name,
-                        observed_name,
-                        str(item["account_login"] or ""),
-                        "mt5",
-                        now,
-                        now,
-                    ),
-                ).lastrowid
-                created += 1
-                strategies = conn.execute(
-                    "SELECT * FROM strategies WHERE retired=0"
-                ).fetchall()
+                strategy_id = _create_mt5_strategy(conn, item, observed_name, now)
+                strategies = conn.execute("SELECT * FROM strategies WHERE retired=0").fetchall()
                 aliases = _aliases_by_strategy(conn)
+                created += 1
 
             try:
                 assert_compatible_with_strategy(conn, strategy_id, {
@@ -546,15 +748,9 @@ def ensure_mt5_strategies() -> dict[str, int]:
                     "symbol": item["symbol"], "magic": item["magic"],
                 })
             except ValueError:
-                # Same name is not authority to merge an independent terminal,
-                # asset, or MN.  Keep it visible as a separate MT5 bot.
-                strategy_id = conn.execute(
-                    """INSERT INTO strategies(symbol,sqx_name,mql5_name,account_login,origin,last_observed_at,created_at)
-                       VALUES(?,?,?,?,?,?,?)""",
-                    (item["symbol"], f"{observed_name or item['symbol']} [{item['terminal_id']}]",
-                     observed_name, str(item["account_login"] or ""), "mt5", now, now),
-                ).lastrowid
-                created += 1
+                # A known name in an incompatible server/account/asset scope is
+                # not authority to create or merge a deployed bot.
+                continue
             conn.execute(
                 """INSERT OR IGNORE INTO mappings(
                      strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,
@@ -622,57 +818,112 @@ def _deployment_for_mapping(
     ).fetchone()
     if not canonical:
         raise KeyError(f"Canonical strategy {canonical_id} not found")
+    terminal = conn.execute(
+        "SELECT server FROM terminals WHERE id=?", (terminal_id,)
+    ).fetchone()
+    operational_server = str(terminal["server"] or "").strip() if terminal else ""
+    operational_asset = asset_key(symbol or str(selected["symbol"] or canonical["symbol"] or ""))
+    operational_expert = normalize_expert(
+        selected["operational_expert_key"]
+        or selected["mql5_name"]
+        or observed_name
+        or selected["sqx_name"]
+        or canonical["mql5_name"]
+        or canonical["sqx_name"]
+    )
     candidate = {
         "account_login": account_login,
         "terminal_id": terminal_id,
         "symbol": symbol,
         "magic": magic,
+        "operational_server": operational_server,
+        "operational_asset_key": operational_asset,
+        "operational_expert_key": operational_expert,
     }
     enriched_candidate = enrich_terminal_identity(conn, candidate)
-    # A family can have deployments, but only an exact operational identity can
-    # reuse an existing deployment strategy.
+    exact_identity = conn.execute(
+        """SELECT * FROM strategies WHERE retired=0 AND archived_at IS NULL
+           AND LOWER(COALESCE(operational_server,''))=LOWER(?)
+           AND COALESCE(account_login,'')=?
+           AND COALESCE(operational_asset_key,'')=?
+           AND COALESCE(operational_expert_key,'')=?
+           ORDER BY id LIMIT 1""",
+        (operational_server, account_login, operational_asset, operational_expert),
+    ).fetchone()
     family_strategies = conn.execute(
         """SELECT * FROM strategies WHERE retired=0
            AND (id=? OR identity_strategy_id=?) ORDER BY id""",
         (canonical_id, canonical_id),
     ).fetchall()
-    deployment = None
-    for family_strategy in family_strategies:
-        mappings = load_mappings(conn, int(family_strategy["id"]), confirmed_only=True, role="live")
-        if any(same_identity(mapping, enriched_candidate) for mapping in mappings):
-            deployment = family_strategy
-            break
+    deployment = exact_identity
+    if deployment is None:
+        for family_strategy in family_strategies:
+            mappings = load_mappings(conn, int(family_strategy["id"]), confirmed_only=True, role="live")
+            if any(same_identity(mapping, enriched_candidate) for mapping in mappings):
+                deployment = family_strategy
+                break
     if deployment:
         deployment_id = int(deployment["id"])
     elif not conn.execute(
-        "SELECT 1 FROM mappings WHERE strategy_id=? AND confirmed=1 LIMIT 1",
+        """SELECT 1 FROM mappings
+           WHERE strategy_id=? AND confirmed=1
+             AND COALESCE(role,'live')='live'
+           LIMIT 1""",
         (selected["id"],),
     ).fetchone() and str(selected["account_login"] or "") in ("", account_login):
         deployment_id = int(selected["id"])
         conn.execute(
             """UPDATE strategies SET account_login=COALESCE(NULLIF(account_login,''),?),
-               identity_strategy_id=COALESCE(identity_strategy_id,id)
+               identity_strategy_id=COALESCE(identity_strategy_id,id),
+               operational_server=?,operational_asset_key=?,operational_expert_key=?
                WHERE id=?""",
-            (account_login, deployment_id),
+            (account_login, operational_server, operational_asset, operational_expert, deployment_id),
         )
     else:
+        deployment_sqx_name = str(canonical["sqx_name"] or canonical["mql5_name"] or observed_name or "MT5 bot")
+        if conn.execute(
+            "SELECT 1 FROM strategies WHERE sqx_name=? AND COALESCE(account_login,'')=?",
+            (deployment_sqx_name, account_login),
+        ).fetchone():
+            base_name = deployment_sqx_name
+            suffix = f"[{operational_server or 'server'} · {operational_asset}]"
+            deployment_sqx_name = f"{base_name} {suffix}"
+            serial = 2
+            while conn.execute(
+                "SELECT 1 FROM strategies WHERE sqx_name=? AND COALESCE(account_login,'')=?",
+                (deployment_sqx_name, account_login),
+            ).fetchone():
+                deployment_sqx_name = f"{base_name} {suffix} {serial}"
+                serial += 1
         deployment_id = int(
             conn.execute(
                 """INSERT INTO strategies(
                      identity_strategy_id,symbol,sqx_name,mql5_name,account_login,
-                     origin,last_observed_at,retired,catalog_json,created_at
-                   ) VALUES(?,?,?,?,?,'mt5+sqx',?,0,'{}',?)""",
+                     origin,last_observed_at,retired,catalog_json,
+                     operational_server,operational_asset_key,operational_expert_key,created_at
+                   ) VALUES(?,?,?,?,?,'mt5+sqx',?,0,'{}',?,?,?,?)""",
                 (
                     canonical_id,
                     symbol or canonical["symbol"],
-                    canonical["sqx_name"],
+                    deployment_sqx_name,
                     observed_name or canonical["mql5_name"],
                     account_login,
                     now,
+                    operational_server,
+                    operational_asset,
+                    operational_expert,
                     now,
                 ),
             ).lastrowid
         )
+    conn.execute(
+        """UPDATE strategies SET operational_server=COALESCE(operational_server,?),
+                  operational_asset_key=COALESCE(operational_asset_key,?),
+                  operational_expert_key=COALESCE(operational_expert_key,?),
+                  account_login=COALESCE(NULLIF(account_login,''),?)
+           WHERE id=?""",
+        (operational_server, operational_asset, operational_expert, account_login, deployment_id),
+    )
     assert_compatible_with_strategy(conn, deployment_id, candidate)
     conn.execute(
         """INSERT INTO strategy_account_lineage(

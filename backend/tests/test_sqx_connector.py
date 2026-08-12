@@ -27,6 +27,28 @@ def _item(name, symbol, filter_result="PASSED"):
     }
 
 
+def test_sync_persists_strategy_doctor_summary(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "doctor-sync.db")
+    db.init_db()
+    payload = [_item("Doctor bot", "XAUUSD")]
+    orders = [
+        {"ProfitLoss": 40 if index % 3 else -20, "OpenTime": "2025-01-01T08:00:00", "CloseTime": "2025-01-01T12:00:00", "Direction": "Buy", "Balance": 10_000}
+        for index in range(220)
+    ]
+
+    def fake_run(*args, **kwargs):
+        return payload if args[0] == "bulk" else orders if args[0] == "orders" else None
+
+    monkeypatch.setattr(sqx_connector, "_run", fake_run)
+    result = sqx_connector.sync("Retester", "Results")
+
+    assert result["doctor_available"] == 1
+    with db.session() as conn:
+        stored = json.loads(conn.execute("SELECT analytics_json FROM sqx_analytics_snapshots").fetchone()["analytics_json"])
+    assert stored["doctor"]["available"] is True
+    assert stored["doctor"]["metrics"]["trades"] == 220
+
+
 def test_sync_links_variants_creates_distinct_names_and_is_idempotent(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "sqx.db")
     db.init_db()

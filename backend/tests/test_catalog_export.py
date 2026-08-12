@@ -44,7 +44,7 @@ def test_excel_enriches_existing_mt5_strategy(tmp_path, monkeypatch):
                 json.dumps({}),
             ),
         )
-    assert ensure_mt5_strategies()["created"] == 1
+    assert ensure_mt5_strategies()["created"] == 0
 
     source = tmp_path / "catalog.xlsx"
     workbook = Workbook()
@@ -62,6 +62,8 @@ def test_excel_enriches_existing_mt5_strategy(tmp_path, monkeypatch):
     workbook.save(source)
 
     import_catalog(source)
+    linked = ensure_mt5_strategies()
+    assert linked["linked"] + linked["safe_matches"] == 1
 
     with db.session() as conn:
         assert conn.execute("SELECT COUNT(*) FROM strategies").fetchone()[0] == 1

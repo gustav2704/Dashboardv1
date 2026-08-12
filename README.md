@@ -7,23 +7,48 @@ Dashboard web local para comparar EAs ejecutados en MetaTrader 5 con sus métric
 1. Instalar y compilar el servicio de sólo lectura:
 
    ```powershell
-   .\install-mt5-service.ps1 -DataDir 'C:\ruta\al\DataDir'
+   .\install-mt5-service.ps1 -DataDir 'C:\ruta\al\DataDir' -InstallBotInventory
    ```
 
 2. En MT5, iniciar `Navegador > Servicios > Dashboardv1 > DashboardBridge`.
-3. Ejecutar `.\start-dashboard.ps1` y abrir `http://127.0.0.1:8765`.
+   El bridge es estrictamente de lectura: historial, cuenta, posiciones, ordenes
+   pendientes y velas; no envia, modifica ni cierra ordenes.
+3. Opcionalmente, ejecutar una vez `Navegador > Scripts > Dashboardv1 >
+   BotInventoryReport` en un chart para importar los EAs adjuntos y sus Magic
+   Numbers. El script tambien es de solo lectura.
+4. Ejecutar `.\start-dashboard.ps1` y abrir `http://127.0.0.1:8765`.
 
 La primera ejecución crea `.venv`, instala dependencias y compila el frontend. El servicio MQL5 sólo lee historial, posiciones y velas; no contiene ninguna llamada de envío o modificación de órdenes.
 
 ## Datos
 
-- Fuente operativa: MT5. Cada combinación observada de terminal, cuenta, símbolo, magic y comentario crea o actualiza automáticamente su estrategia.
+- Fuente operativa: MT5. La identidad desplegada es servidor + cuenta + activo normalizado + nombre EX5 normalizado. Terminal y Magic Number son atributos; las observaciones sin EX5 o alias confirmado se conservan, pero no crean estrategias ni alimentan métricas.
 - Catálogo adicional: `..\EA_track\Track_v1.xlsx`; aporta nombres y KPIs históricos, pero nunca se modifica ni bloquea bots nuevos.
 - Exportación: `GET /api/catalog/export` crea en `data\exports` un ranking multifuente con hojas para SQX, backtest MT5, Live MT5, comparativo y metodología; la hoja original se conserva intacta.
 - SQLite: `data\dashboard.db`.
 - Cola MT5: `<DataDir>\MQL5\Files\Dashboardv1`.
 - SQX: sincronización read-only cuando SQX está abierto; los snapshots quedan persistidos.
 - Refresco: 5 minutos. Una terminal queda desconectada tras 10 minutos sin respuesta.
+
+### Terminal remota por SSH
+
+El Dashboard puede registrar una carpeta de datos MT5 de una VPS mediante
+**SSH/SFTP**. Esto elimina la dependencia de que la carpeta del terminal esté
+montada o instalada localmente. En `Settings > Register terminal`, selecciona
+`SSH / SFTP VPS` e indica host, puerto, usuario, ruta de clave privada local,
+huella SHA-256 del servidor y el `DataDir` remoto.
+
+La huella se valida en cada conexión; no se aceptan claves de host nuevas de
+forma automática. La sincronización lee y archiva los JSON de
+`MQL5\Files\Dashboardv1` por SFTP y escribe solicitudes de sincronización o
+velas en esa misma cola. También existe un diagnóstico SSH de solo lectura con
+una lista cerrada de comandos.
+
+SSH reemplaza el **transporte**, no la fuente MT5: `DashboardBridge` debe seguir
+activo dentro de cada terminal para producir el estado live de cuenta,
+posiciones, órdenes, historial y velas. Un script de Windows ejecutado por SSH
+no puede obtener ese estado interno de MT5 de forma fiable sin un componente
+que se ejecute dentro de la terminal.
 
 ## Inventarios de VPS
 
@@ -50,6 +75,8 @@ usa para atribuir operaciones hasta conocer un magic fiable.
 - `GET /api/backtests/candidates`
 - `GET|POST /api/backtests/batches`
 - `GET /api/backtests/batches/{id}`, `POST /api/backtests/batches/{id}/pause|resume|cancel`
+- `GET /api/backtests/remote/status`, `GET /api/backtests/remote/audit?refresh=true`
+- `POST /api/backtests/remote/setup`, `POST /api/backtests/remote/batches`
 
 ## Backtests MT5
 
@@ -64,5 +91,30 @@ La opcion `Validate missing` resuelve EX5 de FPM/Darwinex, captura la
 configuracion SQX y prepara una cola secuencial reanudable. Cuando se usa la
 terminal Live, la cola espera hasta que no existan posiciones ni ordenes
 pendientes antes de iniciar el Strategy Tester.
+
+### Runner Darwinex Demo por SSH
+
+El flujo remoto instala una copia portatil aislada en
+`C:\MT5Backtest\DarwinexDemoRunner` y ejecuta exclusivamente la cuenta
+`3000097316 / Darwinex-Demo`, con periodo `2016-01-01` a `2024-12-31` y modelo
+OHLC M1. `remote/audit` compara perfiles, EX5, Magic, comentario, simbolo y
+timeframe de las cuentas VPS; la respuesta se conserva cinco minutos para que
+la creacion del batch no repita la lectura SSH.
+
+Cada ejecucion descarga informe, set, INI, log y manifiesto SHA-256 a
+`data\backtests\<run_id>`. El directorio temporal remoto solo se elimina
+despues de validar hashes, informe y KPIs locales. El primer elemento es un
+piloto obligatorio; si falla, el lote queda pausado. El runner no arranca si
+el snapshot de seguridad Live/Demo no esta fresco o contiene posiciones u
+ordenes pendientes.
+
+### Axi 10025867
+
+La instalacion local espejo de Axi usa el DataDir
+`C:\Users\Admin\AppData\Roaming\MetaQuotes\Terminal\91667A77170349F91845E5FC96BD9A8C`
+(`10025867 / Axi-US50-Demo`). El valor por defecto del instalador apunta a esta
+terminal; use `-DataDir` para otra instalacion. El historial importado queda
+separado de la sesion live y solo los mapeos confirmados atribuyen operaciones
+nuevas a una estrategia.
 
 La aplicación escucha únicamente en `127.0.0.1`.

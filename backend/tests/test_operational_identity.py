@@ -1,10 +1,11 @@
 from app.operational_identity import conflicts, identity, mappings_for_primary
 
 
-def _mapping(id, terminal, symbol, magic, account="100", role="live"):
+def _mapping(id, terminal, symbol, magic, account="100", role="live", server="Broker-Demo", expert="BotA"):
     return {
         "id": id, "terminal_id": terminal, "account_login": account,
         "symbol": symbol, "magic": magic, "role": role, "confirmed": 1,
+        "terminal_server": server, "operational_expert_key": expert,
     }
 
 
@@ -14,10 +15,16 @@ def test_broker_symbol_aliases_are_one_operational_identity():
     assert identity(left) == identity(right)
 
 
-def test_terminal_or_magic_is_a_different_identity():
+def test_terminal_or_magic_does_not_change_identity():
     base = _mapping(1, 7, "NAS100", 11)
-    assert identity(base) != identity(_mapping(2, 8, "US100", 11))
-    assert identity(base) != identity(_mapping(3, 7, "US100", 12))
+    assert identity(base) == identity(_mapping(2, 8, "US100", 11))
+    assert identity(base) == identity(_mapping(3, 7, "US100", 12))
+
+
+def test_server_or_ex5_is_a_different_identity():
+    base = _mapping(1, 7, "NAS100", 11)
+    assert identity(base) != identity(_mapping(2, 7, "US100", 11, server="Broker-Live"))
+    assert identity(base) != identity(_mapping(3, 7, "US100", 11, expert="BotB"))
 
 
 def test_legacy_conflict_uses_primary_identity_only():
