@@ -39,7 +39,7 @@ def test_symbol_family_maps_broker_symbols_to_catalog_symbols():
 
 
 def test_asset_key_normalizes_broker_aliases_suffixes_and_prefixes():
-    assert asset_key("GER40") == asset_key("DEUIDXEUR_clonedwnx") == "dax"
+    assert asset_key("GER40") == asset_key("GDAXI") == asset_key("DEUIDXEUR_clonedwnx") == "dax"
     assert asset_key("NAQ") == asset_key("US100.cash") == "naq"
     assert asset_key("XAUUSD.cyr") == asset_key("gold") == "xauusd"
     assert asset_key("SPX500") == asset_key("US500.cash") == "sp500"

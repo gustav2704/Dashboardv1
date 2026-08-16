@@ -4,7 +4,19 @@ from datetime import datetime, timedelta, timezone
 from app import db
 from app import main
 from app.display_names import seed_manual_display_names
-from app.main import _last_closed_months, _latest_baselines, _monthly_net_profit, dashboard_data, get_strategy
+from app.main import _overview_months, _latest_baselines, _monthly_net_profit, dashboard_data, get_strategy
+
+
+def test_canonical_terminal_rows_prefers_ssh_for_the_same_broker_account() -> None:
+    terminals = [
+        {"id": 86, "name": "Darwinex Live", "account_login": "4000094894", "server": "Darwinex-Live", "transport": "local", "last_seen": "2026-08-13T12:24:49Z"},
+        {"id": 208, "name": "Darwinex Live VPS", "account_login": "4000094894", "server": "Darwinex-Live", "transport": "ssh", "last_seen": "2026-08-13T12:24:56Z"},
+        {"id": 210, "name": "Darwinex Demo VPS", "account_login": "3000097316", "server": "Darwinex-Demo", "transport": "ssh", "last_seen": "2026-08-13T12:24:58Z"},
+    ]
+
+    result = main._canonical_terminal_rows(terminals)
+
+    assert [terminal["id"] for terminal in result] == [210, 208]
 
 
 def test_unique_confirmed_magic_matches_a_trade_without_comment() -> None:
@@ -88,19 +100,20 @@ def test_worker_cycle_skips_when_another_cycle_owns_the_lock() -> None:
         main._WORKER_CYCLE_LOCK.release()
 
 
-def test_monthly_net_profit_uses_three_completed_calendar_months() -> None:
-    months = _last_closed_months(datetime(2026, 7, 23, tzinfo=timezone.utc))
+def test_monthly_net_profit_includes_current_and_three_preceding_calendar_months() -> None:
+    months = _overview_months(datetime(2026, 1, 23, tzinfo=timezone.utc))
     assert [(month["key"], month["label"]) for month in months] == [
-        ("2026-06", "Jun 2026"), ("2026-05", "May 2026"), ("2026-04", "Abr 2026"),
+        ("2026-01", "Ene 2026"), ("2025-12", "Dic 2025"), ("2025-11", "Nov 2025"), ("2025-10", "Oct 2025"),
     ]
     as_msc = lambda value: int(value.replace(tzinfo=timezone.utc).timestamp() * 1000)
     values = _monthly_net_profit([
-        {"close_time_msc": as_msc(datetime(2026, 6, 1)), "net_profit": 100},
-        {"close_time_msc": as_msc(datetime(2026, 5, 31, 23, 59, 59)), "net_profit": -25},
-        {"close_time_msc": as_msc(datetime(2026, 4, 15)), "net_profit": 10},
-        {"close_time_msc": as_msc(datetime(2026, 7, 1)), "net_profit": 999},
+        {"close_time_msc": as_msc(datetime(2026, 1, 1)), "net_profit": 100},
+        {"close_time_msc": as_msc(datetime(2025, 12, 31, 23, 59, 59)), "net_profit": -25},
+        {"close_time_msc": as_msc(datetime(2025, 11, 15)), "net_profit": 10},
+        {"close_time_msc": as_msc(datetime(2025, 10, 1)), "net_profit": -50},
+        {"close_time_msc": as_msc(datetime(2025, 9, 30, 23, 59, 59)), "net_profit": 999},
     ], months)
-    assert [value["net_profit"] for value in values] == [100, -25, 10]
+    assert [value["net_profit"] for value in values] == [100, -25, 10, -50]
 
 
 def test_latest_baselines_includes_completed_backtests_from_identity_members(tmp_path, monkeypatch):
@@ -245,6 +258,11 @@ def test_dashboard_uses_historical_magic_as_primary_when_no_live_mapping_exists(
                VALUES(?,?,?,?,?)""",
             ("Previous account", str(tmp_path / "previous"), "old-account", "disconnected", now),
         ).lastrowid
+        other_terminal_id = conn.execute(
+            """INSERT INTO terminals(name,data_dir,account_login,status,created_at)
+               VALUES(?,?,?,?,?)""",
+            ("Older account", str(tmp_path / "older"), "older-account", "disconnected", now),
+        ).lastrowid
         strategy_id = conn.execute(
             """INSERT INTO strategies(symbol,sqx_name,account_login,created_at)
                VALUES(?,?,?,?)""",
@@ -261,11 +279,17 @@ def test_dashboard_uses_historical_magic_as_primary_when_no_live_mapping_exists(
                ) VALUES(?,?,?,?,?,?,?,?,?)""",
             (strategy_id, terminal_id, "old-account", "XAUUSD", 71, "Legacy bot", "historical", 1, now),
         )
+        conn.execute(
+            """INSERT INTO mappings(
+                 strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,role,confirmed,created_at
+               ) VALUES(?,?,?,?,?,?,?,?,?)""",
+            (strategy_id, other_terminal_id, "older-account", "XAUUSD", 72, "Older legacy bot", "historical", 1, now),
+        )
 
     strategy = next(item for item in dashboard_data()["strategies"] if item["id"] == strategy_id)
 
     assert strategy["magic_numbers"] == []
-    assert strategy["historical_magic_numbers"] == [71]
+    assert strategy["historical_magic_numbers"] == [71, 72]
     assert strategy["primary_magic_number"] == 71
 
 

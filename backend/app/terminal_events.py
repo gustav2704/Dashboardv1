@@ -327,13 +327,17 @@ def sync_terminal_events(db_path: Path | None = None) -> dict[str, Any]:
 def events_data(
     *, accounts: set[str] | None = None, severity: str = "all", source_id: int | None = None,
     log_kind: str = "all", search: str = "", start: str | None = None, end: str | None = None,
-    limit: int = 200, offset: int = 0, db_path: Path | None = None,
+    limit: int = 200, offset: int = 0, vps_only: bool = True, db_path: Path | None = None,
 ) -> dict[str, Any]:
     where: list[str] = ["LOWER(e.context) NOT LIKE ?"]
     parameters: list[Any] = ["%order with these parameters already exists%"]
     if accounts:
         where.append("e.account_login IN (%s)" % ",".join("?" for _ in accounts))
         parameters.extend(sorted(accounts))
+    if vps_only:
+        # A local terminal may use the same account as a VPS.  For operational
+        # monitoring, the SSH terminal is the source of truth.
+        where.append("t.transport='ssh'")
     if severity in {"warning", "error"}:
         where.append("e.severity=?")
         parameters.append(severity)
@@ -354,9 +358,10 @@ def events_data(
         parameters.append(end)
     clause = f"WHERE {' AND '.join(where)}" if where else ""
     with session(db_path) as conn:
-        total = int(conn.execute(f"SELECT COUNT(*) FROM terminal_events e {clause}", parameters).fetchone()[0])
+        event_from = "FROM terminal_events e JOIN terminals t ON t.id=e.terminal_id"
+        total = int(conn.execute(f"SELECT COUNT(*) {event_from} {clause}", parameters).fetchone()[0])
         counts = {row["severity"]: row["count"] for row in conn.execute(
-            f"SELECT e.severity,COUNT(*) AS count FROM terminal_events e {clause} GROUP BY e.severity", parameters
+            f"SELECT e.severity,COUNT(*) AS count {event_from} {clause} GROUP BY e.severity", parameters
         ).fetchall()}
         events = rows(conn.execute(
             f"""SELECT e.*,s.label AS source_label,t.name AS terminal_name
@@ -370,6 +375,8 @@ def events_data(
         ))
         source_clause = "WHERE s.enabled=1"
         source_parameters: list[Any] = []
+        if vps_only:
+            source_clause += " AND t.transport='ssh'"
         if accounts:
             source_clause += " AND s.account_login IN (%s)" % ",".join("?" for _ in accounts)
             source_parameters.extend(sorted(accounts))

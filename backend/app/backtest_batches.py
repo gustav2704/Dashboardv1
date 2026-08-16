@@ -503,6 +503,9 @@ def _resolve_item(item_id: int, model: int, broker: str = ACTIVE_BACKTEST_BROKER
     inputs["UseMoneyManagement"] = "true"
     inputs["mmRiskedMoney"] = "200"
     inputs["mmDecimals"] = "2"
+    # XAU risk sizing can yield a fractional lot (for example ~0.11).  A
+    # whole-lot step rounds it to zero and suppresses every trade.
+    inputs["mmStep"] = "0.01"
     inputs["mmLotsIfNoMM"] = "0.1"
     inputs["mmLots"] = "0.1"
     # A small set of confirmed non-SQX EAs exposes an equivalent fixed-lot
@@ -530,7 +533,7 @@ def _resolve_item(item_id: int, model: int, broker: str = ACTIVE_BACKTEST_BROKER
     snapshot["resolution_method"] = item["resolution_method"]
     snapshot["expert_hash"] = expert_hash
     snapshot["risk_policy"] = {
-        "preferred": {"UseMoneyManagement": True, "mmRiskedMoney": 200, "mmDecimals": 2},
+        "preferred": {"UseMoneyManagement": True, "mmRiskedMoney": 200, "mmDecimals": 2, "mmStep": 0.01},
         "fallback": {"mmLots": 0.1, "mmLotsIfNoMM": 0.1},
     }
     if history_source:

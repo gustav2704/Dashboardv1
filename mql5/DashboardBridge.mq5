@@ -83,7 +83,12 @@ string PositionJson(const ulong ticket)
 {
    if(!PositionSelectByTicket(ticket)) return "";
    ENUM_POSITION_TYPE type=(ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-   return StringFormat("{\"ticket\":%I64u,\"position_id\":%I64u,\"symbol\":\"%s\",\"direction\":\"%s\",\"time_msc\":%I64d,\"volume\":%.8f,\"open_price\":%.10f,\"current_price\":%.10f,\"profit\":%.8f,\"swap\":%.8f,\"magic\":%I64d,\"comment\":\"%s\"}",ticket,ticket,JsonEscape(PositionGetString(POSITION_SYMBOL)),type==POSITION_TYPE_BUY?"Long":"Short",PositionGetInteger(POSITION_TIME_MSC),PositionGetDouble(POSITION_VOLUME),PositionGetDouble(POSITION_PRICE_OPEN),PositionGetDouble(POSITION_PRICE_CURRENT),PositionGetDouble(POSITION_PROFIT),PositionGetDouble(POSITION_SWAP),PositionGetInteger(POSITION_MAGIC),JsonEscape(PositionGetString(POSITION_COMMENT)));
+   return StringFormat("{\"ticket\":%I64u,\"position_id\":%I64u,\"symbol\":\"%s\",\"direction\":\"%s\",\"time_msc\":%I64d,\"volume\":%.8f,\"open_price\":%.10f,\"current_price\":%.10f,\"stop_loss\":%.10f,\"take_profit\":%.10f,\"profit\":%.8f,\"swap\":%.8f,\"magic\":%I64d,\"comment\":\"%s\"}",ticket,ticket,JsonEscape(PositionGetString(POSITION_SYMBOL)),type==POSITION_TYPE_BUY?"Long":"Short",PositionGetInteger(POSITION_TIME_MSC),PositionGetDouble(POSITION_VOLUME),PositionGetDouble(POSITION_PRICE_OPEN),PositionGetDouble(POSITION_PRICE_CURRENT),PositionGetDouble(POSITION_SL),PositionGetDouble(POSITION_TP),PositionGetDouble(POSITION_PROFIT),PositionGetDouble(POSITION_SWAP),PositionGetInteger(POSITION_MAGIC),JsonEscape(PositionGetString(POSITION_COMMENT)));
+}
+
+string SymbolSpecJson(const string symbol)
+{
+   return StringFormat("{\"symbol\":\"%s\",\"volume_min\":%.8f,\"volume_step\":%.8f}",JsonEscape(symbol),SymbolInfoDouble(symbol,SYMBOL_VOLUME_MIN),SymbolInfoDouble(symbol,SYMBOL_VOLUME_STEP));
 }
 
 string OrderTypeName(const ENUM_ORDER_TYPE type)
@@ -106,7 +111,8 @@ void ProcessSync(const string request)
    deals+="]";
    string positions="["; first=true; for(int i=0;i<PositionsTotal();i++) { string row=PositionJson(PositionGetTicket(i)); if(row=="") continue; if(!first) positions+=","; positions+=row; first=false; } positions+="]";
    string orders="["; first=true; for(int i=0;i<OrdersTotal();i++) { string row=OrderJson(OrderGetTicket(i)); if(row=="") continue; if(!first) orders+=","; orders+=row; first=false; } orders+="]";
-   string response=StringFormat("{\"schema_version\":2,\"status\":\"ok\",\"terminal_connected\":%s,\"generated_at\":\"%s\",\"account_login\":\"%I64d\",\"server\":\"%s\",\"account\":{\"balance\":%.8f,\"equity\":%.8f,\"margin\":%.8f,\"free_margin\":%.8f},\"deals\":%s,\"positions\":%s,\"orders\":%s}",terminal_connected?"true":"false",IsoUtc(),AccountInfoInteger(ACCOUNT_LOGIN),JsonEscape(AccountInfoString(ACCOUNT_SERVER)),AccountInfoDouble(ACCOUNT_BALANCE),AccountInfoDouble(ACCOUNT_EQUITY),AccountInfoDouble(ACCOUNT_MARGIN),AccountInfoDouble(ACCOUNT_MARGIN_FREE),deals,positions,orders);
+   string specs="["; first=true; for(int i=0;i<SymbolsTotal(true);i++) { string symbol=SymbolName(i,true); if(symbol=="") continue; if(!first) specs+=","; specs+=SymbolSpecJson(symbol); first=false; } specs+="]";
+   string response=StringFormat("{\"schema_version\":3,\"status\":\"ok\",\"terminal_connected\":%s,\"generated_at\":\"%s\",\"account_login\":\"%I64d\",\"server\":\"%s\",\"account\":{\"balance\":%.8f,\"equity\":%.8f,\"margin\":%.8f,\"free_margin\":%.8f},\"deals\":%s,\"positions\":%s,\"orders\":%s,\"symbol_specs\":%s}",terminal_connected?"true":"false",IsoUtc(),AccountInfoInteger(ACCOUNT_LOGIN),JsonEscape(AccountInfoString(ACCOUNT_SERVER)),AccountInfoDouble(ACCOUNT_BALANCE),AccountInfoDouble(ACCOUNT_EQUITY),AccountInfoDouble(ACCOUNT_MARGIN),AccountInfoDouble(ACCOUNT_MARGIN_FREE),deals,positions,orders,specs);
    WriteAtomic(RESPONSES+"sync.response.json",response);
 }
 

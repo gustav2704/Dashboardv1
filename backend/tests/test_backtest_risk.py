@@ -47,7 +47,8 @@ def test_minimum_lot_entries_warn_even_when_money_management_is_enabled():
         "metrics": {"worst_trade": -100, "executed_entry_count": 3, "all_entries_min_lot": True},
     })
     assert result["status"] == "validated"
-    assert result["no_mm_reasons"] == ["All executed entries used 0.01 lots"]
+    assert result["no_mm_reasons"] == []
+    assert result["mm_status"] == "mm_all_entries_at_minimum"
 
 
 def test_no_mm_audit_reports_both_reasons_when_applicable():
@@ -55,4 +56,28 @@ def test_no_mm_audit_reports_both_reasons_when_applicable():
         "configuration": {"inputs": {"UseMoneyManagement": "false"}},
         "metrics": {"worst_trade": -100, "executed_entry_count": 2, "all_entries_min_lot": True},
     })
-    assert result["no_mm_reasons"] == ["UseMoneyManagement=false", "All executed entries used 0.01 lots"]
+    assert result["no_mm_reasons"] == ["UseMoneyManagement=false"]
+    assert result["mm_findings"] == ["All executed entries used 0.01 lots (legacy report)"]
+
+
+def test_mm_active_at_non_standard_broker_minimum_is_informational():
+    result = audit_report({
+        "configuration": {"inputs": {"UseMoneyManagement": "true", "mmRiskedMoney": "200"}},
+        "metrics": {
+            "worst_trade": -190, "executed_entry_count": 3,
+            "executed_entry_volumes": [0.1, 0.1, 0.1], "volume_min": 0.1, "volume_step": 0.1,
+        },
+    })
+    assert result["status"] == "validated"
+    assert result["mm_status"] == "mm_all_entries_at_minimum"
+    assert result["all_entries_at_minimum"] is True
+    assert result["no_mm_reasons"] == []
+
+
+def test_mm_active_with_variable_lots_is_not_minimum_lot_finding():
+    result = audit_report({
+        "configuration": {"inputs": {"UseMoneyManagement": "true", "mmRiskedMoney": "200"}},
+        "metrics": {"worst_trade": -200, "executed_entry_volumes": [0.1, 0.2], "volume_min": 0.1},
+    })
+    assert result["mm_status"] == "mm_active"
+    assert result["mm_findings"] == []

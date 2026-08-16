@@ -1,0 +1,47 @@
+.performance-grouping {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  background: #09151e;
+}
+.performance-grouping > span {
+  margin-right: 5px;
+  color: #60798a;
+  font: 9px Consolas, monospace;
+  letter-spacing: .7px;
+  text-transform: uppercase;
+}
+.performance-grouping button {
+  min-width: 56px;
+  padding: 6px 10px;
+  border: 1px solid #263f4e;
+  border-radius: 4px;
+  background: #0c1b26;
+  color: #8ca1af;
+  cursor: pointer;
+}
+.performance-grouping button:hover { border-color: #4b7188; color: #d7e7ef; }
+.performance-grouping button.active { border-color: #2b8f81; background: #10332f; color: #c9fff6; }
+
+.ranking-methodology {
+  display: grid;
+  gap: 3px;
+  padding: 8px 14px;
+  border-bottom: 1px solid #14232e;
+  background: #0b1822;
+  color: #8297a5;
+  font-size: 10px;
+  line-height: 1.45;
+}
+.ranking-methodology strong {
+  color: #b7cbd7;
+  font: 9px Consolas, monospace;
+  letter-spacing: .5px;
+  text-transform: uppercase;
+}
+
+@media (max-width: 800px) {
+  .performance-grouping { flex-wrap: wrap; }
+}

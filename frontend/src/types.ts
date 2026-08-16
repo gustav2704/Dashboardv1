@@ -86,8 +86,9 @@ export type BacktestSummary = {
 }
 export type Strategy = {
   id: number; identity_strategy_id: number; symbol: string; asset_key: string; sqx_name: string; mql5_name: string; display_name: string; display_name_source: string | null; account_login: string; timeframe: string | null;
+  timeframe_source: 'terminal_profile' | 'sqx' | 'missing';
   lineage_accounts: { current: string[]; predecessor: string[] };
-  origin: string; last_observed_at?: string; note: string; note_updated_at: string | null; selection: boolean; favorite: boolean; no_mm_accepted: boolean; no_mm_accepted_at: string | null;
+  origin: string; last_observed_at?: string; note: string; note_updated_at: string | null; selection: boolean; strategy_status: '' | 'live' | 'monitor' | 'candidate_live'; no_mm_accepted: boolean; no_mm_accepted_at: string | null;
   state: string; link_state: 'linked' | 'candidate' | 'sqx_catalog' | 'sqx_only' | 'mt5_only' | 'catalog_only';
   deployment_state: 'attached_active' | 'attached_inactive' | 'observed' | null;
   activity_state: 'with_recent_trades' | 'without_recent_trades' | 'undetermined' | 'not_deployed';
@@ -154,6 +155,7 @@ export type Dashboard = {
   generated_at: string; window: string;
   monthly_net_profit_months: Array<{ key: string; label: string }>;
   totals: { strategies: number; active: number; net_profit: number; floating_profit: number; trades: number; red: number };
+  timeframe_coverage: { terminal_profile: number; sqx: number; missing: number };
   integration: { linked: number; candidate: number; sqx_catalog: number; sqx_only: number; mt5_only: number; catalog_only: number };
   terminals: Terminal[]; strategies: Strategy[];
   inventory_summary: InventorySummary[];

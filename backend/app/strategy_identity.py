@@ -12,6 +12,10 @@ from .mapping import normalize, symbol_family, version_signature
 
 ACTIVE_RUN_STATES = {"queued", "preflight", "running"}
 OPEN_BATCH_STATES = {"resolving", "waiting_terminal", "queued", "running", "paused"}
+# A paused batch has no active tester process. Its queued items can safely be
+# reassigned during an identity merge, allowing later resume without keeping a
+# stale SQX-only row as the strategy owner.
+MERGE_BLOCKING_BATCH_STATES = OPEN_BATCH_STATES - {"paused"}
 
 
 def origin_with(origin: str, *sources: str) -> str:
@@ -620,9 +624,9 @@ def _merge_impact(
             FROM backtest_batches b
             JOIN backtest_batch_items i ON i.batch_id=b.id
             WHERE i.strategy_id IN ({placeholders})
-              AND i.status IN ({','.join('?' for _ in OPEN_BATCH_STATES)})
-              AND b.status IN ({','.join('?' for _ in OPEN_BATCH_STATES)})""",
-        (*requested, *sorted(OPEN_BATCH_STATES), *sorted(OPEN_BATCH_STATES)),
+              AND i.status IN ({','.join('?' for _ in MERGE_BLOCKING_BATCH_STATES)})
+              AND b.status IN ({','.join('?' for _ in MERGE_BLOCKING_BATCH_STATES)})""",
+        (*requested, *sorted(MERGE_BLOCKING_BATCH_STATES), *sorted(MERGE_BLOCKING_BATCH_STATES)),
     ).fetchone()[0]
     if active_runs or open_batches:
         raise ValueError("Cannot merge while a related backtest or batch is active")
@@ -660,7 +664,8 @@ def _merge_impact(
 
 
 def _move_mappings(
-    conn: Any, canonical_id: int, duplicate_ids: Iterable[int]
+    conn: Any, canonical_id: int, duplicate_ids: Iterable[int],
+    demote_to_historical: bool = False,
 ) -> None:
     for duplicate_id in duplicate_ids:
         for row in conn.execute(
@@ -683,7 +688,12 @@ def _move_mappings(
                     row["symbol"],
                     row["magic"],
                     row["comment_pattern"],
-                    row["role"] if "role" in row.keys() else "live",
+                    # A cross-account merge represents a migration of the
+                    # source account.  Its observations must never remain a
+                    # live deployment of the canonical account; that makes
+                    # the dashboard silently filter its trades out.
+                    "historical" if demote_to_historical
+                    else row["role"] if "role" in row.keys() else "live",
                     row["confidence"],
                     row["confirmed"],
                     row["created_at"],
@@ -957,7 +967,12 @@ def merge_strategies(
                     (canonical_id, retained_link["id"]),
                 )
 
-        _move_mappings(conn, canonical_id, duplicate_ids)
+        _move_mappings(
+            conn,
+            canonical_id,
+            duplicate_ids,
+            demote_to_historical=allow_cross_account,
+        )
         conn.execute(
             f"""UPDATE baseline_snapshots SET strategy_id=?
                 WHERE strategy_id IN ({','.join('?' for _ in duplicate_ids)})""",
@@ -979,6 +994,14 @@ def merge_strategies(
         _move_aliases(conn, canonical_id, duplicate_ids)
         _move_lineages(conn, canonical_id, duplicate_ids)
         _move_alerts(conn, canonical_id, duplicate_ids)
+        # A canonical MT5 deployment may already inherit its identity from an
+        # SQX-only row being merged. Repoint every dependent strategy before
+        # deleting that row so the self-referential foreign key remains valid.
+        conn.execute(
+            f"""UPDATE strategies SET identity_strategy_id=?
+                WHERE identity_strategy_id IN ({','.join('?' for _ in duplicate_ids)})""",
+            (canonical_id, *duplicate_ids),
+        )
         conn.execute(
             f"""UPDATE backtest_batches SET current_strategy_id=?
                 WHERE current_strategy_id IN ({','.join('?' for _ in duplicate_ids)})""",

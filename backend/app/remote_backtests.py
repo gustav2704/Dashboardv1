@@ -101,6 +101,11 @@ def _chart_timeframe(values: dict[str, str]) -> str:
     unit = CHART_PERIOD_UNITS.get(period_type)
     if unit and period_size.isdigit() and int(period_size) > 0:
         size = str(int(period_size))
+        # MT5 profiles sometimes persist a daily chart as the equivalent
+        # 24-hour chart (period_type=H, period_size=24).  The tester accepts
+        # D1, whereas H24 is not a valid tester timeframe token.
+        if unit == "H" and size == "24":
+            return "D1"
         return f"{unit}{size}"
     return PERIOD_CODES.get(period_type, "") or PERIOD_CODES.get(period_size, "")
 
@@ -132,7 +137,13 @@ def _profile(payload: bytes) -> dict[str, Any]:
     if not expert_values:
         expert_values = values
     expert_path = expert_values.get("path", "").replace("/", "\\")
-    magic = expert_values.get("MagicNumber") or expert_values.get("MyNumber") or ""
+    magic = (
+        expert_values.get("MagicNumber")
+        or expert_values.get("MyNumber")
+        or expert_values.get("InpMagicNumber")
+        or expert_values.get("InpMagic")
+        or ""
+    )
     comment = expert_values.get("CustomComment") or expert_values.get("OrderComment") or ""
     inputs = {
         key: value for key, value in expert_values.items()
@@ -158,16 +169,26 @@ def _terminal_sources() -> dict[str, list[dict[str, Any]]]:
             SOURCE_ACCOUNTS,
         ))
         log_sources = rows(conn.execute(
-            """SELECT terminal_id,data_dir FROM terminal_log_sources
-               WHERE enabled=1 ORDER BY id"""
+            """SELECT terminal_id,data_dir,enabled FROM terminal_log_sources
+               ORDER BY id"""
         ))
     paths_by_terminal: dict[int, list[str]] = {}
+    terminals_with_configured_sources: set[int] = set()
     for source in log_sources:
-        paths_by_terminal.setdefault(int(source["terminal_id"]), []).append(str(source["data_dir"]))
+        terminal_id = int(source["terminal_id"])
+        terminals_with_configured_sources.add(terminal_id)
+        if source["enabled"]:
+            paths_by_terminal.setdefault(terminal_id, []).append(str(source["data_dir"]))
     result: dict[str, list[dict[str, Any]]] = {}
     seen: set[tuple[str, str]] = set()
     for terminal in found:
-        paths = paths_by_terminal.get(int(terminal["id"])) or [str(terminal["remote_data_dir"])]
+        terminal_id = int(terminal["id"])
+        # A configured-but-disabled source is intentionally unavailable.  Do
+        # not fall back to its terminal root: unreachable archived/Tailscale
+        # endpoints would otherwise hold up every remote batch audit.
+        if terminal_id in terminals_with_configured_sources and terminal_id not in paths_by_terminal:
+            continue
+        paths = paths_by_terminal.get(terminal_id) or [str(terminal["remote_data_dir"])]
         for data_dir in paths:
             identity = (str(terminal["ssh_host"]), data_dir.casefold())
             if identity in seen:
@@ -242,7 +263,10 @@ $ErrorActionPreference='Stop'
 $root={_ps_literal(root)}
 $drive=Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
 $running=@(Get-CimInstance Win32_Process -Filter "Name='terminal64.exe'" | Where-Object {{$_.ExecutablePath -eq (Join-Path $root 'terminal64.exe')}}).Count
-[pscustomobject]@{{runner_exists=(Test-Path -LiteralPath (Join-Path $root 'terminal64.exe') -PathType Leaf);free_bytes=[int64]$drive.FreeSpace;runner_processes=$running}} | ConvertTo-Json -Compress
+$latestLog=Get-ChildItem -LiteralPath (Join-Path $root 'Tester\\logs') -File -Filter '*.log' -ErrorAction SilentlyContinue |
+  Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+$logTail=if($latestLog){{(Get-Content -LiteralPath $latestLog.FullName -Tail 100 -ErrorAction SilentlyContinue) -join "`n"}}else{{''}}
+[pscustomobject]@{{runner_exists=(Test-Path -LiteralPath (Join-Path $root 'terminal64.exe') -PathType Leaf);free_bytes=[int64]$drive.FreeSpace;runner_processes=$running;tester_log_path=if($latestLog){{$latestLog.FullName}}else{{''}};tester_log_tail=$logTail}} | ConvertTo-Json -Compress
 """
     result = bridge.execute(_ps(script), timeout=30)
     if result["status"] != 0:

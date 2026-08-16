@@ -16,6 +16,8 @@ import {
   YAxis,
 } from "recharts";
 import type { JournalAnalysisData, JournalTrade } from "./journalTypes";
+import { PositiveStrategyStatusIcon, strategyStatusLabels } from "./StrategyStatusIcon";
+import type { StrategyStatus } from "./strategyStatusFilter";
 import {
   buildAccountAnalytics,
   temporalValue,
@@ -54,6 +56,8 @@ const MONTHS = [
   "Dec",
 ];
 
+export type PerformanceGrouping = "bot" | "mn";
+
 function dayKey(ms: number) {
   const date = new Date(ms);
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
@@ -83,9 +87,14 @@ function scoreColor(score: number) {
 }
 
 export type BotRanking = {
+  key: string;
   id: number;
   name: string;
+  strategyName: string;
+  strategyStatus: StrategyStatus;
   symbol: string;
+  account: string;
+  magicNumber: number | null;
   primaryMagicNumber: number | null;
   magicNumbers: number[];
   historicalMagicNumbers: number[];
@@ -101,32 +110,50 @@ export type BotRanking = {
   score: number;
   efficiencyScore: number;
 };
-export function buildBotRankings(trades: JournalTrade[]): BotRanking[] {
-  const grouped = new Map<number, JournalTrade[]>();
+export function buildBotRankings(
+  trades: JournalTrade[],
+  grouping: PerformanceGrouping = "bot",
+  strategyStatuses: Record<number, StrategyStatus> = {},
+): BotRanking[] {
+  const grouped = new Map<string, JournalTrade[]>();
   for (const trade of trades)
     if (trade.strategy_id > 0 && !trade.is_stopped)
-      grouped.set(trade.strategy_id, [
-        ...(grouped.get(trade.strategy_id) || []),
+      {
+        const key = grouping === "mn"
+          ? `${trade.strategy_id}:${trade.magic_number}`
+          : String(trade.strategy_id);
+        grouped.set(key, [
+        ...(grouped.get(key) || []),
         trade,
       ]);
-  const rows = [...grouped.entries()].map(([id, items]) => {
+      }
+  const rows = [...grouped.entries()].map(([key, items]) => {
+    const first = items[0];
+    const id = first.strategy_id;
     const net = items.reduce((sum, trade) => sum + trade.net_profit, 0);
+    // All ranking metrics use realised net P/L.  Using `profit` here would
+    // make PF disagree with win rate and net P/L whenever costs are present.
     const grossProfit = items
-      .filter((trade) => trade.profit > 0)
-      .reduce((sum, trade) => sum + trade.profit, 0);
+      .filter((trade) => trade.net_profit > 0)
+      .reduce((sum, trade) => sum + trade.net_profit, 0);
     const grossLoss = Math.abs(
       items
-        .filter((trade) => trade.profit <= 0)
-        .reduce((sum, trade) => sum + trade.profit, 0),
+        .filter((trade) => trade.net_profit < 0)
+        .reduce((sum, trade) => sum + trade.net_profit, 0),
     );
     const volume = items.reduce((sum, trade) => sum + trade.volume, 0);
     const drawdown = maxDrawdown(items);
     const magicNumbers = [...new Set(items.flatMap((trade) => trade.magic_numbers || []))].sort((left, right) => left - right);
     const historicalMagicNumbers = [...new Set(items.flatMap((trade) => trade.historical_magic_numbers || []))].sort((left, right) => left - right);
     return {
+      key: `${grouping}:${key}`,
       id,
-      name: items[0].strategy_name,
-      symbol: items[0].symbol,
+      name: grouping === "mn" ? `MN ${first.magic_number}` : first.strategy_name,
+      strategyName: first.strategy_name,
+      strategyStatus: strategyStatuses[id] ?? "",
+      symbol: first.symbol,
+      account: first.account,
+      magicNumber: grouping === "mn" ? first.magic_number : null,
       primaryMagicNumber: items.find((trade) => trade.primary_magic_number != null)?.primary_magic_number ?? null,
       magicNumbers,
       historicalMagicNumbers,
@@ -145,18 +172,24 @@ export function buildBotRankings(trades: JournalTrade[]): BotRanking[] {
       efficiencyScore: 0,
     };
   });
-  const maxNet = Math.max(0, ...rows.map((row) => Math.max(row.net, 0))),
-    maxDd = Math.max(0, ...rows.map((row) => row.dd)),
-    maxTrades = Math.max(0, ...rows.map((row) => row.count));
-  for (const row of rows)
+  // The displayed rankings only admit samples with at least 10 trades.  The
+  // score normalisation must use that same population; otherwise a short
+  // sample can alter the scores of rows that are actually shown.
+  const eligible = rows.filter((row) => row.count >= 10);
+  const maxNet = Math.max(0, ...eligible.map((row) => Math.max(row.net, 0))),
+    maxDd = Math.max(0, ...eligible.map((row) => row.dd)),
+    maxTrades = Math.max(0, ...eligible.map((row) => row.count));
+  for (const row of eligible)
     row.score =
       (maxNet ? (Math.max(row.net, 0) / maxNet) * 45 : 0) +
       (row.winRate / 100) * 25 +
       normalizePf(row.pf) * 15 +
       (maxTrades ? (row.count / maxTrades) * 10 : 0) -
       (maxDd ? (row.dd / maxDd) * 20 : 0);
-  const eligible = rows.filter(
-    (row) => row.count >= 10 && row.netPerLot != null,
+  const efficiencyEligible = eligible.filter((row) => row.netPerLot != null);
+  const maxEfficiencyTrades = Math.max(
+    0,
+    ...efficiencyEligible.map((row) => row.count),
   );
   const positive = (values: Array<number | null>, value: number | null) =>
     value === Infinity
@@ -171,28 +204,54 @@ export function buildBotRankings(trades: JournalTrade[]): BotRanking[] {
                 item != null && Number.isFinite(item) && item > 0,
             ),
           );
-  for (const row of eligible)
+  for (const row of efficiencyEligible)
     row.efficiencyScore =
       positive(
-        eligible.map((item) => item.netPerLot),
+        efficiencyEligible.map((item) => item.netPerLot),
         row.netPerLot,
       ) *
         35 +
       positive(
-        eligible.map((item) => item.returnToDd),
+        efficiencyEligible.map((item) => item.returnToDd),
         row.returnToDd,
       ) *
         30 +
       (row.winRate / 100) * 15 +
       normalizePf(row.pf) * 15 +
-      (maxTrades ? (row.count / maxTrades) * 5 : 0);
+      (maxEfficiencyTrades ? (row.count / maxEfficiencyTrades) * 5 : 0);
   return rows;
 }
 
-export function buildRemovalCandidates(trades: JournalTrade[]): BotRanking[] {
-  return buildBotRankings(trades)
+export function buildRemovalCandidates(
+  trades: JournalTrade[],
+  grouping: PerformanceGrouping = "bot",
+  strategyStatuses: Record<number, StrategyStatus> = {},
+): BotRanking[] {
+  return buildBotRankings(trades, grouping, strategyStatuses)
     .filter((row) => row.count >= 10 && row.net < 0)
     .sort((left, right) => left.net - right.net);
+}
+
+export function buildTopTenRankingRows(
+  trades: JournalTrade[],
+  grouping: PerformanceGrouping = "bot",
+  strategyStatuses: Record<number, StrategyStatus> = {},
+) {
+  const rankings = buildBotRankings(trades, grouping, strategyStatuses);
+  const eligible = rankings.filter((row) => row.count >= 10);
+  return {
+    efficiency: eligible
+      .filter((row) => row.netPerLot != null)
+      .sort((left, right) => right.efficiencyScore - left.efficiencyScore)
+      .slice(0, 10),
+    composite: [...eligible]
+      .sort((left, right) => right.score - left.score)
+      .slice(0, 10),
+    winRate: [...eligible]
+      .sort((left, right) => right.winRate - left.winRate || right.net - left.net)
+      .slice(0, 10),
+    removal: buildRemovalCandidates(trades, grouping, strategyStatuses),
+  };
 }
 
 export type BotEquitySeries = {
@@ -284,14 +343,20 @@ function ChartTip({
   );
 }
 function strategyIdentifier(row: BotRanking) {
+  const category = row.strategyStatus ? `Categoría: ${strategyStatusLabels[row.strategyStatus]}\n` : "";
+  if (row.magicNumber != null) {
+    return `Bot: ${row.strategyName}\n${category}Cuenta: ${row.account || "No disponible"}\nSímbolo: ${row.symbol || "No disponible"}\nID interno: ${row.id}\nMN: ${row.magicNumber}`;
+  }
   const active = row.magicNumbers.length ? row.magicNumbers.join(", ") : "No disponible";
   const historical = row.historicalMagicNumbers.length ? row.historicalMagicNumbers.join(", ") : "No disponible";
-  return `ID interno: ${row.id}\nMN principal: ${row.primaryMagicNumber ?? "No disponible"}\nMN activos: ${active}\nMN históricos: ${historical}`;
+  return `${category}Cuenta: ${row.account || "No disponible"}\nSímbolo: ${row.symbol || "No disponible"}\nID interno: ${row.id}\nMN principal: ${row.primaryMagicNumber ?? "No disponible"}\nMN activos: ${active}\nMN históricos: ${historical}`;
 }
 
 function StrategyNameTick({ x = 0, y = 0, payload, rows }: { x?: number; y?: number; payload?: { value?: string; index?: number }; rows: BotRanking[] }) {
   const row = payload?.index == null ? null : rows[payload.index];
-  return <g transform={`translate(${x},${y})`}><title>{row ? strategyIdentifier(row) : payload?.value}</title><text dy={4} textAnchor="end" fill="#a8bdca" fontSize={9}>{payload?.value}</text></g>;
+  const label = String(payload?.value || "");
+  const iconOffset = Math.min(158, label.length * 5) + 16;
+  return <g transform={`translate(${x},${y})`}><title>{row ? strategyIdentifier(row) : payload?.value}</title>{row && <g transform={`translate(${-iconOffset},-7)`}><PositiveStrategyStatusIcon status={row.strategyStatus} size={12}/></g>}<text dy={4} textAnchor="end" fill="#a8bdca" fontSize={9}>{label}</text></g>;
 }
 
 function RankingTooltip({ active, payload, suffix = "" }: { active?: boolean; payload?: Array<{ name?: string; value?: number; payload?: BotRanking }>; suffix?: string }) {
@@ -306,15 +371,18 @@ function JournalChart({
   children,
   wide = false,
   bodyHeight,
+  methodology,
 }: {
   title: string;
   children: ReactNode;
   wide?: boolean;
   bodyHeight?: number;
+  methodology?: string;
 }) {
   return (
     <section className={`panel journal-chart${wide ? " wide" : ""}`}>
       <div className="journal-chart-title">{title}</div>
+      {methodology && <div className="ranking-methodology"><strong>Cómo se calcula</strong><span>{methodology}</span></div>}
       <div
         className="journal-chart-body"
         style={bodyHeight ? { height: bodyHeight } : undefined}
@@ -502,52 +570,49 @@ function Calendar({ data }: { data: JournalAnalysisData }) {
 export function TopTenCharts({
   data,
   accountLabel,
+  grouping,
+  strategyStatuses,
 }: {
   data: JournalAnalysisData | null;
   accountLabel: string;
+  grouping: PerformanceGrouping;
+  strategyStatuses: Record<number, StrategyStatus>;
 }) {
-  const rankings = useMemo(() => buildBotRankings(data?.trades || []), [data]);
-  const removalCandidates = useMemo(
-    () => buildRemovalCandidates(data?.trades || []),
-    [data],
+  const entityLabel = grouping === "mn" ? "MN" : "bots";
+  const rankingRows = useMemo(
+    () => buildTopTenRankingRows(data?.trades || [], grouping, strategyStatuses),
+    [data, grouping, strategyStatuses],
   );
-  const eligible = rankings.filter((row) => row.count >= 10);
   const charts = [
     {
-      title: `Top 10 mejores bots por eficiencia — ${accountLabel} — orientativo`,
+      title: `Top 10 ${entityLabel} por eficiencia — ${accountLabel} — orientativo`,
       key: "efficiencyScore" as const,
-      rows: eligible
-        .filter((row) => row.netPerLot != null)
-        .sort((left, right) => right.efficiencyScore - left.efficiencyScore)
-        .slice(0, 10),
+      methodology: "Mín. 10 trades. 35% P/L por lote + 30% retorno/DD + 15% win rate + 15% PF (tope 3) + 5% tamaño de muestra.",
+      rows: rankingRows.efficiency,
     },
     {
-      title: `Ranking compuesto de bots — ${accountLabel} — orientativo`,
+      title: `Ranking compuesto de ${entityLabel} — ${accountLabel} — orientativo`,
       key: "score" as const,
-      rows: [...eligible]
-        .sort((left, right) => right.score - left.score)
-        .slice(0, 10),
+      methodology: "Mín. 10 trades. 45% P/L neto + 25% win rate + 15% PF (tope 3) + 10% trades − hasta 20% por drawdown; los valores se normalizan frente al conjunto filtrado.",
+      rows: rankingRows.composite,
     },
     {
-      title: `Top 10 porcentaje ganador por bot — ${accountLabel} — mín. 10 trades`,
+      title: `Top 10 porcentaje ganador por ${entityLabel} — ${accountLabel} — mín. 10 trades`,
       key: "winRate" as const,
-      rows: [...eligible]
-        .sort(
-          (left, right) => left.winRate - right.winRate || right.net - left.net,
-        )
-        .slice(0, 10),
+      methodology: "Mín. 10 trades. Se ordena por porcentaje de trades con P/L neto positivo; en empate, por P/L neto.",
+      rows: rankingRows.winRate,
     },
   ];
-  const removalHeight = Math.max(240, removalCandidates.length * 42 + 54);
+  const removalHeight = Math.max(240, rankingRows.removal.length * 42 + 54);
   return (
     <section className="top-ten-section">
       <div className="top-ten-heading">
         <span className="eyebrow">JOURNAL RANKINGS</span>
-        <h2>Todos los Top 10</h2>
+        <h2>Todos los Top 10 · {grouping === "mn" ? "por MN" : "por bot"}</h2>
       </div>
       <div className="top-ten-grid">
         {charts.map((chart) => (
-          <JournalChart title={chart.title} key={chart.key}>
+          <JournalChart title={chart.title} key={chart.key} methodology={chart.methodology}>
             <ResponsiveContainer>
               <BarChart
                 data={chart.rows}
@@ -570,7 +635,7 @@ export function TopTenCharts({
                 <Bar dataKey={chart.key} radius={[0, 3, 3, 0]}>
                   {chart.rows.map((row) => (
                     <Cell
-                      key={row.id}
+                      key={row.key}
                       fill={
                         chart.key === "winRate"
                           ? GREEN
@@ -587,17 +652,18 @@ export function TopTenCharts({
       <JournalChart
         wide
         title={`Candidatos a retirar — ${accountLabel} — mín. 10 trades y P/L neto negativo`}
+        methodology="Mín. 10 trades y P/L neto negativo; se ordena del resultado neto más bajo al más alto."
         bodyHeight={removalHeight}
       >
-        {removalCandidates.length ? (
+        {rankingRows.removal.length ? (
           <ResponsiveContainer>
-            <BarChart data={removalCandidates} layout="vertical" margin={{ left: 25, right: 22 }}>
+            <BarChart data={rankingRows.removal} layout="vertical" margin={{ left: 25, right: 22 }}>
               <CartesianGrid stroke={GRID} horizontal={false} />
               <XAxis type="number" tick={{ fill: "#74899a", fontSize: 9 }} />
-              <YAxis type="category" dataKey="name" width={170} tick={<StrategyNameTick rows={removalCandidates} />} />
+              <YAxis type="category" dataKey="name" width={170} tick={<StrategyNameTick rows={rankingRows.removal} />} />
               <Tooltip content={<RankingTooltip />} />
               <Bar dataKey="net" name="P/L neto" radius={[0, 3, 3, 0]}>
-                {removalCandidates.map((row) => <Cell key={row.id} fill={RED} />)}
+                {rankingRows.removal.map((row) => <Cell key={row.key} fill={RED} />)}
               </Bar>
             </BarChart>
           </ResponsiveContainer>

@@ -102,6 +102,37 @@ def test_known_magic_creates_scoped_mapping_and_reports_no_recent_trades(tmp_pat
     assert row["activity_state"] == "without_recent_trades"
 
 
+def test_confirmed_operational_mapping_owns_inventory_deployment(tmp_path, monkeypatch):
+    root, selected_id = _setup(tmp_path, monkeypatch)
+    now = db.utcnow()
+    with db.session() as conn:
+        terminal_id = conn.execute(
+            """INSERT INTO terminals(name,data_dir,account_login,server,status,created_at)
+               VALUES('Live','live://100121894','100121894','InfinoxLimited-MT5Demo','connected',?)""",
+            (now,),
+        ).lastrowid
+        owner_id = conn.execute(
+            """INSERT INTO strategies(symbol,sqx_name,mql5_name,account_login,origin,created_at)
+               VALUES('NAS100','Observed deployment','NN_15_991531386_L_Ke_CF_SQX','100121894','mt5',?)""",
+            (now,),
+        ).lastrowid
+        conn.execute("UPDATE strategies SET identity_strategy_id=? WHERE id=?", (owner_id, owner_id))
+        conn.execute(
+            """INSERT INTO mappings(strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,role,confirmed,created_at)
+               VALUES(?,?, '100121894','NAS100',991531386,'known','live',1,?)""",
+            (owner_id, terminal_id, now),
+        )
+    _write_inventory(root, magic="991531386")
+    bot_inventory.scan()
+
+    result = bot_inventory.confirm(bot_inventory.candidates()[0]["id"], selected_id)
+
+    assert result["strategy_id"] == owner_id
+    with db.session() as conn:
+        deployment = conn.execute("SELECT strategy_id FROM bot_deployments").fetchone()
+        assert deployment["strategy_id"] == owner_id
+
+
 def test_same_ex5_account_server_and_asset_reuses_id_across_magic_numbers(tmp_path, monkeypatch):
     root, strategy_id = _setup(tmp_path, monkeypatch)
     _write_inventory(root, magic="11", chart_id="42")

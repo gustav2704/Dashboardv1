@@ -36,6 +36,15 @@ CREATE TABLE IF NOT EXISTS terminals (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS account_ingestion_sources (
+  account_login TEXT NOT NULL,
+  server TEXT NOT NULL,
+  terminal_id INTEGER NOT NULL REFERENCES terminals(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(account_login, server)
+);
+
 CREATE TABLE IF NOT EXISTS terminal_log_sources (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   terminal_id INTEGER NOT NULL REFERENCES terminals(id) ON DELETE CASCADE,
@@ -101,6 +110,7 @@ CREATE TABLE IF NOT EXISTS strategies (
   note_updated_at TEXT,
   monitoring_selected INTEGER NOT NULL DEFAULT 0,
   favorite INTEGER NOT NULL DEFAULT 0,
+  strategy_status TEXT NOT NULL DEFAULT '' CHECK(strategy_status IN ('', 'live', 'monitor', 'candidate_live')),
   no_mm_accepted INTEGER NOT NULL DEFAULT 0,
   no_mm_accepted_at TEXT,
   backtest_risk_accepted_run_id INTEGER,
@@ -622,6 +632,14 @@ def init_db(path: Path | None = None) -> None:
         if "favorite" not in strategy_columns:
             conn.execute(
                 "ALTER TABLE strategies ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0"
+            )
+        if "strategy_status" not in strategy_columns:
+            conn.execute(
+                "ALTER TABLE strategies ADD COLUMN strategy_status TEXT NOT NULL DEFAULT ''"
+            )
+            # The former favorite flag meant the strategy was already live.
+            conn.execute(
+                "UPDATE strategies SET strategy_status='live' WHERE favorite=1"
             )
         if "no_mm_accepted" not in strategy_columns:
             conn.execute(

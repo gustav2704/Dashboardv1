@@ -23,6 +23,40 @@ def _identity(account: Any, server: Any) -> tuple[str, str]:
     return str(account or "").strip(), str(server or "").strip()
 
 
+def canonical_ingestion_source(conn: Any, account: str, server: str) -> int | None:
+    row = conn.execute(
+        """SELECT terminal_id FROM account_ingestion_sources
+           WHERE account_login=? AND server=?""",
+        (account, server),
+    ).fetchone()
+    return int(row["terminal_id"]) if row else None
+
+
+def set_canonical_ingestion_source(terminal_id: int) -> dict[str, Any]:
+    """Make one verified terminal the only ledger feed for its MT5 identity."""
+    with session() as conn:
+        terminal = conn.execute("SELECT * FROM terminals WHERE id=?", (terminal_id,)).fetchone()
+        if not terminal:
+            raise KeyError("Terminal not found")
+        account, server = _identity(terminal["account_login"], terminal["server"])
+        if not account or not server:
+            raise ValueError("Sync the terminal once before making it canonical")
+        now = utcnow()
+        conn.execute(
+            """INSERT INTO account_ingestion_sources(account_login,server,terminal_id,created_at,updated_at)
+               VALUES(?,?,?,?,?)
+               ON CONFLICT(account_login,server) DO UPDATE SET
+                 terminal_id=excluded.terminal_id,updated_at=excluded.updated_at""",
+            (account, server, terminal_id, now, now),
+        )
+        mirrors = conn.execute(
+            "SELECT id FROM terminals WHERE id<>? AND account_login=? AND server=?",
+            (terminal_id, account, server),
+        ).fetchall()
+    return {"terminal_id": terminal_id, "account_login": account, "server": server,
+            "mirror_terminal_ids": [int(row["id"]) for row in mirrors]}
+
+
 def _archive_data_dir(terminal_id: int, account: str, server: str) -> str:
     return f"archive://terminal/{terminal_id}/{quote(server, safe='')}/{quote(account, safe='')}"
 
@@ -182,6 +216,12 @@ def request_sync(terminal_id: int) -> dict[str, Any]:
         terminal = conn.execute("SELECT * FROM terminals WHERE id=?", (terminal_id,)).fetchone()
         if not terminal:
             raise KeyError("Terminal not found")
+        account, server = _identity(terminal["account_login"], terminal["server"])
+        canonical_id = canonical_ingestion_source(conn, account, server) if account and server else None
+        if canonical_id is not None and canonical_id != terminal_id:
+            message = f"Mirror disabled; canonical ledger source is terminal {canonical_id}"
+            conn.execute("UPDATE terminals SET last_error=? WHERE id=?", (message, terminal_id))
+            return {"skipped": True, "terminal_id": terminal_id, "canonical_terminal_id": canonical_id}
         payload = {
             "schema_version": 1,
             "request_id": f"sync-{terminal_id}-{int(time.time())}",
@@ -260,6 +300,15 @@ def _upsert_sync_response(conn: Any, terminal: Any, payload: dict[str, Any]) -> 
         )
         terminal = conn.execute("SELECT * FROM terminals WHERE id=?", (terminal["id"],)).fetchone()
     terminal_id = terminal["id"]
+    canonical_id = canonical_ingestion_source(conn, account, server)
+    if canonical_id is not None and canonical_id != terminal_id:
+        conn.execute(
+            """UPDATE terminals SET account_login=?,server=?,status='connected',last_seen=?,last_sync=?,
+               last_error=? WHERE id=?""",
+            (account, server, generated_at, utcnow(),
+             f"Mirror ignored; canonical ledger source is terminal {canonical_id}", terminal_id),
+        )
+        return
     max_cursor = int(terminal["cursor_msc"] or 0)
     for deal in payload.get("deals", []):
         deal["terminal_id"] = terminal_id
@@ -586,7 +635,11 @@ def ingest_responses(*, terminal_ids: set[int] | None = None) -> dict[str, int]:
                         "UPDATE terminals SET last_error=? WHERE id=?", (str(exc)[:500], terminal["id"])
                     )
         now = datetime.now(timezone.utc).timestamp()
-        refreshed_terminals = terminals
+        # `terminals` was read before processing the response files.  Do not
+        # use those stale row objects here: a successful sync may just have
+        # updated last_seen, and marking that same terminal disconnected would
+        # overwrite the connected status we have just established.
+        refreshed_terminals = conn.execute("SELECT id,last_seen FROM terminals").fetchall()
         for terminal in refreshed_terminals:
             last_seen = terminal["last_seen"]
             stale = True
@@ -622,8 +675,8 @@ def sync_all() -> dict[str, Any]:
         terminal_ids = [row["id"] for row in conn.execute("SELECT id FROM terminals")]
     for terminal_id in terminal_ids:
         try:
-            request_sync(terminal_id)
-            requested += 1
+            request = request_sync(terminal_id)
+            requested += int(not request.get("skipped", False))
         except Exception:
             pass
     return {"ingested": ingested, "requested": requested}

@@ -25,7 +25,7 @@ def normalize(value: str) -> str:
 def symbol_family(value: str) -> str:
     symbol = normalize(value)
     families = {
-        "dax": ("ger40", "de40", "dax", "deuidx"),
+        "dax": ("ger40", "de40", "dax", "gdaxi", "deuidx"),
         "naq": ("us100", "nas100", "naq", "ndx", "usatech"),
         "xau": ("xau", "gold"),
         "us30": ("us30", "ws30", "usa30", "dj30", "dow"),
@@ -52,7 +52,7 @@ def asset_key(value: str) -> str:
     if not symbol:
         return "unknown"
     families = {
-        "dax": ("ger40", "de40", "dax", "deuidx"),
+        "dax": ("ger40", "de40", "dax", "gdaxi", "deuidx"),
         "naq": ("us100", "nas100", "naq", "ndx", "usatech"),
         "xauusd": ("xau", "gold"),
         "xagusd": ("xag", "silver"),
@@ -255,21 +255,40 @@ def _observed(conn: Any) -> list[Any]:
     return list(grouped.values())
 
 
-def _is_mapped(item: Any, mappings: list[Any]) -> bool:
-    return bool(_mapped_strategy_ids(item, mappings))
+def _is_mapped(
+    item: Any,
+    mappings: list[Any],
+    mappings_by_scope: dict[tuple[str, str, str, int], list[Any]] | None = None,
+) -> bool:
+    return bool(_mapped_strategy_ids(item, mappings, mappings_by_scope))
+
+
+def _magic_scope_key(item: Any) -> tuple[str, str, str, int]:
+    """Return the operational identity shared by observations and mappings."""
+    return (
+        server_key(item),
+        str(item.get("account_login") or "").strip(),
+        asset_key(str(item.get("symbol") or "")),
+        int(item.get("magic") or 0),
+    )
+
+
+def _mappings_by_magic_scope(
+    mappings: list[Any],
+) -> dict[tuple[str, str, str, int], list[Any]]:
+    """Index mappings once instead of scanning all of them per observation."""
+    result: dict[tuple[str, str, str, int], list[Any]] = {}
+    for mapping in mappings:
+        key = _magic_scope_key(mapping)
+        if key[3]:
+            result.setdefault(key, []).append(mapping)
+    return result
 
 
 def _same_magic_scope(left: Any, right: Any) -> bool:
     """Whether two observations belong to the same account/asset/Magic scope."""
-    return bool(
-        int(left.get("magic") or 0)
-        and str(left.get("account_login") or "").strip()
-        == str(right.get("account_login") or "").strip()
-        and server_key(left) == server_key(right)
-        and asset_key(str(left.get("symbol") or ""))
-        == asset_key(str(right.get("symbol") or ""))
-        and int(left.get("magic") or 0) == int(right.get("magic") or 0)
-    )
+    left_key = _magic_scope_key(left)
+    return bool(left_key[3] and left_key == _magic_scope_key(right))
 
 
 def _identity_comment(value: str, magic: int) -> str:
@@ -287,24 +306,20 @@ def annotate_magic_scope_counts(mappings: list[dict[str, Any]]) -> list[dict[str
     """
     grouped: dict[tuple[str, str, str, int], set[int]] = {}
     for mapping in mappings:
-        magic = int(mapping.get("magic") or 0)
-        key = (
-            server_key(mapping), str(mapping.get("account_login") or "").strip(),
-            asset_key(str(mapping.get("symbol") or "")), magic,
-        )
-        if magic:
+        key = _magic_scope_key(mapping)
+        if key[3]:
             grouped.setdefault(key, set()).add(int(mapping["strategy_id"]))
     for mapping in mappings:
-        magic = int(mapping.get("magic") or 0)
-        key = (
-            server_key(mapping), str(mapping.get("account_login") or "").strip(),
-            asset_key(str(mapping.get("symbol") or "")), magic,
-        )
-        mapping["magic_scope_strategy_count"] = len(grouped.get(key, set())) if magic else 0
+        key = _magic_scope_key(mapping)
+        mapping["magic_scope_strategy_count"] = len(grouped.get(key, set())) if key[3] else 0
     return mappings
 
 
-def _mapped_strategy_ids(item: Any, mappings: list[Any]) -> set[int]:
+def _mapped_strategy_ids(
+    item: Any,
+    mappings: list[Any],
+    mappings_by_scope: dict[tuple[str, str, str, int], list[Any]] | None = None,
+) -> set[int]:
     """Resolve an observation by account, asset and Magic.
 
     A comment is a label, not an identity requirement, unless distinct
@@ -316,8 +331,13 @@ def _mapped_strategy_ids(item: Any, mappings: list[Any]) -> set[int]:
         or not _identity_comment(str(item.get("comment") or ""), int(item.get("magic") or 0))
     ):
         return set()
-    annotate_magic_scope_counts(mappings)
-    scoped = [row for row in mappings if _same_magic_scope(row, item)]
+    if any("magic_scope_strategy_count" not in row for row in mappings):
+        annotate_magic_scope_counts(mappings)
+    scoped = (
+        mappings_by_scope.get(_magic_scope_key(item), [])
+        if mappings_by_scope is not None
+        else [row for row in mappings if _same_magic_scope(row, item)]
+    )
     strategy_ids = {int(row["strategy_id"]) for row in scoped}
     if len(strategy_ids) == 1:
         return strategy_ids
@@ -421,12 +441,13 @@ def suggestions() -> list[dict[str, Any]]:
         aliases = _aliases_by_strategy(conn)
         observed = _observed(conn)
         mapped = _live_mappings(conn)
+        mapped_by_scope = _mappings_by_magic_scope(mapped)
         terminal_experts = {
             row["id"]: _expert_names(row["data_dir"])
             for row in conn.execute("SELECT id,data_dir FROM terminals").fetchall()
         }
         for item in observed:
-            if _is_mapped(item, mapped):
+            if _is_mapped(item, mapped, mapped_by_scope):
                 continue
             if _suppressed_observation(conn, item):
                 continue
@@ -805,6 +826,33 @@ def _deployment_for_mapping(
     observed_name: str,
     now: str,
 ) -> tuple[int, int]:
+    terminal = conn.execute(
+        "SELECT server FROM terminals WHERE id=?", (terminal_id,)
+    ).fetchone()
+    operational_server = str(terminal["server"] or "").strip() if terminal else ""
+    # A confirmed live mapping is the authoritative owner of its operational
+    # identity. Identity/SQX grouping may relate strategies across accounts,
+    # but it must never move an observed deployment to a sibling with another
+    # account's history.
+    authoritative_ids = {
+        int(row["strategy_id"])
+        for row in conn.execute(
+            """SELECT DISTINCT m.strategy_id,m.symbol FROM mappings m
+                 JOIN terminals t ON t.id=m.terminal_id
+                WHERE m.confirmed=1 AND COALESCE(m.role,'live')='live'
+                  AND m.account_login=? AND m.magic=?
+                  AND LOWER(COALESCE(t.server,''))=LOWER(?)""",
+            (account_login, magic, operational_server),
+        )
+        if asset_key(str(row["symbol"] or "")) == asset_key(symbol)
+    }
+    if len(authoritative_ids) > 1:
+        raise ValueError(
+            "Ambiguous confirmed operational mapping for "
+            f"{operational_server} / {account_login} / {symbol} / MN {magic}"
+        )
+    if authoritative_ids:
+        strategy_id = next(iter(authoritative_ids))
     selected = conn.execute(
         "SELECT * FROM strategies WHERE id=? AND retired=0",
         (strategy_id,),
@@ -818,10 +866,6 @@ def _deployment_for_mapping(
     ).fetchone()
     if not canonical:
         raise KeyError(f"Canonical strategy {canonical_id} not found")
-    terminal = conn.execute(
-        "SELECT server FROM terminals WHERE id=?", (terminal_id,)
-    ).fetchone()
-    operational_server = str(terminal["server"] or "").strip() if terminal else ""
     operational_asset = asset_key(symbol or str(selected["symbol"] or canonical["symbol"] or ""))
     operational_expert = normalize_expert(
         selected["operational_expert_key"]

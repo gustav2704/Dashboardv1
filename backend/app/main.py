@@ -10,7 +10,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, RedirectResponse
@@ -27,7 +27,7 @@ from .expert_identity_migration import audit as expert_identity_audit
 from .mapping import annotate_magic_scope_counts, asset_key, asset_label, auto_confirm_suggestions, confirm_mapping, stable_comment, suggestions
 from .operational_identity import conflicts as identity_conflicts, expert_key, identity_dict, load_mappings, mappings_for_primary, normalize_expert, same_identity, terminal_session_id
 from .metrics import compute_metrics, health_status, pick_baseline, reconstruct_trades, risk_guard_status
-from .mt5_bridge import ingest_responses, latest_chart_response_id, register_terminal, request_chart, request_sync, run_remote_diagnostic, sync_all
+from .mt5_bridge import canonical_ingestion_source, ingest_responses, latest_chart_response_id, register_terminal, request_chart, request_sync, run_remote_diagnostic, set_canonical_ingestion_source, sync_all
 from .ssh_bridge import SSHBridgeError
 from . import backtest_batches
 from . import alert_engine
@@ -41,6 +41,7 @@ from . import bot_inventory
 from . import backtest_compare
 from . import migration_integrity
 from . import terminal_events
+from . import vps_mm
 
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,10 @@ class TerminalCreate(BaseModel):
 
 class RemoteDiagnostic(BaseModel):
     name: str = Field(pattern="^bridge_status$")
+
+
+class CanonicalTerminalSource(BaseModel):
+    terminal_id: int = Field(gt=0)
 
 
 class MappingConfirm(BaseModel):
@@ -157,8 +162,8 @@ class StrategySelectionUpdate(BaseModel):
     selection: bool
 
 
-class StrategyFavoriteUpdate(BaseModel):
-    favorite: bool
+class StrategyStatusUpdate(BaseModel):
+    status: Literal["", "live", "monitor", "candidate_live"]
 
 
 class StrategyNoMmAcceptanceUpdate(BaseModel):
@@ -358,6 +363,26 @@ def _operational_mappings(strategy: Any, mappings: list[Any]) -> list[Any]:
     return mappings_for_primary(strategy, mappings)
 
 
+def _chart_source_mapping(conn: Any, mappings: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Choose the canonical VPS bridge for a chart, never a local mirror first."""
+    if not mappings:
+        return None
+
+    def rank(mapping: dict[str, Any]) -> tuple[bool, bool, bool, bool, int]:
+        account = str(mapping.get("terminal_account_login") or mapping.get("account_login") or "").strip()
+        server = str(mapping.get("terminal_server") or "").strip()
+        canonical_id = canonical_ingestion_source(conn, account, server) if account and server else None
+        return (
+            canonical_id == int(mapping["terminal_id"]),
+            str(mapping.get("terminal_transport") or "local") == "ssh",
+            str(mapping.get("terminal_status") or "") == "connected",
+            not str(mapping.get("terminal_data_dir") or "").startswith("archive://"),
+            -int(mapping["id"]),
+        )
+
+    return max(mappings, key=rank)
+
+
 def _confirmed_mappings(conn: Any, strategy_id: int) -> list[dict[str, Any]]:
     """Load only mappings whose persisted account agrees with their terminal."""
     result = load_mappings(conn, strategy_id, confirmed_only=True)
@@ -413,10 +438,15 @@ def _historical_mappings_for_strategy(
     mappings: list[dict[str, Any]], live_mappings: list[dict[str, Any]],
     predecessor_accounts: set[str], operational_mappings: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Only include predecessor history when the operational identity is proven."""
+    """Return verified history without hiding stopped bots' prior accounts."""
     historical = [m for m in mappings if str(m["role"] or "live") == "historical"]
     if not live_mappings:
-        return [m for m in operational_mappings if str(m["role"] or "live") == "historical"]
+        # A stopped or removed EA has no current mapping to establish a single
+        # operational account.  Every confirmed historical mapping on that
+        # strategy is nevertheless evidence of its own history; restricting it
+        # to the stale operational identity silently drops trades from other
+        # verified predecessor accounts.
+        return historical
     result = []
     for item in historical:
         if str(item["account_login"] or "") not in predecessor_accounts:
@@ -614,6 +644,40 @@ def _timestamp_msc(value: str) -> int:
     return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp() * 1000)
 
 
+def _canonical_terminal_rows(terminals: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep one live source per broker account, preferring the VPS bridge.
+
+    A local MT5 installation can be logged into the same account as its VPS.
+    Those sessions publish the same deals, so presenting both as live sources is
+    misleading and risks double-counting downstream. SSH is the canonical
+    source when present; otherwise retain the most recently seen local source.
+    Rows without a complete MT5 identity remain visible because they cannot be
+    safely merged.
+    """
+    selected: dict[tuple[str, str] | tuple[str, int], dict[str, Any]] = {}
+    for terminal in terminals:
+        account = str(terminal.get("account_login") or "").strip()
+        server = str(terminal.get("server") or "").strip()
+        key: tuple[str, str] | tuple[str, int] = (account, server) if account and server else ("id", int(terminal["id"]))
+        current = selected.get(key)
+        if current is None:
+            selected[key] = terminal
+            continue
+        candidate_rank = (
+            str(terminal.get("transport") or "local") == "ssh",
+            str(terminal.get("last_seen") or ""),
+            int(terminal["id"]),
+        )
+        current_rank = (
+            str(current.get("transport") or "local") == "ssh",
+            str(current.get("last_seen") or ""),
+            int(current["id"]),
+        )
+        if candidate_rank > current_rank:
+            selected[key] = terminal
+    return sorted(selected.values(), key=lambda terminal: str(terminal.get("name") or ""))
+
+
 def _journal_balance_series(
     conn: Any,
     accounts: list[str],
@@ -694,12 +758,19 @@ def _journal_balance_series(
     }
 
 
-def _last_closed_months(now: datetime | None = None) -> list[dict[str, Any]]:
-    """Return the three calendar months preceding the current UTC month."""
+def _overview_months(now: datetime | None = None) -> list[dict[str, Any]]:
+    """Return the current UTC month followed by the three preceding months."""
     now = now or datetime.now(timezone.utc)
     year, month = now.year, now.month
     labels = ("Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic")
-    result: list[dict[str, Any]] = []
+    start = datetime(year, month, 1, tzinfo=timezone.utc)
+    next_month = datetime(year + (month == 12), 1 if month == 12 else month + 1, 1, tzinfo=timezone.utc)
+    result: list[dict[str, Any]] = [{
+        "key": f"{year:04d}-{month:02d}",
+        "label": f"{labels[month - 1]} {year}",
+        "start_msc": int(start.timestamp() * 1000),
+        "end_msc": int(next_month.timestamp() * 1000) - 1,
+    }]
     for _ in range(3):
         month -= 1
         if month == 0:
@@ -717,7 +788,7 @@ def _last_closed_months(now: datetime | None = None) -> list[dict[str, Any]]:
 
 
 def _monthly_net_profit(trades: list[dict[str, Any]], months: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Aggregate closed-trade Net P/L for the supplied closed calendar months."""
+    """Aggregate realised closed-trade Net P/L for the supplied calendar months."""
     return [
         {
             "key": month["key"],
@@ -948,19 +1019,20 @@ def dashboard_data(
     selected_assets: set[str] | None = None,
 ) -> dict[str, Any]:
     start_msc, end_msc = _window_bounds(window, start, end)
-    closed_months = _last_closed_months()
+    overview_months = _overview_months()
     pending_candidates = _pending_candidate_strategy_ids()
     with session() as conn:
         # Import-only terminals exist solely to attach a previous account's trades
         # to the strategy lineage.  They are not running MT5 accounts and must not
         # be presented as broker accounts in the dashboard's terminal strip.
         terminal_rows = rows(conn.execute("SELECT * FROM terminals ORDER BY name"))
-        visible_terminal_rows = [
+        connected_terminal_rows = [
             terminal
             for terminal in terminal_rows
             if terminal["status"] == "connected"
             and not str(terminal.get("data_dir") or "").startswith("import://")
         ]
+        visible_terminal_rows = _canonical_terminal_rows(connected_terminal_rows)
         strategies = conn.execute(
             "SELECT * FROM strategies WHERE archived_at IS NULL ORDER BY symbol,sqx_name"
         ).fetchall()
@@ -994,6 +1066,26 @@ def dashboard_data(
             "SELECT * FROM bot_deployments WHERE confirmed=1 ORDER BY strategy_id,observed_at DESC,id DESC"
         )):
             deployments_by_strategy.setdefault(int(deployment["strategy_id"]), []).append(deployment)
+        # A chart profile is authoritative for its own timeframe even while its
+        # strategy link is pending review.  Keep this observation separate from
+        # the confirmed deployment association: it enriches presentation and
+        # never creates a trade/mapping attribution on its own.
+        profile_timeframes: dict[tuple[str, str, str, str], set[str]] = {}
+        for deployment in rows(conn.execute(
+            """SELECT account_login,server,symbol,ex5_name,timeframe
+                 FROM bot_deployments
+                WHERE attached=1 AND NULLIF(TRIM(timeframe),'') IS NOT NULL"""
+        )):
+            key = (
+                str(deployment["server"] or "").strip().casefold(),
+                str(deployment["account_login"] or "").strip(),
+                asset_key(str(deployment["symbol"] or "")),
+                normalize_expert(str(deployment["ex5_name"] or "")),
+            )
+            if all(key):
+                profile_timeframes.setdefault(key, set()).add(
+                    str(deployment["timeframe"]).strip().upper()
+                )
         account_balances: dict[str, float | None] = {}
         balance_rows = conn.execute(
             """SELECT t.account_login,s.balance
@@ -1027,6 +1119,7 @@ def dashboard_data(
         for strategy in strategies:
             strategy_id = int(strategy["id"])
             identity_id = _identity_strategy_id(strategy)
+            resolved_asset = asset_key(str(strategy["symbol"] or ""))
             lineage_accounts = lineages_by_strategy.get(
                 strategy_id, {"current": [], "predecessor": []}
             )
@@ -1059,7 +1152,14 @@ def dashboard_data(
             # picker remains complete while a narrow scope is active, then skip
             # the expensive per-strategy work as early as possible.
             available_accounts.update(active_accounts)
-            has_unassigned = has_unassigned or not active_accounts
+            # A strategy discovered only in SQX is research/backtest metadata,
+            # not an operational broker deployment.  It must not create the
+            # misleading "Sin asignar" pseudo-account in the broker filter.
+            # Reserve that state for an observed operational strategy whose
+            # account identity is actually missing.
+            has_unassigned = has_unassigned or (
+                not active_accounts and str(strategy["origin"] or "").casefold() != "sqx"
+            )
             if selected_accounts is not None:
                 if not active_accounts:
                     if not include_unassigned:
@@ -1090,7 +1190,27 @@ def dashboard_data(
                 if str(deployment["timeframe"] or "").strip()
             })
             sqx_timeframe = str(sqx_link["timeframe"] or "").strip() if sqx_link else ""
-            timeframe = " / ".join(deployment_timeframes) or sqx_timeframe or None
+            profile_key = (
+                str(strategy["operational_server"] or "").strip().casefold(),
+                str(strategy["account_login"] or "").strip(),
+                str(strategy["operational_asset_key"] or resolved_asset),
+                str(strategy["operational_expert_key"] or normalize_expert(
+                    strategy["mql5_name"] or strategy["sqx_name"]
+                )),
+            )
+            observed_profile_timeframes = sorted(profile_timeframes.get(profile_key, set()))
+            if deployment_timeframes:
+                timeframe = " / ".join(deployment_timeframes)
+                timeframe_source = "terminal_profile"
+            elif observed_profile_timeframes:
+                timeframe = " / ".join(observed_profile_timeframes)
+                timeframe_source = "terminal_profile"
+            elif sqx_timeframe:
+                timeframe = sqx_timeframe
+                timeframe_source = "sqx"
+            else:
+                timeframe = None
+                timeframe_source = "missing"
             magic_numbers = sorted({int(mapping["magic"]) for mapping in live_mappings if mapping["magic"] is not None})
             strategy_trades = _dedupe_account_trades(sorted(
                 [
@@ -1138,7 +1258,7 @@ def dashboard_data(
                 historical_mt5_trades + imported_trades,
                 key=lambda t: (int(t.get("close_time_msc", 0)), int(t.get("deal_ticket", 0))),
             )
-            monthly_net_profit = _monthly_net_profit(strategy_trades + historical_all, closed_months)
+            monthly_net_profit = _monthly_net_profit(strategy_trades + historical_all, overview_months)
             recent_equity_curve = _recent_equity_curve(strategy_trades + historical_all)
             magic_detail: dict[int, dict[str, Any]] = {}
             for mapping in [*live_mappings, *historical_mappings]:
@@ -1332,7 +1452,6 @@ def dashboard_data(
                 link_state = "mt5_only"
             else:
                 link_state = "catalog_only"
-            resolved_asset = asset_key(str(strategy["symbol"] or ""))
             asset_symbols_by_key.setdefault(resolved_asset, set()).update(
                 str(symbol).strip()
                 for symbol in [
@@ -1355,12 +1474,13 @@ def dashboard_data(
                     "display_name_source": display_name_row["source"] if display_name_row else None,
                     "account_login": effective_account,
                     "timeframe": timeframe,
+                    "timeframe_source": timeframe_source,
                     "origin": strategy["origin"],
                     "last_observed_at": strategy["last_observed_at"],
                     "note": strategy["note"],
                     "note_updated_at": strategy["note_updated_at"],
                     "selection": bool(strategy["monitoring_selected"]),
-                    "favorite": bool(strategy["favorite"]),
+                    "strategy_status": strategy["strategy_status"],
                     "no_mm_accepted": bool(strategy["no_mm_accepted"]),
                     "no_mm_accepted_at": strategy["no_mm_accepted_at"],
                     "state": state,
@@ -1452,13 +1572,18 @@ def dashboard_data(
         state: sum(1 for item in output if item["link_state"] == state)
         for state in ("linked", "candidate", "sqx_catalog", "sqx_only", "mt5_only", "catalog_only")
     }
+    timeframe_coverage = {
+        source: sum(1 for item in output if item["timeframe_source"] == source)
+        for source in ("terminal_profile", "sqx", "missing")
+    }
     return {
         "generated_at": utcnow(), "window": window,
         "monthly_net_profit_months": [
             {"key": month["key"], "label": month["label"]}
-            for month in closed_months
+            for month in overview_months
         ],
         "totals": totals,
+        "timeframe_coverage": timeframe_coverage,
         "integration": integration, "account": dict(account) if account else None,
         "terminals": visible_terminal_rows, "strategies": output,
         "inventory_summary": inventory_summary,
@@ -2235,18 +2360,18 @@ def put_strategy_selection(
     }
 
 
-@app.put("/api/strategies/{strategy_id}/favorite")
-def put_strategy_favorite(
-    strategy_id: int, payload: StrategyFavoriteUpdate
+@app.put("/api/strategies/{strategy_id}/status")
+def put_strategy_status(
+    strategy_id: int, payload: StrategyStatusUpdate
 ) -> dict[str, Any]:
     with session() as conn:
         result = conn.execute(
-            "UPDATE strategies SET favorite=? WHERE id=? AND archived_at IS NULL",
-            (int(payload.favorite), strategy_id),
+            "UPDATE strategies SET strategy_status=? WHERE id=? AND archived_at IS NULL",
+            (payload.status, strategy_id),
         )
         if result.rowcount == 0:
             raise HTTPException(404, "Strategy not found")
-    return {"strategy_id": strategy_id, "favorite": payload.favorite}
+    return {"strategy_id": strategy_id, "status": payload.status}
 
 
 @app.put("/api/strategies/{strategy_id}/no-mm-acceptance")
@@ -2717,6 +2842,16 @@ def sync_terminal(terminal_id: int) -> dict[str, Any]:
         return {"ingested": ingested, "request": request}
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
+
+
+@app.put("/api/terminals/canonical-ingestion-source")
+def put_canonical_ingestion_source(payload: CanonicalTerminalSource) -> dict[str, Any]:
+    try:
+        return set_canonical_ingestion_source(payload.terminal_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @app.post("/api/catalog/import")
@@ -3230,7 +3365,7 @@ def get_chart(
         ))
         if selected_assets is not None and asset_key(str(strategy["symbol"] or "")) not in selected_assets:
             raise HTTPException(404, "Strategy is outside the selected assets")
-        mapping = mappings[0] if mappings else None
+        mapping = _chart_source_mapping(conn, mappings)
         chart_symbol = (mapping["symbol"] if mapping else None) or strategy["symbol"]
         issued_request_id = None
         if refresh and mapping:

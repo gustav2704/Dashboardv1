@@ -78,7 +78,12 @@ def _profile_fields(payload: bytes) -> dict[str, str]:
     return {
         "symbol": get("symbol"),
         "expert_path": get("path"),
-        "magic_number": get("MagicNumber") or get("MyNumber"),
+        "magic_number": (
+            get("MagicNumber")
+            or get("MyNumber")
+            or get("InpMagicNumber")
+            or get("InpMagic")
+        ),
         "expected_comment": get("CustomComment"),
     }
 
@@ -282,9 +287,25 @@ def import_file(path: Path) -> dict[str, Any]:
                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                        ON CONFLICT(account_login,server,chart_id,normalized_ex5) DO UPDATE SET
                          symbol=excluded.symbol,timeframe=excluded.timeframe,ex5_name=excluded.ex5_name,
-                         magic=COALESCE(excluded.magic,bot_deployments.magic),
+                         -- A Magic extracted from a chart profile is configuration
+                         -- evidence, not execution evidence. Do not let a later
+                         -- profile scan overwrite a Magic reconciled from deals.
+                         magic=CASE
+                           WHEN bot_deployments.mapping_confidence='CONFIRMADA_DEALS'
+                             THEN bot_deployments.magic
+                           ELSE COALESCE(excluded.magic,bot_deployments.magic)
+                         END,
                          expected_comment=COALESCE(NULLIF(excluded.expected_comment,''),bot_deployments.expected_comment),
-                         mapping_source=excluded.mapping_source,mapping_confidence=excluded.mapping_confidence,
+                         mapping_source=CASE
+                           WHEN bot_deployments.mapping_confidence='CONFIRMADA_DEALS'
+                             THEN bot_deployments.mapping_source
+                           ELSE excluded.mapping_source
+                         END,
+                         mapping_confidence=CASE
+                           WHEN bot_deployments.mapping_confidence='CONFIRMADA_DEALS'
+                             THEN bot_deployments.mapping_confidence
+                           ELSE excluded.mapping_confidence
+                         END,
                          attached=excluded.attached,terminal_connected=excluded.terminal_connected,
                          algo_trading_global=excluded.algo_trading_global,
                          account_trade_allowed=excluded.account_trade_allowed,
