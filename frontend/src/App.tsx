@@ -1229,6 +1229,8 @@ function StrategySidePanel({ strategy, query, refreshVersion, onClose, onDeleted
   const riskAlertAudit = active.backtest.risk_audit?.status === 'risk_exceeded'
   const reportRunId = active.backtest.latest_completed_run_id
   const backtestWorstTrade = active.backtest.risk_audit?.worst_loss
+  const equityCurveAvailable = Boolean(active.backtest.equity_curve_available || !active.backtest.equity_curve_reason)
+  const mt5ReportAvailable = Boolean(active.backtest.report_available)
   return <aside className="strategy-drawer" aria-label="Quick strategy statistics">
     <div className="drawer-header">
       <div className="drawer-strategy-heading"><div className="strategy-status-controls" role="group" aria-label="Estado manual de estrategia">{(['live', 'monitor', 'candidate_live'] as const).map(status => <button key={status} className={`strategy-status-button ${status} ${active.strategy_status === status ? 'active' : ''}`} type="button" aria-label={`Marcar ${displayName(active)} como ${strategyStatusLabels[status]}`} aria-pressed={active.strategy_status === status} title={strategyStatusLabels[status]} disabled={statusSaving} onClick={() => onStatusChange(active.id, active.strategy_status === status ? '' : status)}><StrategyStatusIcon status={status} size={18} /></button>)}<button className={`strategy-status-button clear ${active.strategy_status === '' ? 'active' : ''}`} type="button" aria-label={`Quitar estado de ${displayName(active)}`} aria-pressed={active.strategy_status === ''} title="Quitar estado" disabled={statusSaving} onClick={() => onStatusChange(active.id, '')}><X size={16} /></button></div><div><strong>{displayName(active)}</strong><span>{active.symbol || 'No symbol'} · {m.trades} trades in history</span></div></div>
@@ -1246,7 +1248,13 @@ function StrategySidePanel({ strategy, query, refreshVersion, onClose, onDeleted
         <div className="drawer-collapsible-content">
           {riskAlertAudit && <label className="backtest-risk-acceptance"><input type="checkbox" checked={Boolean(active.backtest.risk_alert_accepted)} disabled={!reportRunId || savingBacktestRiskAcceptance} onChange={event => { if (reportRunId) onBacktestRiskAcceptance(active.id, reportRunId, event.target.checked) }} />Validado manualmente tras revisar el reporte</label>}
           {active.backtest.risk_alert_accepted && <small>La auditoría detectó un exceso de riesgo; fue validado manualmente{active.backtest.risk_alert_accepted_at ? ` el ${new Date(active.backtest.risk_alert_accepted_at).toLocaleString()}` : ''}.</small>}
-          <div className="drawer-backtest-actions">{reportRunId && <a className="button" href={`/api/backtests/${reportRunId}/report`} target="_blank" rel="noreferrer">Abrir reporte</a>}<button className="button" type="button" onClick={() => onOpenDetail(active.id)}>Ver auditoría completa</button></div>
+          {!equityCurveAvailable && active.backtest.equity_curve_reason && <small>{active.backtest.equity_curve_reason}</small>}
+          <div className="drawer-backtest-actions">
+            {reportRunId && equityCurveAvailable && <a className="button" href={`/api/backtests/${reportRunId}/equity-curve`} target="_blank" rel="noreferrer">Abrir equity curve</a>}
+            {reportRunId && mt5ReportAvailable && <a className="button" href={`/api/backtests/${reportRunId}/report`} target="_blank" rel="noreferrer">Abrir reporte MT5</a>}
+            {!equityCurveAvailable && !mt5ReportAvailable && <small>No hay un artefacto visual disponible para este backtest.</small>}
+            <button className="button" type="button" onClick={() => onOpenDetail(active.id)}>Ver auditoría completa</button>
+          </div>
         </div>
       </details>}
       <StrategyNoteEditor strategy={active} placement="drawer" onSaved={(strategyId, note, noteUpdatedAt) => {

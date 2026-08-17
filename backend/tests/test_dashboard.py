@@ -488,6 +488,63 @@ def test_dashboard_filters_multiple_accounts_and_unassigned_strategies(tmp_path,
     assert none_selected["strategies"] == []
 
 
+def test_dashboard_account_filter_ignores_stale_current_lineage_with_live_evidence(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "stale-lineage-filter.db")
+    monkeypatch.setattr(main, "suggestions", lambda: [])
+    db.init_db()
+    now = db.utcnow()
+
+    with db.session() as conn:
+        terminal_id = conn.execute(
+            "INSERT INTO terminals(name,data_dir,account_login,status,created_at) VALUES(?,?,?,?,?)",
+            ("Live A", str(tmp_path / "live-a"), "A", "connected", now),
+        ).lastrowid
+        strategy_id = conn.execute(
+            "INSERT INTO strategies(symbol,sqx_name,account_login,created_at) VALUES(?,?,?,?)",
+            ("XAUUSD", "Bot deployed on A", "A", now),
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO mappings(strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,role,confirmed,created_at)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
+            (strategy_id, terminal_id, "A", "XAUUSD", 101, "Bot deployed on A", "live", 1, now),
+        )
+        # Simulates lineage retained after a prior identity merge.  It is not
+        # operational evidence that this deployment runs on account B.
+        conn.execute(
+            """INSERT INTO strategy_account_lineage(strategy_id,account_login,role,source,created_at)
+               VALUES(?,?,?,?,?)""",
+            (strategy_id, "B", "current", "legacy_identity_merge", now),
+        )
+
+    assert [item["id"] for item in dashboard_data(selected_accounts={"A"}, include_unassigned=False)["strategies"]] == [strategy_id]
+    assert dashboard_data(selected_accounts={"B"}, include_unassigned=False)["strategies"] == []
+
+
+def test_dashboard_account_filter_uses_the_displayed_account(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "displayed-account-filter.db")
+    monkeypatch.setattr(main, "suggestions", lambda: [])
+    db.init_db()
+    now = db.utcnow()
+
+    with db.session() as conn:
+        terminal_id = conn.execute(
+            "INSERT INTO terminals(name,data_dir,account_login,status,created_at) VALUES(?,?,?,?,?)",
+            ("Migrated mapping", str(tmp_path / "mapping"), "B", "connected", now),
+        ).lastrowid
+        strategy_id = conn.execute(
+            "INSERT INTO strategies(symbol,sqx_name,account_login,created_at) VALUES(?,?,?,?)",
+            ("XAUUSD", "Displayed on A", "A", now),
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO mappings(strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,role,confirmed,created_at)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
+            (strategy_id, terminal_id, "B", "XAUUSD", 101, "Displayed on A", "live", 1, now),
+        )
+
+    assert [item["id"] for item in dashboard_data(selected_accounts={"A"}, include_unassigned=False)["strategies"]] == [strategy_id]
+    assert dashboard_data(selected_accounts={"B"}, include_unassigned=False)["strategies"] == []
+
+
 def test_dashboard_filters_assets_and_exposes_normalized_options(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "asset-filter.db")
     monkeypatch.setattr(main, "suggestions", lambda: [])

@@ -25,6 +25,7 @@ from .config import (
     REMOTE_MT5_TESTER_TIMEOUT,
     STALE_SECONDS,
 )
+from . import mt5_tst_cache
 from . import db
 from .db import rows, session, utcnow
 from .mapping import normalize
@@ -179,6 +180,12 @@ def _terminal_sources() -> dict[str, list[dict[str, Any]]]:
         terminals_with_configured_sources.add(terminal_id)
         if source["enabled"]:
             paths_by_terminal.setdefault(terminal_id, []).append(str(source["data_dir"]))
+    # A ledger-canonical DataDir identifies the account feed, not the sole MT5
+    # installation on that VPS.  EAs for the same account can be attached to a
+    # sibling terminal below the same MetaQuotes\Terminal parent.  Discover
+    # only those direct siblings from an already approved SSH endpoint; never
+    # broaden this into a drive-wide inventory.
+    sibling_dirs_by_parent: dict[tuple[str, str], list[str]] = {}
     result: dict[str, list[dict[str, Any]]] = {}
     seen: set[tuple[str, str]] = set()
     for terminal in found:
@@ -188,15 +195,67 @@ def _terminal_sources() -> dict[str, list[dict[str, Any]]]:
         # endpoints would otherwise hold up every remote batch audit.
         if terminal_id in terminals_with_configured_sources and terminal_id not in paths_by_terminal:
             continue
-        paths = paths_by_terminal.get(terminal_id) or [str(terminal["remote_data_dir"])]
-        for data_dir in paths:
-            identity = (str(terminal["ssh_host"]), data_dir.casefold())
-            if identity in seen:
-                continue
-            seen.add(identity)
-            location = {**terminal, "remote_data_dir": data_dir, "source_terminal_id": int(terminal["id"])}
-            result.setdefault(str(terminal["account_login"]), []).append(location)
+        configured_paths = paths_by_terminal.get(terminal_id) or [str(terminal["remote_data_dir"])]
+        for configured_dir in configured_paths:
+            parent_key = (
+                str(terminal["ssh_host"]),
+                str(PureWindowsPath(configured_dir).parent).casefold(),
+            )
+            if parent_key not in sibling_dirs_by_parent:
+                try:
+                    sibling_dirs_by_parent[parent_key] = _vps_sibling_data_dirs(
+                        {**terminal, "remote_data_dir": configured_dir}
+                    )
+                except SSHBridgeError:
+                    # Retain the configured source if the bounded sibling
+                    # listing is unavailable; normal artifact collection will
+                    # record the concrete transport error later.
+                    sibling_dirs_by_parent[parent_key] = [configured_dir]
+            for data_dir in sibling_dirs_by_parent[parent_key]:
+                identity = (str(terminal["ssh_host"]), data_dir.casefold())
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                location = {
+                    **terminal,
+                    "remote_data_dir": data_dir,
+                    "source_terminal_id": int(terminal["id"]),
+                    "discovery_scope": (
+                        "registered_datadir"
+                        if data_dir.casefold() == configured_dir.casefold()
+                        else "vps_sibling_datadir"
+                    ),
+                }
+                result.setdefault(str(terminal["account_login"]), []).append(location)
     return result
+
+
+def _vps_sibling_data_dirs(terminal: dict[str, Any]) -> list[str]:
+    """List MT5 DataDir siblings below the registered VPS terminal parent.
+
+    The command is deliberately shallow and read-only. A DataDir qualifies
+    only when it contains ``MQL5\\Profiles\\Charts``; individual profiles and
+    requested EX5 names are still inspected by the normal forensic phase.
+    """
+    configured_dir = str(terminal["remote_data_dir"])
+    parent = str(PureWindowsPath(configured_dir).parent)
+    bridge = SSHBridge(terminal)
+    script = fr"""
+$ErrorActionPreference='Stop';$parent={_ps_literal(parent)}
+if(-not (Test-Path -LiteralPath $parent -PathType Container)){{throw 'MT5 DataDir parent does not exist'}}
+@(Get-ChildItem -LiteralPath $parent -Directory -ErrorAction Stop |
+  Where-Object {{Test-Path -LiteralPath (Join-Path $_.FullName 'MQL5\\Profiles\\Charts') -PathType Container}} |
+  ForEach-Object {{$_.FullName}}) | ConvertTo-Json -Compress
+"""
+    result = bridge.execute(_ps(script), timeout=30)
+    if result["status"] != 0:
+        raise SSHBridgeError(result["error"] or result["output"] or "VPS DataDir inventory failed")
+    raw = result["output"].strip().splitlines()
+    value = json.loads(raw[-1]) if raw else []
+    directories = value if isinstance(value, list) else ([value] if value else [])
+    if configured_dir.casefold() not in {str(path).casefold() for path in directories}:
+        directories.append(configured_dir)
+    return [str(path) for path in directories]
 
 
 def safety_preflight(*, authorized_isolated_runner: bool = False) -> tuple[bool, str]:
@@ -612,13 +671,20 @@ def _audit_candidates_uncached() -> dict[str, Any]:
         source_symbol = str((deployment.get("symbol") if deployment else None) or chart["symbol"] or symbol)
         available = available_target_symbols
         source_key = source_symbol.casefold()
-        mapped = symbol_maps.get(source_key, "")
+        # A literal source suffix remains part of the identity.  Some
+        # approved source aliases (for example ``XAUUSD.cyr``) first resolve
+        # to a canonical asset spelling and then to the separately recorded
+        # Darwinex history symbol (``XAUUSD_M1``).  The old one-hop lookup
+        # stopped at XAUUSD and incorrectly reported these verified profiles
+        # as unavailable.  Every hop below is still explicit: either the
+        # source alias table or the persisted Darwinex symbol mapping.
         explicit = REMOTE_SYMBOL_EQUIVALENTS.get(source_key, "")
-        target_symbol = (
-            available.get(source_key)
-            or available.get(explicit.casefold())
-            or available.get(mapped.casefold())
-        )
+        lookup_keys = [source_key, explicit.casefold()]
+        for key in list(lookup_keys):
+            mapped = symbol_maps.get(key, "")
+            if mapped:
+                lookup_keys.append(mapped.casefold())
+        target_symbol = next((available[key] for key in lookup_keys if key and key in available), None)
         if not target_symbol:
             output.append({**base, "state": "blocked", "reason": f"Darwinex Demo has no exact symbol mapping/history for {source_symbol}"})
             continue
@@ -760,8 +826,17 @@ def execute_run(run: dict[str, Any], run_dir: Path, cancel_event: Any) -> dict[s
     remote_expert = runner / "MQL5" / "Experts" / "DashboardBacktests" / run["expert_hash"][:12] / expert.name
     remote_set = runner / "MQL5" / "Profiles" / "Tester" / f"DashboardBacktest-{run['id']}.set"
     remote_ini = remote_job / "tester.ini"
+    remote_script = remote_job / "run.ps1"
     report_name = f"DashboardBacktest-{run['id']}"
+    # MT5 resolves a report path from its installation directory only when the
+    # relative path is rooted with a backslash (the syntax documented by MT5,
+    # e.g. ``\\reports\\tester.htm``).
+    report_relative = f"\\reports\\{report_name}.htm"
     csv_name = f"{PureWindowsPath(expert.name).stem}.csv"
+    cache_prefix = (
+        f"{expert.stem}.{run['symbol']}.{run['timeframe']}."
+        f"{run['from_date'].replace('-', '')}_{run['to_date'].replace('-', '')}."
+    )
     bridge.write_bytes_path(str(remote_expert), expert.read_bytes())
     bridge.write_bytes_path(str(remote_set), _set_text(run.get("inputs") or {}).encode("utf-8"))
     relative_expert = str(remote_expert.relative_to(runner / "MQL5" / "Experts").with_suffix(""))
@@ -773,7 +848,7 @@ def execute_run(run: dict[str, Any], run_dir: Path, cancel_event: Any) -> dict[s
         f"Leverage={run['leverage']}", f"Login={REMOTE_BACKTEST_TARGET['account_login']}",
         f"Server={REMOTE_BACKTEST_TARGET['server']}", f"ExpertParameters={remote_set.name}",
         "UseLocal=1", "UseRemote=0", "UseCloud=0", "Visual=0",
-        f"Report={report_name}", "ReplaceReport=1", "ShutdownTerminal=1", "",
+        f"Report={report_relative}", "ReplaceReport=1", "ShutdownTerminal=1", "",
     ])
     bridge.write_bytes_path(str(remote_ini), ini.encode("utf-8"))
     exe = runner / "terminal64.exe"
@@ -785,13 +860,21 @@ Get-CimInstance Win32_Process -Filter "Name='terminal64.exe'" | Where-Object {{$
 $ErrorActionPreference='Stop'
 $runner={_ps_literal(str(runner))};$job={_ps_literal(str(remote_job))};$exe={_ps_literal(str(exe))};$report={_ps_literal(report_name)}
 New-Item -ItemType Directory -Path $job -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $runner 'reports') -Force | Out-Null
 $active=@(Get-CimInstance Win32_Process -Filter "Name='terminal64.exe'" | Where-Object {{$_.ExecutablePath -eq $exe}})
 if($active.Count){{throw 'The isolated tester is already running'}}
+$testStarted=[DateTime]::UtcNow
 $process=Start-Process -FilePath $exe -ArgumentList @('/portable',('/config:'+{_ps_literal(str(remote_ini))})) -WorkingDirectory $runner -PassThru -Wait
-if($process.ExitCode -ne 0){{throw ('MT5 exited with code '+$process.ExitCode)}}
-    $files=@(Get-ChildItem -LiteralPath $runner -File | Where-Object {{$_.BaseName -eq $report}})
-    $reportFiles=@($files | Where-Object {{$_.Extension -in @('.htm','.html')}})
-    if(-not $reportFiles){{
+$exitCode=$process.ExitCode
+    # Give MT5's asynchronous report writer a short grace window.  When it
+    # remains absent, the exact single-test cache is a faster, better-evidenced
+    # recovery than holding the isolated runner idle for a minute.
+    $reportFiles=@()
+    for($attempt=0;$attempt -lt 20 -and -not $reportFiles;$attempt++){{
+      $files=@(Get-ChildItem -LiteralPath $runner -File -ErrorAction SilentlyContinue | Where-Object {{$_.BaseName -eq $report}})
+      $files+=@(Get-ChildItem -LiteralPath (Join-Path $runner 'reports') -File -ErrorAction SilentlyContinue | Where-Object {{$_.BaseName -eq $report}})
+      $reportFiles=@($files | Where-Object {{$_.Extension -in @('.htm','.html')}})
+      if(-not $reportFiles){{
       # EA CSVs are written below the tester agent Files directory.  Do not
       # recurse through the whole portable installation: tester logs can be
       # gigabytes and would hold the SSH channel open after MT5 has finished.
@@ -806,22 +889,64 @@ if($process.ExitCode -ne 0){{throw ('MT5 exited with code '+$process.ExitCode)}}
           if($found){{$csv=@($found);break}}
         }}
       }}
-      if($csv){{$reportFiles=@($csv)}}
+        if($csv){{$reportFiles=@($csv)}}
+      }}
+      if(-not $reportFiles){{Start-Sleep -Milliseconds 500}}
     }}
-    if(-not $reportFiles){{throw 'MT5 finished without producing the requested report or EA CSV'}}
-    $reportFiles | Copy-Item -Destination $job -Force
-$latest=Get-ChildItem -LiteralPath (Join-Path $runner 'Tester\\logs') -File -Filter '*.log' -ErrorAction SilentlyContinue | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+    if($reportFiles){{
+      $reportFiles | Copy-Item -Destination $job -Force
+    }}else{{
+      # Some portable MT5 builds complete a test but ignore Report=.  The
+      # exact tester cache is still emitted below this isolated runner.  Only
+      # accept a cache written for this one-at-a-time run and its exact staged
+      # expert/symbol/timeframe/date identity.
+      $cacheDir=Join-Path $runner 'Tester\\cache'
+      $cachePrefix={_ps_literal(cache_prefix)}
+      $tst=Get-ChildItem -LiteralPath $cacheDir -File -Filter '*.tst' -ErrorAction SilentlyContinue |
+        Where-Object {{$_.Name.StartsWith($cachePrefix,[StringComparison]::OrdinalIgnoreCase) -and $_.LastWriteTimeUtc -ge $testStarted.AddMinutes(-1)}} |
+        Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+      if(-not $tst){{throw 'MT5 completed without report and no exact tester cache was produced'}}
+      Copy-Item -LiteralPath $tst.FullName -Destination (Join-Path $job 'tester-result.tst') -Force
+    }}
+$latest=$null;$qualityLine=$null
+# ``terminal64.exe`` can exit before the agent journal is flushed.  Preserve a
+# small, independently searchable quality evidence file instead of relying on
+# a tail that can be empty (or no longer contain the start-of-test line) for a
+# high-trade-count EA.
+for($attempt=0;$attempt -lt 20 -and -not $qualityLine;$attempt++){{
+  $latest=Get-ChildItem -LiteralPath (Join-Path $runner 'Tester\\logs') -File -Filter '*.log' -ErrorAction SilentlyContinue | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+  if($latest){{
+    $qualityLine=Select-String -LiteralPath $latest.FullName -Pattern 'quality of analyzed history is\\s+\\d+(?:[.,]\\d+)?%' -CaseSensitive:$false -ErrorAction SilentlyContinue | Select-Object -Last 1
+  }}
+  if(-not $qualityLine){{Start-Sleep -Milliseconds 500}}
+}}
 if($latest){{Get-Content -LiteralPath $latest.FullName -Tail 2000 | Set-Content -LiteralPath (Join-Path $job 'tester.log') -Encoding UTF8}}
+if($qualityLine){{$qualityLine.Line | Set-Content -LiteralPath (Join-Path $job 'history-quality.txt') -Encoding UTF8}}
+if($exitCode -ne 0){{throw ('MT5 exited with code '+$exitCode)}}
 Copy-Item -LiteralPath {_ps_literal(str(remote_set))} -Destination (Join-Path $job 'inputs.set') -Force
     $manifest=@(Get-ChildItem -LiteralPath $job -File | ForEach-Object {{[pscustomobject]@{{name=$_.Name;bytes=[int64]$_.Length;sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()}}}})
 $manifest | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $job 'manifest.json') -Encoding UTF8
 [pscustomobject]@{{exit_code=$process.ExitCode;remote_job=$job;artifacts=$manifest.Count}} | ConvertTo-Json -Compress
 """
+    # The tester launcher is intentionally a file rather than an encoded
+    # command line: the bounded collector can otherwise exceed Windows'
+    # PowerShell command-line limit before MT5 is even started.
+    bridge.write_bytes_path(str(remote_script), script.encode("utf-8-sig"))
     result = bridge.execute(
-        _ps(script), timeout=REMOTE_MT5_TESTER_TIMEOUT, cancel_event=cancel_event,
+        _ps(f"& {_ps_literal(str(remote_script))}"), timeout=REMOTE_MT5_TESTER_TIMEOUT, cancel_event=cancel_event,
         cancel_command=_ps(cancel_script),
     )
     if result["status"] != 0:
+        # Preserve only the bounded, isolated job folder for diagnostics when
+        # MT5 itself fails before a manifest can be written (for example, an
+        # unavailable broker symbol).  This does not collect any live-terminal
+        # data and makes the next diagnosis evidence-based.
+        run_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            for remote_path in bridge.list_files(str(remote_job)):
+                bridge.download_path(remote_path, run_dir / PureWindowsPath(remote_path).name)
+        except Exception:
+            pass
         raise SSHBridgeError(result["error"] or result["output"] or "Remote MT5 execution failed")
     run_dir.mkdir(parents=True, exist_ok=True)
     files = bridge.list_files(str(remote_job))
@@ -838,6 +963,33 @@ $manifest | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $job 
         if _sha256_bytes(local.read_bytes()) != str(item["sha256"]).casefold():
             raise SSHBridgeError(f"Transferred artifact hash mismatch: {item['name']}")
     report = next((path for path in run_dir.iterdir() if path.suffix.casefold() in {".htm", ".html", ".csv"}), None)
+    if not report:
+        tst = run_dir / "tester-result.tst"
+        if tst.is_file():
+            cache = mt5_tst_cache.read_tst_cache(tst)
+            errors = mt5_tst_cache.identity_errors(
+                cache,
+                expert_name=expert.name,
+                expert_hash_prefix=str(run["expert_hash"])[:12],
+                symbol=str(run["symbol"]),
+                timeframe=str(run["timeframe"]),
+                from_date=str(run["from_date"]),
+                to_date=str(run["to_date"]),
+                server=str(REMOTE_BACKTEST_TARGET["server"]),
+            )
+            if errors:
+                raise SSHBridgeError("; ".join(errors))
+            report = run_dir / "cache-extracted-report.html"
+            quality = mt5_tst_cache.history_quality_from_log(run_dir / "tester.log")
+            if quality is None:
+                quality = mt5_tst_cache.history_quality_from_log(run_dir / "history-quality.txt")
+            mt5_tst_cache.write_html_report(cache, report, quality)
+            manifest.append({
+                "name": report.name,
+                "bytes": report.stat().st_size,
+                "sha256": _sha256_bytes(report.read_bytes()),
+                "source": "local_tst_cache_recovery",
+            })
     if not report:
         raise SSHBridgeError("The transferred package has no MT5 HTML or EA CSV report")
     return {
@@ -862,6 +1014,7 @@ $ErrorActionPreference='Stop'
 $job={_ps_literal(str(target))};$runner={_ps_literal(runner)};$report={_ps_literal(report_name)}
 if(Test-Path -LiteralPath $job){{Remove-Item -LiteralPath $job -Recurse -Force}}
 Get-ChildItem -LiteralPath $runner -File | Where-Object {{$_.BaseName -eq $report}} | Remove-Item -Force
+Get-ChildItem -LiteralPath (Join-Path $runner 'reports') -File -ErrorAction SilentlyContinue | Where-Object {{$_.BaseName -eq $report}} | Remove-Item -Force
 if({('$true' if csv_name else '$false')}){{
   $csv={_ps_literal(csv_name or '')}
   Get-ChildItem -LiteralPath $runner -Recurse -File -Filter $csv -ErrorAction SilentlyContinue |

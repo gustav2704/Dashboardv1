@@ -34,13 +34,20 @@ CUSTOM_HISTORY_SOURCE = "Custom"
 # Backtests requested for the current Darwinex comparison begin in 2025.  The
 # end date remains bounded by the broker's available Custom history.
 CUSTOM_START_DATE = "2025-01-01"
-# User-approved exclusions.  Keep both the persisted strategy identity and a
-# normalized name rule: the second bot is not currently catalogued, but must
-# remain excluded if it is imported later.
-EXCLUDED_BACKTEST_STRATEGY_IDS: set[int] = set()
+# User-approved exclusions. Keep IDs explicit: they are scope decisions, not
+# identity failures, and must survive a future batch rebuild.
+EXCLUDED_BACKTEST_STRATEGY_IDS: set[int] = {
+    134,  # WF Matrix 3.10.85 XAU
+    144, 146, 150, 152, 242, 249, 271, 272, 273, 275, 277, 285, 287, 295, 296,
+    360,  # AltisimaPrecision [86-2] XAUUSD
+    448,  # EA_AlgoTAP_MT5_4.3
+    472,
+}
 EXCLUDED_BACKTEST_NAMES = {
     normalize("WF Matrix - Strategy 3.10.85-XAUUSD-M15"),
 }
+# Temporarily paused by the user while the canonical AXI VPS is registered.
+EXCLUDED_BACKTEST_ACCOUNTS: set[str] = {"10025867"}
 # Explicit user-approved reruns may proceed on Darwinex even when there is no
 # valid FPM reference run to clone.  Keep this deliberately narrow: these
 # strategies have a hash-verified EX5 and an SQX link of their own.
@@ -259,12 +266,20 @@ def discover_candidates(broker: str = ACTIVE_BACKTEST_BROKER, history_source: st
 
     output: list[dict[str, Any]] = []
     for strategy in strategies:
-        if int(strategy["id"]) in EXCLUDED_BACKTEST_STRATEGY_IDS or any(
+        if (
+            str(strategy.get("account_login") or "") in EXCLUDED_BACKTEST_ACCOUNTS
+            or int(strategy["id"]) in EXCLUDED_BACKTEST_STRATEGY_IDS
+            or any(
             normalize(name) in EXCLUDED_BACKTEST_NAMES for name in _candidate_names(strategy)
+            )
         ):
             output.append({
                 **strategy, "state": "excluded", "rerun_state": "excluded",
-                "reason": "Excluded from backtest by user request",
+                "reason": (
+                    "Account temporarily excluded from backtest by user request"
+                    if str(strategy.get("account_login") or "") in EXCLUDED_BACKTEST_ACCOUNTS
+                    else "Excluded from backtest by user request"
+                ),
                 "resolution_method": "user_exclusion", "confidence": 1.0,
                 "family": symbol_family(str(strategy.get("symbol") or "")),
                 "target_symbol": None, "expert_path": None, "expert_hash": None,

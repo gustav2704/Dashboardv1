@@ -26,6 +26,7 @@ from .db import rows, session, utcnow
 from .mapping import normalize
 from .backtest_risk import audit_report, with_audit
 from . import alert_engine
+from . import mt5_equity_curve
 
 
 FINAL_STATES = {
@@ -542,6 +543,7 @@ def _run_row(run_id: int) -> dict[str, Any]:
     for key in ("inputs_json", "config_snapshot_json", "metrics_json", "raw_metrics_json", "transfer_manifest_json"):
         value = item.pop(key, None)
         item[key.removesuffix("_json")] = json.loads(value) if value else None
+    item.update(mt5_equity_curve.artifact_status(item))
     return item
 
 
@@ -560,6 +562,7 @@ def list_runs(strategy_id: int | None = None) -> list[dict[str, Any]]:
         for key in ("inputs_json", "config_snapshot_json", "metrics_json", "raw_metrics_json", "transfer_manifest_json"):
             value = item.pop(key, None)
             item[key.removesuffix("_json")] = json.loads(value) if value else None
+        item.update(mt5_equity_curve.artifact_status(item))
         normalized.append(item)
     return normalized
 

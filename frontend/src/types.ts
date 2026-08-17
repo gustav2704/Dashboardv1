@@ -68,6 +68,8 @@ export type BacktestSummary = {
   state: 'validated' | 'running' | 'failed' | 'none';
   has_completed: boolean; completed_count: number; latest_run_id: number | null;
   latest_status: string | null; latest_completed_at: string | null; latest_completed_run_id?: number | null;
+  equity_curve_available?: boolean; equity_curve_reason?: string | null;
+  report_available?: boolean; report_reason?: string | null;
   history_source?: string | null; custom_symbol?: string | null;
   risk_alert?: boolean;
   risk_alert_accepted?: boolean;

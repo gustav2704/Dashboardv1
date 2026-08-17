@@ -543,6 +543,13 @@ CREATE TABLE IF NOT EXISTS backtest_batch_items (
 
 CREATE INDEX IF NOT EXISTS idx_backtest_strategy
 ON backtest_runs(strategy_id, requested_at DESC);
+-- Dashboard account switches rank and aggregate these rows on every request.
+-- The broker-first key matches the backtest summary CTE and prevents full
+-- scans/sorts across other broker histories.
+CREATE INDEX IF NOT EXISTS idx_backtest_runs_broker_strategy_requested
+ON backtest_runs(broker, strategy_id, requested_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_backtest_runs_broker_strategy_finished
+ON backtest_runs(broker, strategy_id, finished_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_backtest_status
 ON backtest_runs(status, requested_at);
 CREATE INDEX IF NOT EXISTS idx_batch_items_status

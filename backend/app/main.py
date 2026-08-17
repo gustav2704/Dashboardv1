@@ -32,6 +32,7 @@ from .ssh_bridge import SSHBridgeError
 from . import backtest_batches
 from . import alert_engine
 from . import mt5_backtests
+from . import mt5_equity_curve
 from . import remote_backtests
 from . import sqx_connector
 from . import strategy_deletion
@@ -46,7 +47,11 @@ from . import vps_mm
 
 logger = logging.getLogger(__name__)
 _WORKER_CYCLE_LOCK = threading.Lock()
-_PENDING_CANDIDATE_CACHE_TTL_SECONDS = 30.0
+# Candidate scoring compares every unmapped observation against the strategy
+# catalogue and is by far the most expensive part of an account-filtered read.
+# The score only changes when mappings/inventory change, both of which explicitly
+# invalidate this cache below.  Keep it warm between account switches.
+_PENDING_CANDIDATE_CACHE_TTL_SECONDS = 300.0
 _pending_candidate_cache_lock = threading.Lock()
 _pending_candidate_cache: tuple[float, str, int, frozenset[int]] | None = None
 
@@ -599,14 +604,19 @@ def _active_strategy_accounts(
 ) -> set[str]:
     """Return the accounts that scope a strategy in the active-account filter.
 
-    Historical mappings deliberately do not participate here: selecting an active
-    account includes a strategy's lineage, rather than requiring users to know its
-    predecessor account.
+    Operational evidence is authoritative whenever it exists: the strategy's
+    assigned account, confirmed live mappings, and confirmed deployments.  A
+    strategy can accumulate lineage while identities are merged or migrated;
+    using every ``current`` lineage row alongside live evidence would let a bot
+    from another account leak into a narrowly filtered dashboard.
+
+    A current-lineage account is therefore only a legacy fallback for a strategy
+    that has no operational account evidence at all.  Historical mappings never
+    participate in this scope.
     """
-    accounts = {
+    operational_accounts = {
         str(strategy["account_login"] or "").strip(),
         str(effective_account or "").strip(),
-        *[str(account or "").strip() for account in lineage_accounts["current"]],
         *[
             str(mapping["account_login"] or "").strip()
             for mapping in mappings
@@ -614,7 +624,14 @@ def _active_strategy_accounts(
         ],
         *[str(deployment["account_login"] or "").strip() for deployment in deployments],
     }
-    return {account for account in accounts if account}
+    operational_accounts.discard("")
+    if operational_accounts:
+        return operational_accounts
+    return {
+        str(account or "").strip()
+        for account in lineage_accounts["current"]
+        if str(account or "").strip()
+    }
 
 
 def _window_start(window: str, start: str | None) -> int:
@@ -874,7 +891,8 @@ def _backtest_summaries(conn: Any) -> dict[int, dict[str, Any]]:
           WHERE broker=?
         ),
         completed_ranked AS (
-          SELECT r.strategy_id,r.id,r.config_snapshot_json,m.metrics_json,
+               SELECT r.strategy_id,r.id,r.config_snapshot_json,m.metrics_json,
+                 r.run_dir,r.report_path,
                  ROW_NUMBER() OVER (
                    PARTITION BY r.strategy_id
                    ORDER BY COALESCE(r.finished_at,r.requested_at) DESC,r.id DESC
@@ -903,7 +921,8 @@ def _backtest_summaries(conn: Any) -> dict[int, dict[str, Any]]:
                ranked.id AS latest_run_id,ranked.status AS latest_status,
                ranked.symbol,completed_ranked.id AS latest_completed_run_id,
                completed_ranked.config_snapshot_json,
-               completed_ranked.metrics_json AS completed_metrics_json
+               completed_ranked.metrics_json AS completed_metrics_json,
+               completed_ranked.run_dir,completed_ranked.report_path
         FROM aggregates a
         JOIN strategies s ON s.id=a.strategy_id
         JOIN ranked ON ranked.strategy_id=a.strategy_id AND ranked.position=1
@@ -954,6 +973,13 @@ def _backtest_summaries(conn: Any) -> dict[int, dict[str, Any]]:
             "history_source": history_source,
             "custom_symbol": custom_symbol,
         }
+        if row["latest_completed_run_id"] is not None:
+            artifact_run = {
+                "id": row["latest_completed_run_id"],
+                "run_dir": row["run_dir"],
+                "report_path": row["report_path"],
+            }
+            result[int(row["strategy_id"])].update(mt5_equity_curve.artifact_status(artifact_run))
     item_rows = conn.execute(
         """SELECT i.strategy_id,i.status
            FROM backtest_batch_items i
@@ -1010,6 +1036,13 @@ def _pending_candidate_strategy_ids() -> set[int]:
     return set(result)
 
 
+def _invalidate_pending_candidate_cache() -> None:
+    """Discard derived mapping suggestions after their source data changes."""
+    global _pending_candidate_cache
+    with _pending_candidate_cache_lock:
+        _pending_candidate_cache = None
+
+
 def dashboard_data(
     window: str = "all",
     start: str | None = None,
@@ -1017,6 +1050,7 @@ def dashboard_data(
     selected_accounts: set[str] | None = None,
     include_unassigned: bool = True,
     selected_assets: set[str] | None = None,
+    sync_alerts: bool = True,
 ) -> dict[str, Any]:
     start_msc, end_msc = _window_bounds(window, start, end)
     overview_months = _overview_months()
@@ -1065,7 +1099,12 @@ def dashboard_data(
         for deployment in rows(conn.execute(
             "SELECT * FROM bot_deployments WHERE confirmed=1 ORDER BY strategy_id,observed_at DESC,id DESC"
         )):
-            deployments_by_strategy.setdefault(int(deployment["strategy_id"]), []).append(deployment)
+            # A deployment may be confirmed as an observed EX5 while its
+            # catalogue strategy link is still pending. It belongs in the
+            # inventory, but cannot be rendered under a strategy row yet.
+            strategy_id = deployment.get("strategy_id")
+            if strategy_id is not None:
+                deployments_by_strategy.setdefault(int(strategy_id), []).append(deployment)
         # A chart profile is authoritative for its own timeframe even while its
         # strategy link is pending review.  Keep this observation separate from
         # the confirmed deployment association: it enriches presentation and
@@ -1161,10 +1200,17 @@ def dashboard_data(
                 not active_accounts and str(strategy["origin"] or "").casefold() != "sqx"
             )
             if selected_accounts is not None:
-                if not active_accounts:
+                # The account picker filters the account rendered in the table.
+                # A confirmed mapping can be retained temporarily on another
+                # account during a migration, but it must not make a row whose
+                # visible account is unselected remain in the result.
+                # Strategies without a resolved display account still fall back
+                # to their operational evidence.
+                displayed_account_scope = {effective_account} if effective_account else active_accounts
+                if not displayed_account_scope:
                     if not include_unassigned:
                         continue
-                elif not active_accounts.intersection(selected_accounts):
+                elif not displayed_account_scope.intersection(selected_accounts):
                     continue
             display_name_row = conn.execute(
                 """SELECT display_name,source FROM strategy_display_names
@@ -1374,16 +1420,25 @@ def dashboard_data(
             latest_alert_backtest_status = (
                 str(latest_alert_run["status"]) if latest_alert_run else None
             )
-            _, active_alerts = alert_engine.evaluate_strategy(
-                conn,
-                strategy_id,
-                strategy_trades + historical_all,
-                risk_metrics,
-                rules,
-                risk_guard,
-                persistent_health,
-                latest_alert_backtest_status,
-            )
+            # Rendering a filtered account must stay read-only.  Previously
+            # every filter change updated alert episodes for every displayed
+            # strategy, turning a simple GET into dozens of SQLite writes and
+            # serialising account switches behind the refresh worker.  The
+            # worker keeps alert episodes current; interactive requests only
+            # read the latest persisted episodes.
+            if sync_alerts:
+                _, active_alerts = alert_engine.evaluate_strategy(
+                    conn,
+                    strategy_id,
+                    strategy_trades + historical_all,
+                    risk_metrics,
+                    rules,
+                    risk_guard,
+                    persistent_health,
+                    latest_alert_backtest_status,
+                )
+            else:
+                active_alerts = alert_engine.active_episodes(conn, strategy_id)
             health = alert_engine.merge_health(health, active_alerts)
             relevant_terminals = [
                 terminal for terminal in terminal_rows
@@ -1606,7 +1661,11 @@ def journal_analysis_data(
     start_msc, end_msc = _window_bounds(window, start, end)
     selected_account = str(account or "").strip()
     result: list[dict[str, Any]] = []
-    seen: set[tuple[int, int, int, int, str]] = set()
+    # MT5 tickets identify a deal within a broker account, not within one of
+    # Dashboard's terminal registrations. A VPS, its previous local mirror,
+    # and an archive may therefore all contain the same deal. The journal is
+    # account-facing, so it must not show those mirror copies as trades.
+    seen: set[tuple[str, int] | tuple[str, int, int, int, str]] = set()
     attributed_account_deals: set[tuple[str, int]] = set()
     mapped_account_deals: set[tuple[str, int]] = set()
     with session() as conn:
@@ -1701,11 +1760,19 @@ def journal_analysis_data(
                     or (selected_assets is not None and trade_asset not in selected_assets)
                 ):
                     continue
-                key = (strategy_id, int(trade.get("terminal_id") or 0), int(trade.get("position_id") or 0), int(trade.get("deal_ticket") or 0), str(trade.get("source_role") or ""))
+                deal_ticket = int(trade.get("deal_ticket") or 0)
+                key = (
+                    (source_account, deal_ticket)
+                    if source_account and deal_ticket
+                    else (
+                        str(strategy_id), int(trade.get("terminal_id") or 0),
+                        int(trade.get("position_id") or 0), deal_ticket,
+                        str(trade.get("source_role") or ""),
+                    )
+                )
                 if key in seen:
                     continue
                 seen.add(key)
-                deal_ticket = int(trade.get("deal_ticket") or 0)
                 if deal_ticket:
                     attributed_account_deals.add((source_account, deal_ticket))
                 result.append({
@@ -1824,7 +1891,7 @@ def _run_worker_cycle() -> bool:
         for name, action in (
             ("sync", sync_all),
             ("terminal_events", terminal_events.sync_terminal_events),
-            ("inventory", bot_inventory.scan),
+            ("inventory", _scan_inventory_and_invalidate_candidates),
             ("dashboard", lambda: dashboard_data("all")),
         ):
             phase_started = time.perf_counter()
@@ -1850,10 +1917,17 @@ def _worker(stop_event: threading.Event) -> None:
         stop_event.wait(REFRESH_SECONDS)
 
 
+def _scan_inventory_and_invalidate_candidates() -> dict[str, int]:
+    """Refresh deployment observations and their derived candidate cache."""
+    result = bot_inventory.scan()
+    _invalidate_pending_candidate_cache()
+    return result
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
-    bot_inventory.scan()
+    _scan_inventory_and_invalidate_candidates()
     mt5_backtests.recover_interrupted_runs()
     if DEFAULT_CATALOG.is_file():
         import_catalog(DEFAULT_CATALOG)
@@ -1872,12 +1946,20 @@ async def lifespan(_: FastAPI):
         daemon=True,
         name="backtest-batches",
     )
+    equity_thread = threading.Thread(
+        target=mt5_equity_curve.preload_completed,
+        args=(stop,),
+        daemon=True,
+        name="backtest-equity-preload",
+    )
     thread.start()
     batch_thread.start()
+    equity_thread.start()
     yield
     stop.set()
     thread.join(timeout=2)
     batch_thread.join(timeout=2)
+    equity_thread.join(timeout=2)
 
 
 app = FastAPI(title="Dashboardv1", version="1.0.0", lifespan=lifespan)
@@ -1902,7 +1984,10 @@ def get_dashboard(
     selected_accounts = {account.strip() for account in accounts if account.strip()} if filter_accounts else None
     selected_assets = {asset.strip() for asset in assets if asset.strip()} if filter_assets else None
     started = time.perf_counter()
-    result = dashboard_data(window, start, end, selected_accounts, include_unassigned, selected_assets)
+    result = dashboard_data(
+        window, start, end, selected_accounts, include_unassigned, selected_assets,
+        sync_alerts=False,
+    )
     logger.info(
         "dashboard api duration_ms=%.1f window=%s strategies=%d accounts=%d assets=%d",
         (time.perf_counter() - started) * 1000,
@@ -2929,7 +3014,9 @@ def operational_identity_repair(payload: OperationalIdentityRepair) -> dict[str,
 @app.post("/api/mappings/confirm")
 def mapping_confirm(payload: MappingConfirm) -> dict[str, Any]:
     try:
-        return confirm_mapping(payload.model_dump())
+        result = confirm_mapping(payload.model_dump())
+        _invalidate_pending_candidate_cache()
+        return result
     except KeyError as exc:
         raise HTTPException(404, exc.args[0]) from exc
     except (ValueError, SSHBridgeError) as exc:
@@ -2975,7 +3062,9 @@ def refresh_terminal_events() -> dict[str, Any]:
 
 @app.post("/api/mappings/auto-confirm")
 def mapping_auto_confirm() -> dict[str, int]:
-    return auto_confirm_suggestions()
+    result = auto_confirm_suggestions()
+    _invalidate_pending_candidate_cache()
+    return result
 
 
 @app.get("/api/bot-inventory/status")
@@ -2985,7 +3074,9 @@ def bot_inventory_status() -> dict[str, Any]:
 
 @app.post("/api/bot-inventory/scan")
 def scan_bot_inventory() -> dict[str, int]:
-    return bot_inventory.scan()
+    result = bot_inventory.scan()
+    _invalidate_pending_candidate_cache()
+    return result
 
 
 @app.get("/api/bot-inventory/candidates")
@@ -3209,6 +3300,26 @@ def get_backtest_report(run_id: int) -> FileResponse:
         report,
         media_type="text/html",
         headers={"Content-Disposition": f'inline; filename="{report.name}"'},
+    )
+
+
+@app.get("/api/backtests/{run_id}/equity-curve")
+def get_backtest_equity_curve(run_id: int) -> FileResponse:
+    try:
+        run = mt5_backtests._run_row(run_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    source = mt5_equity_curve.find_csv(run)
+    if not source:
+        raise HTTPException(404, "No CSV report is available to generate the equity curve")
+    try:
+        equity = mt5_equity_curve.generate(source)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(422, f"Could not generate equity curve: {exc}") from exc
+    return FileResponse(
+        equity,
+        media_type="text/html",
+        headers={"Content-Disposition": f'inline; filename="{equity.name}"'},
     )
 
 
