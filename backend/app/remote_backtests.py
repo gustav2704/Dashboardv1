@@ -331,7 +331,12 @@ $logTail=if($latestLog){{(Get-Content -LiteralPath $latestLog.FullName -Tail 100
     if result["status"] != 0:
         raise SSHBridgeError(result["error"] or "Remote storage preflight failed")
     payload = json.loads(result["output"].strip().splitlines()[-1])
-    safe, reason = safety_preflight()
+    # Keep the status endpoint consistent with the execution gate.  The
+    # portable Darwinex-Demo runner is explicitly isolated and authorized;
+    # live positions/orders must still block non-isolated maintenance, but
+    # they must not make an authorized isolated runner appear unusable.
+    authorized = isolated_runner_authorized()
+    safe, reason = safety_preflight(authorized_isolated_runner=authorized)
     return {
         **payload,
         "target": REMOTE_BACKTEST_TARGET["name"],
@@ -339,6 +344,7 @@ $logTail=if($latestLog){{(Get-Content -LiteralPath $latestLog.FullName -Tail 100
         "server": REMOTE_BACKTEST_TARGET["server"],
         "runner_root": root,
         "minimum_free_bytes": REMOTE_BACKTEST_TARGET["minimum_free_bytes"],
+        "isolated_runner_authorized": authorized,
         "safe_to_run": safe,
         "safety_blocker": reason or None,
     }

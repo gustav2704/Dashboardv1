@@ -3309,9 +3309,9 @@ def get_backtest_equity_curve(run_id: int) -> FileResponse:
         run = mt5_backtests._run_row(run_id)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
-    source = mt5_equity_curve.find_csv(run)
+    source = mt5_equity_curve.find_source(run)
     if not source:
-        raise HTTPException(404, "No CSV report is available to generate the equity curve")
+        raise HTTPException(404, "No CSV or transaction table is available to generate the equity curve")
     try:
         equity = mt5_equity_curve.generate(source)
     except (OSError, ValueError) as exc:
