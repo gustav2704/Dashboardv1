@@ -119,6 +119,13 @@ def test_strategy_status_round_trip_and_dashboard_persistence(tmp_path, monkeypa
     assert replaced.status_code == 200
     assert replaced.json()["status"] == "candidate_live"
 
+    axi = client.put(f"/api/strategies/{strategy_id}/status", json={"status": "axi_live"})
+    assert axi.status_code == 200
+    assert axi.json()["status"] == "axi_live"
+    with db.connect() as conn:
+        persisted = conn.execute("SELECT strategy_status FROM strategies WHERE id=?", (strategy_id,)).fetchone()
+    assert persisted["strategy_status"] == "axi_live"
+
     unchecked = client.put(f"/api/strategies/{strategy_id}/status", json={"status": ""})
     assert unchecked.status_code == 200
     assert unchecked.json() == {"strategy_id": strategy_id, "status": ""}

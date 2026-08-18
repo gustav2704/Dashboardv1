@@ -1,0 +1,1730 @@
+[
+  {
+    "id": 507,
+    "name": "XAU_B_bar15_9_32_Strategy 5.14.71",
+    "account": "7396577",
+    "server": "",
+    "symbol": "XAU",
+    "origin": "excel",
+    "retired": 0,
+    "mappings": 0,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart16.chr",
+        "GBPUSD",
+        "M1",
+        "EA_SuperTrend_MA200_ATR_2.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 144,
+    "name": "AltisimaPrecision",
+    "account": "10025867",
+    "server": "Axi-US50-Demo",
+    "symbol": "BTCUSD",
+    "origin": "history_import",
+    "retired": 0,
+    "mappings": 3,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart16.chr",
+        "GBPUSD",
+        "M1",
+        "EA_SuperTrend_MA200_ATR_2.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 508,
+    "name": "AltisimaPrecision",
+    "account": "10025867",
+    "server": "Axi-US50-Demo",
+    "symbol": "EURUSD",
+    "origin": "mt5+sqx",
+    "retired": 0,
+    "mappings": 2,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart16.chr",
+        "GBPUSD",
+        "M1",
+        "EA_SuperTrend_MA200_ATR_2.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 274,
+    "name": "AltisimaPrecision · BTCUSD · MN4",
+    "account": "10025867",
+    "server": "Axi-US50-Demo",
+    "symbol": "BTCUSD",
+    "origin": "operational_identity_repair",
+    "retired": 0,
+    "mappings": 3,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart16.chr",
+        "GBPUSD",
+        "M1",
+        "EA_SuperTrend_MA200_ATR_2.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 277,
+    "name": "AltisimaPrecision · XAUUSD · MN216062026",
+    "account": "10025867",
+    "server": "Axi-US50-Demo",
+    "symbol": "XAUUSD",
+    "origin": "operational_identity_repair",
+    "retired": 0,
+    "mappings": 3,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart16.chr",
+        "GBPUSD",
+        "M1",
+        "EA_SuperTrend_MA200_ATR_2.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 152,
+    "name": "CCI_USDJPY",
+    "account": "10025867",
+    "server": "Axi-US50-Demo",
+    "symbol": "USDJPY",
+    "origin": "history_import",
+    "retired": 0,
+    "mappings": 4,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart16.chr",
+        "GBPUSD",
+        "M1",
+        "EA_SuperTrend_MA200_ATR_2.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 153,
+    "name": "DHL",
+    "account": "10025867",
+    "server": "Axi-US50-Demo",
+    "symbol": "XAUUSD",
+    "origin": "history_import",
+    "retired": 0,
+    "mappings": 3,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart16.chr",
+        "GBPUSD",
+        "M1",
+        "EA_SuperTrend_MA200_ATR_2.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 295,
+    "name": "GBPAUD_Domingo_PASSEDStrategy_",
+    "account": "10025867",
+    "server": "Axi-US50-Demo",
+    "symbol": "GBPAUD",
+    "origin": "mt5",
+    "retired": 0,
+    "mappings": 2,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart16.chr",
+        "GBPUSD",
+        "M1",
+        "EA_SuperTrend_MA200_ATR_2.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 510,
+    "name": "Keltnerv2_XAU",
+    "account": "10025867",
+    "server": "Axi-US50-Demo",
+    "symbol": "XAUUSD",
+    "origin": "mt5+sqx",
+    "retired": 0,
+    "mappings": 4,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart16.chr",
+        "GBPUSD",
+        "M1",
+        "EA_SuperTrend_MA200_ATR_2.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 511,
+    "name": "MomentA BuyStop",
+    "account": "10025867",
+    "server": "Axi-US50-Demo",
+    "symbol": "XAUUSD",
+    "origin": "mt5+sqx",
+    "retired": 0,
+    "mappings": 2,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart16.chr",
+        "GBPUSD",
+        "M1",
+        "EA_SuperTrend_MA200_ATR_2.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 358,
+    "name": "PPM",
+    "account": "10025867",
+    "server": "Axi-US50-Demo",
+    "symbol": "USTECH",
+    "origin": "mt5+sqx",
+    "retired": 0,
+    "mappings": 2,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart16.chr",
+        "GBPUSD",
+        "M1",
+        "EA_SuperTrend_MA200_ATR_2.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 288,
+    "name": "ParabolicDailyHL",
+    "account": "10025867",
+    "server": "Axi-US50-Demo",
+    "symbol": "USDJPY",
+    "origin": "mt5+sqx",
+    "retired": 0,
+    "mappings": 2,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart07.chr",
+        "USDJPY",
+        "M1",
+        "ParabolicDailyHLv2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 287,
+    "name": "TemaEA_V2",
+    "account": "10025867",
+    "server": "Axi-US50-Demo",
+    "symbol": "XAUUSD",
+    "origin": "mt5+sqx",
+    "retired": 0,
+    "mappings": 4,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart16.chr",
+        "GBPUSD",
+        "M1",
+        "EA_SuperTrend_MA200_ATR_2.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 150,
+    "name": "VX",
+    "account": "10025867",
+    "server": "Axi-US50-Demo",
+    "symbol": "XAGUSD",
+    "origin": "history_import",
+    "retired": 0,
+    "mappings": 3,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart16.chr",
+        "GBPUSD",
+        "M1",
+        "EA_SuperTrend_MA200_ATR_2.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 242,
+    "name": "AltisimaPrecision",
+    "account": "3000097316",
+    "server": "Darwinex-Demo",
+    "symbol": "EURUSD",
+    "origin": "mt5",
+    "retired": 0,
+    "mappings": 2,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart16.chr",
+        "GBPUSD",
+        "M1",
+        "EA_SuperTrend_MA200_ATR_2.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 253,
+    "name": "AltisimaPrecision",
+    "account": "3000097316",
+    "server": "Darwinex-Demo",
+    "symbol": "XAUUSD",
+    "origin": "mt5",
+    "retired": 0,
+    "mappings": 2,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart16.chr",
+        "GBPUSD",
+        "M1",
+        "EA_SuperTrend_MA200_ATR_2.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 120,
+    "name": "Aurum_BreakStrike",
+    "account": "3000097316",
+    "server": "Darwinex-Demo",
+    "symbol": "XAUUSD",
+    "origin": "mt5",
+    "retired": 0,
+    "mappings": 4,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart16.chr",
+        "GBPUSD",
+        "M1",
+        "EA_SuperTrend_MA200_ATR_2.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 354,
+    "name": "BestMACD Strategy",
+    "account": "3000097316",
+    "server": "Darwinex-Demo",
+    "symbol": "NDX",
+    "origin": "mt5",
+    "retired": 0,
+    "mappings": 2,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart16.chr",
+        "GBPUSD",
+        "M1",
+        "EA_SuperTrend_MA200_ATR_2.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 121,
+    "name": "GBPAUD_Domingo_PASSEDStrategy_",
+    "account": "3000097316",
+    "server": "Darwinex-Demo",
+    "symbol": "GBPAUD",
+    "origin": "mt5",
+    "retired": 0,
+    "mappings": 4,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart16.chr",
+        "GBPUSD",
+        "M1",
+        "EA_SuperTrend_MA200_ATR_2.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 248,
+    "name": "GannPullbackBuyStop",
+    "account": "3000097316",
+    "server": "Darwinex-Demo",
+    "symbol": "XAUUSD",
+    "origin": "mt5",
+    "retired": 0,
+    "mappings": 4,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart16.chr",
+        "GBPUSD",
+        "M1",
+        "EA_SuperTrend_MA200_ATR_2.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 141,
+    "name": "Keltnerv2_XAU",
+    "account": "3000097316",
+    "server": "Darwinex-Demo",
+    "symbol": "XAUUSD",
+    "origin": "mt5",
+    "retired": 0,
+    "mappings": 7,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart16.chr",
+        "GBPUSD",
+        "M1",
+        "EA_SuperTrend_MA200_ATR_2.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 146,
+    "name": "MomentA BuyStop",
+    "account": "3000097316",
+    "server": "Darwinex-Demo",
+    "symbol": "XAUUSD",
+    "origin": "history_import",
+    "retired": 0,
+    "mappings": 2,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart16.chr",
+        "GBPUSD",
+        "M1",
+        "EA_SuperTrend_MA200_ATR_2.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 246,
+    "name": "MomentA BuyStop",
+    "account": "3000097316",
+    "server": "Darwinex-Demo",
+    "symbol": "USDJPY",
+    "origin": "mt5",
+    "retired": 0,
+    "mappings": 2,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart16.chr",
+        "GBPUSD",
+        "M1",
+        "EA_SuperTrend_MA200_ATR_2.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 140,
+    "name": "ORB",
+    "account": "3000097316",
+    "server": "Darwinex-Demo",
+    "symbol": "NDX",
+    "origin": "mt5",
+    "retired": 0,
+    "mappings": 2,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart16.chr",
+        "GBPUSD",
+        "M1",
+        "EA_SuperTrend_MA200_ATR_2.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 245,
+    "name": "PPM",
+    "account": "3000097316",
+    "server": "Darwinex-Demo",
+    "symbol": "NDX",
+    "origin": "mt5",
+    "retired": 0,
+    "mappings": 2,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart16.chr",
+        "GBPUSD",
+        "M1",
+        "EA_SuperTrend_MA200_ATR_2.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 155,
+    "name": "ParabolicDailyHL",
+    "account": "3000097316",
+    "server": "Darwinex-Demo",
+    "symbol": "USDJPY",
+    "origin": "history_import",
+    "retired": 0,
+    "mappings": 2,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart07.chr",
+        "USDJPY",
+        "M1",
+        "ParabolicDailyHLv2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 243,
+    "name": "ST+RSI Buy",
+    "account": "3000097316",
+    "server": "Darwinex-Demo",
+    "symbol": "GBPUSD",
+    "origin": "mt5",
+    "retired": 0,
+    "mappings": 7,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart16.chr",
+        "GBPUSD",
+        "M1",
+        "EA_SuperTrend_MA200_ATR_2.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 125,
+    "name": "Strategy_5_26_117",
+    "account": "3000097316",
+    "server": "Darwinex-Demo",
+    "symbol": "US30",
+    "origin": "mt5+sqx",
+    "retired": 0,
+    "mappings": 4,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart06.chr",
+        "GDAXI",
+        "M1",
+        "GER30_optimiza.ex5",
+        true
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 343,
+    "name": "Strategy_5_26_117",
+    "account": "3000097316",
+    "server": "Darwinex-Demo",
+    "symbol": "GDAXI",
+    "origin": "mt5",
+    "retired": 0,
+    "mappings": 3,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart06.chr",
+        "GDAXI",
+        "M1",
+        "GER30_optimiza.ex5",
+        true
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 149,
+    "name": "TemaEA_V2",
+    "account": "3000097316",
+    "server": "Darwinex-Demo",
+    "symbol": "XAUUSD",
+    "origin": "history_import",
+    "retired": 0,
+    "mappings": 2,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart16.chr",
+        "GBPUSD",
+        "M1",
+        "EA_SuperTrend_MA200_ATR_2.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 254,
+    "name": "US30v4 BUY",
+    "account": "3000097316",
+    "server": "Darwinex-Demo",
+    "symbol": "US30",
+    "origin": "mt5",
+    "retired": 0,
+    "mappings": 6,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart16.chr",
+        "GBPUSD",
+        "M1",
+        "EA_SuperTrend_MA200_ATR_2.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 249,
+    "name": "VWAP",
+    "account": "3000097316",
+    "server": "Darwinex-Demo",
+    "symbol": "XAUUSD",
+    "origin": "mt5",
+    "retired": 0,
+    "mappings": 4,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart16.chr",
+        "GBPUSD",
+        "M1",
+        "EA_SuperTrend_MA200_ATR_2.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 124,
+    "name": "VitalSigns",
+    "account": "3000097316",
+    "server": "Darwinex-Demo",
+    "symbol": "SPX500",
+    "origin": "mt5",
+    "retired": 0,
+    "mappings": 4,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart16.chr",
+        "GBPUSD",
+        "M1",
+        "EA_SuperTrend_MA200_ATR_2.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 137,
+    "name": "GBPAUD_Domingo_2_65_160_REAL",
+    "account": "4000094894",
+    "server": "Darwinex-Live",
+    "symbol": "GBPAUD",
+    "origin": "mt5",
+    "retired": 0,
+    "mappings": 3,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart16.chr",
+        "GBPUSD",
+        "M1",
+        "EA_SuperTrend_MA200_ATR_2.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 513,
+    "name": "US30v4 BUY",
+    "account": "4000094894",
+    "server": "Darwinex-Live",
+    "symbol": "WS30",
+    "origin": "mt5+sqx",
+    "retired": 0,
+    "mappings": 2,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart16.chr",
+        "GBPUSD",
+        "M1",
+        "EA_SuperTrend_MA200_ATR_2.ex5",
+        false
+      ]
+    ]
+  },
+  {
+    "id": 126,
+    "name": "BreakoutLWMA",
+    "account": "3000097316",
+    "server": "InfinoxLimited-MT5Demo",
+    "symbol": "XAUUSD",
+    "origin": "mt5",
+    "retired": 0,
+    "mappings": 3,
+    "evidence": [
+      [
+        "145",
+        "1D8B0F5D",
+        "chart01.chr",
+        "NDX",
+        "M1",
+        "Parabolic_Pivot.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart09.chr",
+        "XAUUSD",
+        "M5",
+        "AltisimaPrecision-V2.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart10.chr",
+        "XAUUSD",
+        "M1",
+        "GannPullbackBuyOnlyEA_v8.ex5",
+        false
+      ],
+      [
+        "145",
+        "1D8B0F5D",
+        "chart16.chr",
+        "GBPUSD",
+        "M1",
+        "EA_SuperTrend_MA200_ATR_2.ex5",
+        false
+      ]
+    ]
+  }
+]

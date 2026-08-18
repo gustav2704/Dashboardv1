@@ -1,4 +1,4 @@
-export type StrategyStatus = '' | 'live' | 'monitor' | 'candidate_live'
+export type StrategyStatus = '' | 'live' | 'monitor' | 'candidate_live' | 'axi_live'
 export type StrategyStatusFilter = 'all' | StrategyStatus
 
 type StatusStrategy = { strategy_status: StrategyStatus }

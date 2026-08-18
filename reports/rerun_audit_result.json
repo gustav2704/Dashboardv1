@@ -1,0 +1,378 @@
+{
+  "eligible_ids": [
+    452,
+    453,
+    454,
+    455,
+    132,
+    135,
+    136,
+    291,
+    374,
+    1,
+    2,
+    5,
+    31,
+    92,
+    114,
+    138,
+    297,
+    403,
+    404,
+    473,
+    475,
+    476
+  ],
+  "blocked": [
+    {
+      "id": 153,
+      "name": "DHL",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 4,
+      "name": "NAQ_MACD_B_9_26_Strategy 3.3.15(1)dwnx",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 7,
+      "name": "XAU_Strategy 3.5.57dwnx",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 11,
+      "name": "WF Matrix - Strategy 5.11.65",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 23,
+      "name": "DAXStrategy 1.12.20(2)dwnx",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 24,
+      "name": "DAXStrategy 3.11.24dwnx",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 30,
+      "name": "NAQ_B_Adx_3.14.14dwnx",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 71,
+      "name": "Strategy 5.12.48",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 119,
+      "name": "WF_Matrix_Strategy_3_10_85_XAU",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 120,
+      "name": "Aurum_BreakStrike",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 123,
+      "name": "Strategy_1_64_191",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 124,
+      "name": "VitalSigns",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 125,
+      "name": "Strategy_5_26_117 [59-2]",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 126,
+      "name": "BreakoutLWMA EA v5",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 141,
+      "name": "Keltnerv2_XAU",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 143,
+      "name": "NN_15_991531386_L_Ke_CF_SQX",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 148,
+      "name": "Hobbiecode_ORB_Strategy",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 155,
+      "name": "ParabolicDailyHL",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 243,
+      "name": "ST+RSI Buy",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 245,
+      "name": "PPM",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 253,
+      "name": "AltisimaPrecision [113-2]",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 254,
+      "name": "US30v4 BUY",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 257,
+      "name": "USDJPY_M5_PERZJUN_2_39_135",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 289,
+      "name": "Strategy 5.14.71",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 343,
+      "name": "Strategy_5_26_117 [113-2]",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 347,
+      "name": "DosVelas_eurusd_m5",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 348,
+      "name": "DosVelas_naq_d1",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 349,
+      "name": "DosVelas_EURUSD_m15",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 350,
+      "name": "DosVelas_naq_m5",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 351,
+      "name": "DosVelas_eurusd_h4",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 352,
+      "name": "DosVelas_naq_h1",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 353,
+      "name": "DosVelas_naq_m15",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 354,
+      "name": "BestMACD Strategy",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 355,
+      "name": "SMAHours_V01_GBPUSD_M15",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 357,
+      "name": "Vela aperturaNY_NAQ_H1",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 361,
+      "name": "DosVelas_eurusd_m30",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 362,
+      "name": "BB_GBPJPY_H4_LONG_V01",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 366,
+      "name": "BB_EURUSD_Short_V01",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 367,
+      "name": "3GreenCandles_EURUSD_H1_Short",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 368,
+      "name": "SMA_RSI_EURUSD_M5",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 369,
+      "name": "SMA_RSI_GBPJPY_M5",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 370,
+      "name": "BB_GBPUSD_LONG_V01",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 371,
+      "name": "BB_DAX_H1",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 372,
+      "name": "BB_NQ_LONG_V01",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 388,
+      "name": "USDJPY_L_H1_Strategy 5.15.36",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 279,
+      "name": "DAX_3_11_24_REAL",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 375,
+      "name": "WF Matrix - NAQStrategy 1.11.24dwnx",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 447,
+      "name": "TemaEA_V2",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 9,
+      "name": "XAUWF Matrix - Strategy 3.1.69(1)dwnx",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 14,
+      "name": "Strategy 2.1.63",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 15,
+      "name": "WF Matrix - Strategy 4.1.62(1)",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 16,
+      "name": "WF Matrix - XAU_Strategy 5.8.71",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 17,
+      "name": "WF Matrix - XAU_Strategy 3.9.66",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 19,
+      "name": "XAU_Strategy 4.3.64",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 20,
+      "name": "WF Matrix - XAU_Strategy 1.4.70",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 25,
+      "name": "WF Matrix - DAXStrategy 1.9.26(3)dwnx",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 26,
+      "name": "WF Matrix - DAXStrategy 4.8.16dwnx",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 33,
+      "name": "Strategy 5.13.42",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 34,
+      "name": "Strategy 5.15.46",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 72,
+      "name": "Strategy 5.14.40",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 91,
+      "name": "Strategy 3.8.23(1)(1)",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 109,
+      "name": "XAU_M15_GWF_Opt._Strategy_3_69",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 111,
+      "name": "DAXStrategy 2.1.20dwnx",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 112,
+      "name": "DAXStrategy 3.11.24dwnx",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 130,
+      "name": "WF Matrix - XAU_Strategy 2.11.36",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 356,
+      "name": "XAU_M15_3_69_192_opt",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 365,
+      "name": "XAU_M15_1_77_154_opt",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 481,
+      "name": "WF Optimization - EURUSD M5 SH JULStrategy 2.57.186",
+      "reason": "EX5 not found beside the confirmed chart profile: WF Optimization - EURUSD M5 SH JULStrategy 2.57.186.ex5"
+    },
+    {
+      "id": 484,
+      "name": "WF Matrix - XAU_Strategy 2.11.36 [MT5 2]",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 507,
+      "name": "WF Matrix -9_32 Strategy 5.14.71",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    }
+  ]
+}

@@ -5,6 +5,10 @@ data/*.db
 data/*.db-*
 data/exports/
 data/backtests/
+data/backups/
+data/chr_all/
+data/chr_probe/
+backend/tmp_pairs_test/
 *.log
 *.tsbuildinfo
 __pycache__/

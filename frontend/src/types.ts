@@ -90,7 +90,7 @@ export type Strategy = {
   id: number; identity_strategy_id: number; symbol: string; asset_key: string; sqx_name: string; mql5_name: string; display_name: string; display_name_source: string | null; account_login: string; timeframe: string | null;
   timeframe_source: 'terminal_profile' | 'sqx' | 'missing';
   lineage_accounts: { current: string[]; predecessor: string[] };
-  origin: string; last_observed_at?: string; note: string; note_updated_at: string | null; selection: boolean; strategy_status: '' | 'live' | 'monitor' | 'candidate_live'; no_mm_accepted: boolean; no_mm_accepted_at: string | null;
+  origin: string; last_observed_at?: string; note: string; note_updated_at: string | null; selection: boolean; strategy_status: '' | 'live' | 'monitor' | 'candidate_live' | 'axi_live'; no_mm_accepted: boolean; no_mm_accepted_at: string | null;
   state: string; link_state: 'linked' | 'candidate' | 'sqx_catalog' | 'sqx_only' | 'mt5_only' | 'catalog_only';
   deployment_state: 'attached_active' | 'attached_inactive' | 'observed' | null;
   activity_state: 'with_recent_trades' | 'without_recent_trades' | 'undetermined' | 'not_deployed';
@@ -102,6 +102,7 @@ export type Strategy = {
   backtest: BacktestSummary; backtest_risk?: BacktestSummary['risk_audit']; backtest_risk_alert?: boolean; mapping_count: number; historical_mapping_count: number;
   magic_numbers: number[]; historical_magic_numbers: number[]; primary_magic_number: number | null;
   magic_number_details: Array<{ magic: number; roles: string[]; trades: number; first_trade_at: string | null; last_trade_at: string | null; confirmed: boolean }>;
+  paired_ids: number[];
   recent_equity_curve: Array<{ net_profit: number; equity: number }>;
   operational_identity: { server: string; account_login: string; asset_key: string; expert_name: string; expert_key: string; symbol: string } | null;
   identity_conflicts: Array<{ identity: { server: string; account_login: string; asset_key: string; expert_key: string }; primary: boolean; mapping_ids: number[]; roles: string[] }>;

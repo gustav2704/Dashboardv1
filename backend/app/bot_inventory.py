@@ -234,6 +234,42 @@ def _is_primary(path: Path) -> bool:
     )
 
 
+def _auto_confirm_safe_deployments(conn: Any, account: str, now: str) -> int:
+    """Confirm freshly imported deployments that uniquely match an existing
+    confirmed live mapping (account/server/symbol/magic).
+
+    The CSV import path records VPS bots as pending candidates (confirmed=0),
+    and the dashboard only renders deployments where confirmed=1, so known bots
+    previously stayed invisible until a manual "Confirmar vínculo" step. This
+    mirrors the safe-match rule the evidence-ZIP path already applies
+    (``_safe_evidence_strategy``): when exactly one confirmed live mapping owns
+    the same account/server/symbol/magic, attach the deployment to it now.
+    Genuinely new or ambiguous bots are left as candidates for manual review.
+    """
+    confirmed = 0
+    for deployment in conn.execute(
+        """SELECT d.id,d.account_login,d.server,d.symbol,d.magic
+           FROM bot_deployments d
+           WHERE d.account_login=? AND d.confirmed=0 AND d.magic IS NOT NULL
+             AND d.strategy_id IS NULL""",
+        (account,),
+    ):
+        matches = conn.execute(
+            """SELECT DISTINCT m.strategy_id FROM mappings m
+               JOIN terminals t ON t.id=m.terminal_id
+               WHERE m.confirmed=1 AND m.account_login=? AND m.symbol=? AND m.magic=?
+                 AND LOWER(COALESCE(t.server,''))=LOWER(?)""",
+            (deployment["account_login"], deployment["symbol"], deployment["magic"], deployment["server"]),
+        ).fetchall()
+        if len(matches) == 1:
+            conn.execute(
+                "UPDATE bot_deployments SET strategy_id=?,confirmed=1,updated_at=? WHERE id=?",
+                (int(matches[0]["strategy_id"]), now, deployment["id"]),
+            )
+            confirmed += 1
+    return confirmed
+
+
 def import_file(path: Path) -> dict[str, Any]:
     path = path.resolve()
     payload = path.read_bytes()
@@ -331,6 +367,7 @@ def import_file(path: Path) -> dict[str, Any]:
                         import_id, imported_at, imported_at,
                     ),
                 )
+            _auto_confirm_safe_deployments(conn, account, imported_at)
         return {"id": import_id, "status": "imported", "row_count": len(rows), "skipped": False}
     except Exception as exc:
         with session() as conn:

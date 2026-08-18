@@ -165,12 +165,20 @@ class _TableRows(HTMLParser):
 def _read_html_deals(source: Path) -> tuple[float, list[dict[str, Any]]]:
     parser = _TableRows()
     parser.feed(_decode_csv(source))
+    def _is_deals_header(row: list[str]) -> bool:
+        # A transaction ("Deals") header has a time column, a direction column
+        # and a profit/balance pair.  Match on the column semantic roles so both
+        # the Spanish (Fecha/Hora ... Beneficio/Balance) and English
+        # (Time ... Profit/Balance) MT5 report layouts are recognized without
+        # accidentally consuming the similarly-shaped "Orders" table.
+        if len(row) < 13:
+            return False
+        if str(row[0]).casefold() not in {"fecha/hora", "date/time", "time"}:
+            return False
+        return str(row[10]).casefold() in {"profit", "beneficio"} and str(row[11]).casefold() in {"balance", "saldo"}
+
     header_index = next(
-        (
-            index for index, row in enumerate(parser.rows)
-            if len(row) >= 13
-            and str(row[0]).casefold() in {"fecha/hora", "date/time"}
-        ),
+        (index for index, row in enumerate(parser.rows) if _is_deals_header(row)),
         -1,
     )
     if header_index < 0:

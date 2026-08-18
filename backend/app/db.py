@@ -110,7 +110,7 @@ CREATE TABLE IF NOT EXISTS strategies (
   note_updated_at TEXT,
   monitoring_selected INTEGER NOT NULL DEFAULT 0,
   favorite INTEGER NOT NULL DEFAULT 0,
-  strategy_status TEXT NOT NULL DEFAULT '' CHECK(strategy_status IN ('', 'live', 'monitor', 'candidate_live')),
+  strategy_status TEXT NOT NULL DEFAULT '' CHECK(strategy_status IN ('', 'live', 'monitor', 'candidate_live', 'axi_live')),
   no_mm_accepted INTEGER NOT NULL DEFAULT 0,
   no_mm_accepted_at TEXT,
   backtest_risk_accepted_run_id INTEGER,
@@ -118,6 +118,7 @@ CREATE TABLE IF NOT EXISTS strategies (
   operational_server TEXT,
   operational_asset_key TEXT,
   operational_expert_key TEXT,
+  paired_strategy_ids TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   UNIQUE(sqx_name, account_login)
 );
@@ -606,6 +607,47 @@ def session(path: Path | None = None) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+def _widen_strategy_status_check(conn: sqlite3.Connection) -> None:
+    """Allow the new 'axi_live' status on databases created with the older CHECK.
+
+    SQLite bakes CHECK constraints into the table definition, so existing
+    databases keep rejecting 'axi_live' until the strategies table is rebuilt.
+    The stored CREATE DDL in sqlite_master already reflects every column
+    (SQLite appends columns added via ALTER TABLE to that text), so derive the
+    replacement table from it and only widen the strategy_status CHECK. Row ids
+    are copied verbatim, so foreign keys to strategies(id) stay intact."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='strategies'"
+    ).fetchone()
+    if row is None or "axi_live" in (row["sql"] or ""):
+        return
+    old_sql = row["sql"]
+    old_check = "CHECK(strategy_status IN ('', 'live', 'monitor', 'candidate_live'))"
+    if old_check not in old_sql:
+        return  # no inline CHECK to widen (column added via ALTER TABLE): nothing to do
+    new_sql = (
+        old_sql.replace(
+            old_check,
+            "CHECK(strategy_status IN ('', 'live', 'monitor', 'candidate_live', 'axi_live'))",
+        )
+        .replace("CREATE TABLE strategies", "CREATE TABLE strategies_new", 1)
+    )
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute("BEGIN")
+        conn.execute(new_sql)
+        conn.execute("INSERT INTO strategies_new SELECT * FROM strategies")
+        conn.execute("DROP TABLE strategies")
+        conn.execute("ALTER TABLE strategies_new RENAME TO strategies")
+        conn.execute("PRAGMA foreign_key_check")
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
+
+
 def init_db(path: Path | None = None) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     EGT_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
@@ -669,6 +711,12 @@ def init_db(path: Path | None = None) -> None:
             conn.execute("ALTER TABLE strategies ADD COLUMN operational_asset_key TEXT")
         if "operational_expert_key" not in strategy_columns:
             conn.execute("ALTER TABLE strategies ADD COLUMN operational_expert_key TEXT")
+        if "paired_strategy_ids" not in strategy_columns:
+            conn.execute(
+                """ALTER TABLE strategies
+                   ADD COLUMN paired_strategy_ids TEXT NOT NULL DEFAULT ''"""
+            )
+        _widen_strategy_status_check(conn)
         conn.execute(
             """CREATE UNIQUE INDEX IF NOT EXISTS idx_strategy_operational_identity
                ON strategies(LOWER(operational_server), account_login,

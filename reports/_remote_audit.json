@@ -1,0 +1,292 @@
+{
+  "counts": {
+    "eligible": 1,
+    "blocked": 39
+  },
+  "candidates": [
+    {
+      "id": 144,
+      "state": "blocked",
+      "account_login": "10025867",
+      "symbol": "BTCUSD",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 150,
+      "state": "blocked",
+      "account_login": "10025867",
+      "symbol": "XAGUSD",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 152,
+      "state": "blocked",
+      "account_login": "10025867",
+      "symbol": "USDJPY",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 274,
+      "state": "blocked",
+      "account_login": "10025867",
+      "symbol": "BTCUSD",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 277,
+      "state": "blocked",
+      "account_login": "10025867",
+      "symbol": "XAUUSD",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 286,
+      "state": "blocked",
+      "account_login": "10025867",
+      "symbol": "EURUSD",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 287,
+      "state": "blocked",
+      "account_login": "10025867",
+      "symbol": "XAUUSD",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 288,
+      "state": "blocked",
+      "account_login": "10025867",
+      "symbol": "USDJPY",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 295,
+      "state": "blocked",
+      "account_login": "10025867",
+      "symbol": "GBPAUD",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 296,
+      "state": "blocked",
+      "account_login": "10025867",
+      "symbol": "XAUUSD",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 358,
+      "state": "blocked",
+      "account_login": "10025867",
+      "symbol": "USTECH",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 436,
+      "state": "blocked",
+      "account_login": "10025867",
+      "symbol": "XAUUSD",
+      "reason": "Several chart profiles match the same operational identity"
+    },
+    {
+      "id": 437,
+      "state": "blocked",
+      "account_login": "10025867",
+      "symbol": "XAUUSD",
+      "reason": "Several chart profiles match the same operational identity"
+    },
+    {
+      "id": 508,
+      "state": "blocked",
+      "account_login": "10025867",
+      "symbol": "EURUSD",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 510,
+      "state": "blocked",
+      "account_login": "10025867",
+      "symbol": "XAUUSD",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 511,
+      "state": "blocked",
+      "account_login": "10025867",
+      "symbol": "XAUUSD",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 140,
+      "state": "blocked",
+      "account_login": "3000097316",
+      "symbol": "NDX",
+      "reason": "No SSH inventory source is registered for this account"
+    },
+    {
+      "id": 146,
+      "state": "blocked",
+      "account_login": "3000097316",
+      "symbol": "XAUUSD",
+      "reason": "No SSH inventory source is registered for this account"
+    },
+    {
+      "id": 149,
+      "state": "blocked",
+      "account_login": "3000097316",
+      "symbol": "XAUUSD",
+      "reason": "No SSH inventory source is registered for this account"
+    },
+    {
+      "id": 157,
+      "state": "blocked",
+      "account_login": "3000097316",
+      "symbol": "WS30",
+      "reason": "No SSH inventory source is registered for this account"
+    },
+    {
+      "id": 242,
+      "state": "blocked",
+      "account_login": "3000097316",
+      "symbol": "EURUSD",
+      "reason": "No SSH inventory source is registered for this account"
+    },
+    {
+      "id": 246,
+      "state": "blocked",
+      "account_login": "3000097316",
+      "symbol": "USDJPY",
+      "reason": "No SSH inventory source is registered for this account"
+    },
+    {
+      "id": 248,
+      "state": "blocked",
+      "account_login": "3000097316",
+      "symbol": "XAUUSD",
+      "reason": "No SSH inventory source is registered for this account"
+    },
+    {
+      "id": 249,
+      "state": "blocked",
+      "account_login": "3000097316",
+      "symbol": "XAUUSD",
+      "reason": "No SSH inventory source is registered for this account"
+    },
+    {
+      "id": 391,
+      "state": "blocked",
+      "account_login": "3000097316",
+      "symbol": "GDAXI",
+      "reason": "No SSH inventory source is registered for this account"
+    },
+    {
+      "id": 435,
+      "state": "blocked",
+      "account_login": "3000097316",
+      "symbol": "XAU",
+      "reason": "No SSH inventory source is registered for this account"
+    },
+    {
+      "id": 509,
+      "state": "blocked",
+      "account_login": "3000097316",
+      "symbol": "NDX",
+      "reason": "No SSH inventory source is registered for this account"
+    },
+    {
+      "id": 515,
+      "state": "blocked",
+      "account_login": "3000097316",
+      "symbol": "USDJPY",
+      "reason": "No SSH inventory source is registered for this account"
+    },
+    {
+      "id": 134,
+      "state": "blocked",
+      "account_login": "4000094894",
+      "symbol": "XAUUSD",
+      "reason": "No SSH inventory source is registered for this account"
+    },
+    {
+      "id": 360,
+      "state": "blocked",
+      "account_login": "4000094894",
+      "symbol": "XAUUSD",
+      "reason": "No SSH inventory source is registered for this account"
+    },
+    {
+      "id": 512,
+      "state": "blocked",
+      "account_login": "4000094894",
+      "symbol": "USDJPY",
+      "reason": "No SSH inventory source is registered for this account"
+    },
+    {
+      "id": 513,
+      "state": "blocked",
+      "account_login": "4000094894",
+      "symbol": "WS30",
+      "reason": "No SSH inventory source is registered for this account"
+    },
+    {
+      "id": 514,
+      "state": "blocked",
+      "account_login": "4000094894",
+      "symbol": "XAUUSD",
+      "reason": "No SSH inventory source is registered for this account"
+    },
+    {
+      "id": 430,
+      "state": "eligible",
+      "account_login": "7396577",
+      "symbol": "US100",
+      "timeframe": "H1",
+      "remote_expert_path": "C:\\Users\\Administrador\\AppData\\Roaming\\MetaQuotes\\Terminal\\7B992C9F4C8405A86F0774DD4193BFFE\\MQL5\\Experts\\WF Matrix - NAQStrategy 1.11.24dwnx.ex5",
+      "source_terminal_id": 216,
+      "magic": 1,
+      "reason": "Exact VPS EX5 and chart configuration resolved"
+    },
+    {
+      "id": 431,
+      "state": "blocked",
+      "account_login": "7396577",
+      "symbol": "XAUUSD.cyr",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 432,
+      "state": "blocked",
+      "account_login": "7396577",
+      "symbol": "XAUUSD.cyr",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 433,
+      "state": "blocked",
+      "account_login": "7396577",
+      "symbol": "XAUUSD.cyr",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 434,
+      "state": "blocked",
+      "account_login": "7396577",
+      "symbol": "XAUUSD.cyr",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    },
+    {
+      "id": 472,
+      "state": "blocked",
+      "account_login": "7396577",
+      "symbol": "BTCUSD",
+      "reason": "Several different EX5 builds have the same confirmed chart identity"
+    },
+    {
+      "id": 497,
+      "state": "blocked",
+      "account_login": "7396577",
+      "symbol": "XAUUSD.cyr",
+      "reason": "No exact chart profile matches EX5, symbol, Magic and comment"
+    }
+  ]
+}

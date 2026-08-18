@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Activity, Archive, BookOpen, CandlestickChart, Eye, EyeOff, HelpCircle, LayoutDashboard, Pause, Play, RefreshCw, RotateCcw, Settings as SettingsIcon, Square, TrendingUp, Trash2, TriangleAlert, X } from 'lucide-react'
+import { Component, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Activity, Archive, BookOpen, CandlestickChart, Eye, EyeOff, HelpCircle, LayoutDashboard, PanelRight, PanelRightOpen, Pause, Play, RefreshCw, RotateCcw, Settings as SettingsIcon, Square, TrendingUp, Trash2, TriangleAlert, X } from 'lucide-react'
 import { Bar, BarChart, CartesianGrid, Cell, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { api } from './api'
 import ChartPanel from './ChartPanel'
@@ -9,6 +9,8 @@ import type { AccountAliasSettings, AlertEpisode, BacktestBatch, BacktestCandida
 import type { JournalAnalysisData, JournalTrade } from './journalTypes'
 import { detailGuides, type DetailGuideId } from './detailGuides'
 import { filterJournalByStrategyIds, filterStrategiesByIds, parseStrategyIds } from './strategyIdFilter'
+import { formatPairedIds, parsePairedIds } from './pairedIds'
+import { buildEquitySeries } from './equitySparklineMath'
 import { matchesStrategyStatus, type StrategyStatus, type StrategyStatusFilter, withStrategyStatus } from './strategyStatusFilter'
 import { PositiveStrategyStatusIcon, StrategyStatusIcon, strategyStatusLabels } from './StrategyStatusIcon'
 import './performanceMode.css'
@@ -97,6 +99,28 @@ function buildDashboardQuery(windowName: string, customStart: string, customEnd:
   }
   return params.toString()
 }
+// Paired bots live on other broker accounts, so their equity curves must be
+// fetched without the account/asset scope of the current dashboard view.
+function pairedEquityQuery(dashboardQuery: string) {
+  const params = new URLSearchParams(dashboardQuery)
+  params.delete('filter_accounts')
+  params.delete('include_unassigned')
+  params.delete('accounts')
+  params.delete('filter_assets')
+  params.delete('assets')
+  params.set('limit', '200')
+  return params.toString()
+}
+type DuplicateSuggestion = {
+  id: number
+  account_login: string
+  symbol: string
+  sqx_name: string
+  mql5_name: string
+  reason: string
+  already_paired: boolean
+}
+type EquityOverlay = { label: string; points: StrategyDetails['equity_curve'] }
 function signedPercent(value: number | null | undefined) {
   if (value == null) return '—'
   return `${value > 0 ? '+' : ''}${value.toFixed(2)}%`
@@ -199,8 +223,9 @@ function directionLabel(direction: string) {
   return direction === 'Long' ? 'Buy' : direction === 'Short' ? 'Sell' : direction || '—'
 }
 function readSidebarCollapsed() {
-  try { return localStorage.getItem(SIDEBAR_STORAGE_KEY) === 'true' }
-  catch { return false }
+  // The sidebar starts collapsed on first load; it only opens when the user clicks the toggle.
+  try { return localStorage.getItem(SIDEBAR_STORAGE_KEY) !== 'false' }
+  catch { return true }
 }
 function baselineValue(baseline: Baseline | null, ...keys: string[]) {
   if (!baseline) return null
@@ -1108,29 +1133,28 @@ function DrawerMetric({ label, value, detail, tone = '', dotStatus }: { label: s
   </div>
 }
 
-function EquitySparkline({ points }: { points: StrategyDetails['equity_curve'] }) {
-  if (!points.length) return <div className="drawer-empty">No closed trades for this window.</div>
+function equityDate(msc: number | null | undefined) {
+  if (msc == null || !Number.isFinite(msc)) return '—'
+  return new Date(msc).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: '2-digit' })
+}
+function EquitySparkline({ points, overlays = [] }: { points: StrategyDetails['equity_curve']; overlays?: EquityOverlay[] }) {
+  if (!points.length && !overlays.length) return <div className="drawer-empty">No closed trades for this window.</div>
   const width = 420
   const height = 118
   const padding = 12
-  const values = points.map(point => point.equity)
-  const min = Math.min(0, ...values)
-  const max = Math.max(0, ...values)
-  const range = max - min || 1
-  const xStep = points.length > 1 ? (width - padding * 2) / (points.length - 1) : 0
-  const y = (value: number) => padding + (max - value) / range * (height - padding * 2)
-  const coords = points.map((point, index) => `${padding + xStep * index},${y(point.equity)}`).join(' ')
+  const { min, max, minTime, maxTime, coords, last, lastX, lastY, overlayCoords, hasTimeAxis } = buildEquitySeries(points, overlays)
+  const y = (value: number) => padding + (max - value) / ((max - min) || 1) * (height - padding * 2)
   const zeroY = y(0)
-  const last = points[points.length - 1]
-  const lastX = padding + xStep * (points.length - 1)
-  const lastY = y(last.equity)
   return <div className="equity-box">
     <svg className="equity-svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Equity curve">
       <line x1={padding} y1={zeroY} x2={width - padding} y2={zeroY} />
+      {overlays.map(overlay => <polyline key={overlay.label} className="paired" points={overlayCoords[overlay.label] || ''} />)}
       <polyline points={coords} />
-      <circle cx={lastX} cy={lastY} r="3.5" />
+      {last && lastX != null && lastY != null && <circle cx={lastX} cy={lastY} r="3.5" />}
     </svg>
-    <div className="equity-footer"><span>{points.length} closes</span><strong>{signedMoney(last.equity)}</strong></div>
+    {hasTimeAxis && <div className="equity-time-axis" aria-hidden="true"><span>{equityDate(minTime)}</span><i /><span>{equityDate(maxTime)}</span></div>}
+    {overlays.length > 0 && <div className="equity-legend">{overlays.map(overlay => <span key={overlay.label} title={`${overlay.label} · ${overlay.points.length} closes · desde ${equityDate(overlay.points[0]?.time_msc)} · ${signedMoney(overlay.points[overlay.points.length - 1]?.equity)}`}><i className="paired-dot" />{overlay.label} <small>desde {equityDate(overlay.points[0]?.time_msc)}</small></span>)}</div>}
+    <div className="equity-footer"><span>{points.length} closes{points.length ? ` · desde ${equityDate(points[0]?.time_msc)}` : ' (sin trades en este periodo)'}</span><strong>{last ? signedMoney(last.equity) : '—'}</strong></div>
   </div>
 }
 
@@ -1193,12 +1217,39 @@ function MonthlyPnlCalendar({ strategyId }: { strategyId: number }) {
   </section>
 }
 
-function StrategySidePanel({ strategy, query, refreshVersion, onClose, onDeleted, onNoteSaved, onDisplayNameSaved, onStatusChange, statusSaving, onOpenDetail, onBacktestRiskAcceptance, savingBacktestRiskAcceptance }: { strategy: Strategy; query: string; refreshVersion: number; onClose: () => void; onDeleted: (strategyId: number) => void; onNoteSaved: NoteSavedHandler; onDisplayNameSaved: DisplayNameSavedHandler; onStatusChange: (strategyId: number, status: StrategyStatus) => void; statusSaving: boolean; onOpenDetail: (strategyId: number) => void; onBacktestRiskAcceptance: (strategyId: number, runId: number, accepted: boolean) => void; savingBacktestRiskAcceptance: boolean }) {
+// A panel error must never blank the whole dashboard.  If the side panel
+// throws while rendering (e.g. an unexpected empty dataset), show a compact
+// fallback instead of letting React unmount the entire tree.
+class PanelErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state: { error: Error | null } = { error: null }
+  static getDerivedStateFromError(error: Error) {
+    return { error }
+  }
+  render() {
+    if (this.state.error) {
+      return <aside className="strategy-drawer" aria-label="Error del panel">
+        <div className="drawer-header"><div className="drawer-strategy-heading"><strong>Panel no disponible</strong></div></div>
+        <div className="drawer-body"><div className="drawer-error">Ocurrió un error al renderizar este panel. Cierra el panel y vuelve a abrirlo.</div></div>
+      </aside>
+    }
+    return this.props.children
+  }
+}
+
+function StrategySidePanel({ strategy, allStrategies, query, refreshVersion, onClose, onDeleted, onNoteSaved, onDisplayNameSaved, onStatusChange, statusSaving, onOpenDetail, onBacktestRiskAcceptance, savingBacktestRiskAcceptance, onPairedSaved }: { strategy: Strategy; allStrategies: Strategy[]; query: string; refreshVersion: number; onClose: () => void; onDeleted: (strategyId: number) => void; onNoteSaved: NoteSavedHandler; onDisplayNameSaved: DisplayNameSavedHandler; onStatusChange: (strategyId: number, status: StrategyStatus) => void; statusSaving: boolean; onOpenDetail: (strategyId: number) => void; onBacktestRiskAcceptance: (strategyId: number, runId: number, accepted: boolean) => void; savingBacktestRiskAcceptance: boolean; onPairedSaved: (strategyId: number, updates: Record<string, number[]>) => void }) {
   const [panelHistory, setPanelHistory] = useState<PanelHistory | null>(() => getCachedPanelHistory(strategy.id, query))
   const [alertEpisodes, setAlertEpisodes] = useState<AlertEpisode[]>([])
   const [historyError, setHistoryError] = useState('')
   const [historyRefreshing, setHistoryRefreshing] = useState(false)
   const [backtestExpanded, setBacktestExpanded] = useState(Boolean(strategy.backtest.risk_alert))
+  const [pairedInput, setPairedInput] = useState(() => formatPairedIds(strategy.paired_ids))
+  const [pairedSuggestions, setPairedSuggestions] = useState<DuplicateSuggestion[]>([])
+  const [pairedSaving, setPairedSaving] = useState(false)
+  const [pairedNotice, setPairedNotice] = useState('')
+  const [pairedNoticeError, setPairedNoticeError] = useState(false)
+  const [showPairedCurves, setShowPairedCurves] = useState(false)
+  const [pairedCurves, setPairedCurves] = useState<EquityOverlay[]>([])
+  const [pairedCurvesLoading, setPairedCurvesLoading] = useState(false)
   useEffect(() => {
     setBacktestExpanded(Boolean(strategy.backtest.risk_alert))
   }, [strategy.id])
@@ -1222,6 +1273,76 @@ function StrategySidePanel({ strategy, query, refreshVersion, onClose, onDeleted
       .catch(() => { if (!cancelled) setAlertEpisodes([]) })
     return () => { cancelled = true; controller.abort() }
   }, [strategy.id])
+  useEffect(() => {
+    setPairedInput(formatPairedIds(strategy.paired_ids))
+    setPairedNotice('')
+    setPairedNoticeError(false)
+    setShowPairedCurves(false)
+  }, [strategy.id])
+  useEffect(() => {
+    let cancelled = false
+    setPairedSuggestions([])
+    api<DuplicateSuggestion[]>(`/api/strategies/${strategy.id}/duplicates`)
+      .then(suggestions => {
+        if (cancelled) return
+        setPairedSuggestions(suggestions)
+        // Pre-fill the field with detected brothers only when the user has not
+        // typed anything and no pairing is saved yet.
+        setPairedInput(current => {
+          if (current.trim() !== '') return current
+          const detected = suggestions.filter(item => !item.already_paired).map(item => item.id)
+          return formatPairedIds(detected)
+        })
+      })
+      .catch(() => { if (!cancelled) setPairedSuggestions([]) })
+    return () => { cancelled = true }
+  }, [strategy.id])
+  useEffect(() => {
+    if (!showPairedCurves) { setPairedCurves([]); return }
+    let cancelled = false
+    const ids = parsePairedIds(pairedInput)
+    if (!ids.length) { setPairedCurves([]); return }
+    setPairedCurvesLoading(true)
+    const params = pairedEquityQuery(query)
+    Promise.all(ids.map(id => api<PanelHistory>(`/api/strategies/${id}/panel-history?${params}`)
+      .then(payload => {
+        const brother = allStrategies.find(candidate => candidate.id === id)
+        const label = brother
+          ? `${displayName(brother)} (#${id})${brother.account_login ? ` · ${brother.account_login}` : ''}`
+          : `#${id}`
+        return { id, label, points: payload.equity_curve }
+      })
+      .catch(() => null)))
+      .then(results => { if (!cancelled) setPairedCurves(results.filter((result): result is EquityOverlay & { id: number } => result !== null)) })
+      .finally(() => { if (!cancelled) setPairedCurvesLoading(false) })
+    return () => { cancelled = true }
+  }, [showPairedCurves, pairedInput, query, allStrategies])
+  function togglePairedSuggestion(id: number) {
+    setPairedInput(current => {
+      const ids = parsePairedIds(current)
+      const next = ids.includes(id) ? ids.filter(value => value !== id) : [...ids, id]
+      return formatPairedIds(next)
+    })
+  }
+  async function savePaired() {
+    const ids = parsePairedIds(pairedInput)
+    setPairedSaving(true)
+    setPairedNotice('')
+    setPairedNoticeError(false)
+    try {
+      const result = await api<{ strategy_id: number; paired_ids: number[]; updates: Record<string, number[]> }>(`/api/strategies/${strategy.id}/paired`, {
+        method: 'PUT',
+        body: JSON.stringify({ paired_ids: formatPairedIds(ids) }),
+      })
+      onPairedSaved(strategy.id, result.updates)
+      setPairedNotice(ids.length ? 'Pareja guardada' : 'Pareja eliminada')
+    } catch (err) {
+      setPairedNotice(err instanceof Error ? err.message : 'No se pudo guardar la pareja')
+      setPairedNoticeError(true)
+    } finally {
+      setPairedSaving(false)
+    }
+  }
 
   const active = strategy
   const m = active.metrics
@@ -1233,7 +1354,7 @@ function StrategySidePanel({ strategy, query, refreshVersion, onClose, onDeleted
   const mt5ReportAvailable = Boolean(active.backtest.report_available)
   return <aside className="strategy-drawer" aria-label="Quick strategy statistics">
     <div className="drawer-header">
-      <div className="drawer-strategy-heading"><div className="strategy-status-controls" role="group" aria-label="Estado manual de estrategia">{(['live', 'monitor', 'candidate_live'] as const).map(status => <button key={status} className={`strategy-status-button ${status} ${active.strategy_status === status ? 'active' : ''}`} type="button" aria-label={`Marcar ${displayName(active)} como ${strategyStatusLabels[status]}`} aria-pressed={active.strategy_status === status} title={strategyStatusLabels[status]} disabled={statusSaving} onClick={() => onStatusChange(active.id, active.strategy_status === status ? '' : status)}><StrategyStatusIcon status={status} size={18} /></button>)}<button className={`strategy-status-button clear ${active.strategy_status === '' ? 'active' : ''}`} type="button" aria-label={`Quitar estado de ${displayName(active)}`} aria-pressed={active.strategy_status === ''} title="Quitar estado" disabled={statusSaving} onClick={() => onStatusChange(active.id, '')}><X size={16} /></button></div><div><strong>{displayName(active)}</strong><span>{active.symbol || 'No symbol'} · {m.trades} trades in history</span></div></div>
+      <div className="drawer-strategy-heading"><div className="strategy-status-controls" role="group" aria-label="Estado manual de estrategia">{(['live', 'monitor', 'candidate_live', 'axi_live'] as const).map(status => <button key={status} className={`strategy-status-button ${status} ${active.strategy_status === status ? 'active' : ''}`} type="button" aria-label={`Marcar ${displayName(active)} como ${strategyStatusLabels[status]}`} aria-pressed={active.strategy_status === status} title={strategyStatusLabels[status]} disabled={statusSaving} onClick={() => onStatusChange(active.id, active.strategy_status === status ? '' : status)}><StrategyStatusIcon status={status} size={18} /></button>)}<button className={`strategy-status-button clear ${active.strategy_status === '' ? 'active' : ''}`} type="button" aria-label={`Quitar estado de ${displayName(active)}`} aria-pressed={active.strategy_status === ''} title="Quitar estado" disabled={statusSaving} onClick={() => onStatusChange(active.id, '')}><X size={16} /></button></div><div><strong>{displayName(active)}</strong><span>{active.symbol || 'No symbol'} · {m.trades} trades in history</span></div></div>
       <button className="drawer-close" type="button" onClick={onClose}>Close</button>
     </div>
     <div className="drawer-body">
@@ -1275,9 +1396,16 @@ function StrategySidePanel({ strategy, query, refreshVersion, onClose, onDeleted
         <div className="drawer-card streak-card"><StreakPair metrics={m} /></div>
       </div>
       <MonthlyPnlCalendar strategyId={active.id} />
+      <section className="drawer-section drawer-paired-bots">
+        <div className="drawer-section-title"><span className="eyebrow">BOTS DUPLICADOS</span>{parsePairedIds(pairedInput).length > 0 && <strong>{parsePairedIds(pairedInput).length} pareja{parsePairedIds(pairedInput).length === 1 ? '' : 's'}</strong>}</div>
+        <p className="help">Vincula aquí los bots duplicados en otras cuentas usando sus IDs internos (separados por espacio).</p>
+        <label className="paired-input-label">IDs internos<input aria-label="IDs internos de bots duplicados" placeholder="Ej: 12 34 56" inputMode="numeric" value={pairedInput} onChange={event => { setPairedInput(event.target.value.replace(/[^\d\s,]/g, '')); setPairedNotice(''); setPairedNoticeError(false) }} /></label>
+        {pairedSuggestions.length > 0 && <div className="paired-suggestions"><small>Posibles duplicados detectados:</small><div className="paired-suggestion-list">{pairedSuggestions.map(suggestion => { const selected = parsePairedIds(pairedInput).includes(suggestion.id); return <button key={suggestion.id} type="button" className={`paired-chip ${selected ? 'selected' : ''}`} aria-pressed={selected} onClick={() => togglePairedSuggestion(suggestion.id)}><strong>#{suggestion.id}</strong><span>{suggestion.sqx_name || suggestion.mql5_name || `Bot ${suggestion.id}`}</span><small>{suggestion.account_login || 'Sin cuenta'} · {suggestion.symbol || '—'}</small></button> })}</div></div>}
+        <div className="paired-actions"><button className="button primary" type="button" disabled={pairedSaving} onClick={() => { void savePaired() }}>{pairedSaving ? 'Guardando…' : 'Pair'}</button>{pairedNotice && <span className={`note-status ${pairedNoticeError ? 'error' : ''}`}>{pairedNotice}</span>}</div>
+      </section>
       <section className="drawer-section">
-        <div className="drawer-section-title"><span className="eyebrow">EQUITY CURVE</span></div>
-        <EquitySparkline points={panelHistory?.equity_curve || []} />
+        <div className="drawer-section-title"><span className="eyebrow">EQUITY CURVE</span><div className="equity-curve-actions">{parsePairedIds(pairedInput).length > 0 && <button type="button" className={`button paired-curves-toggle ${showPairedCurves ? 'active' : ''}`} aria-pressed={showPairedCurves} onClick={() => setShowPairedCurves(current => !current)}>{showPairedCurves ? 'Ocultar curvas pareadas' : 'Mostrar curvas pareadas'}</button>}{pairedCurvesLoading && <small>Cargando…</small>}</div></div>
+        <EquitySparkline points={panelHistory?.equity_curve || []} overlays={showPairedCurves ? pairedCurves : []} />
       </section>
       <section className={`drawer-section drawer-risk ${active.risk_guard.status}`}>
         <div className="drawer-section-title"><span className="eyebrow">RISK GUARD</span><span className={`risk-verdict ${active.risk_guard.stop_recommended ? 'stop' : active.risk_guard.status}`}>{active.risk_guard.stop_recommended ? 'Stop recommended' : active.risk_guard.status === 'gray' ? 'Not evaluated' : active.risk_guard.status === 'yellow' ? 'Attention' : 'Within limits'}</span></div>
@@ -1737,6 +1865,7 @@ export default function App() {
   const [assets, setAssets] = useState<Set<string> | null>(null)
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [panelStrategyId, setPanelStrategyId] = useState<number | null>(null)
+  const [autoOpenPanel, setAutoOpenPanel] = useState(false)
   const [query, setQuery] = useState('')
   const [strategyIdQuery, setStrategyIdQuery] = useState('')
   const [magicQuery, setMagicQuery] = useState('')
@@ -1884,6 +2013,15 @@ export default function App() {
         : strategy),
     } : current)
     void load()
+  }
+  function handlePairedSaved(strategyId: number, updates: Record<string, number[]>) {
+    setData(current => current ? {
+      ...current,
+      strategies: current.strategies.map(strategy => {
+        const pairedIds = updates[String(strategy.id)]
+        return pairedIds === undefined ? strategy : { ...strategy, paired_ids: pairedIds }
+      }),
+    } : current)
   }
   async function updateStrategySelection(strategyId: number, selection: boolean) {
     setData(current => current ? {
@@ -2206,7 +2344,7 @@ export default function App() {
           <div className="overview-sticky-header">
             <div className="panel-heading">
             <div><span className="eyebrow">MONITORING</span><h2>All bots</h2><p className="timeframe-coverage">Temporalidad: <strong>{data?.timeframe_coverage.terminal_profile ?? 0} perfil MT5</strong> · {data?.timeframe_coverage.sqx ?? 0} SQX · <strong className="missing">{data?.timeframe_coverage.missing ?? 0} sin evidencia</strong></p></div>
-            <div className="filters"><button type="button" className={`button stopped-visibility-toggle ${showStopped ? 'active' : ''}`} aria-pressed={showStopped} aria-label={showStopped ? 'Ocultar bots stopped' : 'Mostrar bots stopped'} onClick={() => setShowStopped(current => !current)}>{showStopped ? <EyeOff size={14}/> : <Eye size={14}/>} {showStopped ? 'Ocultar stopped' : 'Mostrar stopped'}</button><select aria-label="Categoria manual" value={strategyStatusFilter} onChange={e => setStrategyStatusFilter(e.target.value as StrategyStatusFilter)}><option value="all">Todas las categorias</option><option value="live">★ Live</option><option value="monitor">☹ Revisar</option><option value="candidate_live">☺ Candidata live</option><option value="">Sin categoria</option></select><input aria-label="Search strategies" placeholder="Search strategy or symbol…" value={query} onChange={e => setQuery(e.target.value)}/><input className="magic-filter" aria-label="Search MN" placeholder="Search MN…" value={magicQuery} onChange={e => setMagicQuery(e.target.value.replace(/\D/g, ''))}/><input className="strategy-id-filter" aria-label="Filtrar por ID interno" placeholder="IDs internos: 12, 34…" inputMode="numeric" value={strategyIdQuery} onChange={e => setStrategyIdQuery(e.target.value.replace(/[^\d,\s]/g, ''))}/><AccountFilter compact accounts={brokerAccountOptions} aliases={accountAliases} hasUnassigned={data?.has_unassigned_broker_account || false} selected={brokerAccounts} onChange={setBrokerAccounts}/><AssetFilter compact assets={assetOptions} selected={assets} onChange={setAssets}/><select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}><option value="all">All states</option>{Object.entries(stateLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select><select aria-label="Backtest status or audit" value={backtestStatusFilter} onChange={e => setBacktestStatusFilter(e.target.value as BacktestFilter)}><option value="all">All backtests</option><optgroup label="Backtest status">{Object.entries(backtestLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</optgroup><optgroup label="Risk audit">{Object.entries(backtestAuditFilterLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</optgroup></select><select value={linkFilter} onChange={e => setLinkFilter(e.target.value)}><option value="all">All sources</option>{Object.entries(linkLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select></div>
+            <div className="filters"><button type="button" className={`button stopped-visibility-toggle ${autoOpenPanel ? 'active' : ''}`} aria-pressed={autoOpenPanel} aria-label={autoOpenPanel ? 'Abrir panel al seleccionar un bot: activado' : 'Abrir panel al seleccionar un bot: desactivado'} title={autoOpenPanel ? 'Abrir panel al seleccionar un bot (activado)' : 'Abrir panel al seleccionar un bot (desactivado)'} onClick={() => { setAutoOpenPanel(current => { const next = !current; if (!next) setPanelStrategyId(null); return next }) }}>{autoOpenPanel ? <PanelRightOpen size={14}/> : <PanelRight size={14}/>} Panel al seleccionar</button><button type="button" className={`button stopped-visibility-toggle ${showStopped ? 'active' : ''}`} aria-pressed={showStopped} aria-label={showStopped ? 'Ocultar bots stopped' : 'Mostrar bots stopped'} onClick={() => setShowStopped(current => !current)}>{showStopped ? <EyeOff size={14}/> : <Eye size={14}/>} {showStopped ? 'Ocultar stopped' : 'Mostrar stopped'}</button><select aria-label="Categoria manual" value={strategyStatusFilter} onChange={e => setStrategyStatusFilter(e.target.value as StrategyStatusFilter)}><option value="all">Todas las categorias</option><option value="live">D Darwinex live</option><option value="monitor">☹ Revisar</option><option value="candidate_live">☺ Candidata live</option><option value="axi_live">A Axi live</option><option value="">Sin categoria</option></select><input aria-label="Search strategies" placeholder="Search strategy or symbol…" value={query} onChange={e => setQuery(e.target.value)}/><input className="magic-filter" aria-label="Search MN" placeholder="Search MN…" value={magicQuery} onChange={e => setMagicQuery(e.target.value.replace(/\D/g, ''))}/><input className="strategy-id-filter" aria-label="Filtrar por ID interno" placeholder="IDs internos: 12, 34…" inputMode="numeric" value={strategyIdQuery} onChange={e => setStrategyIdQuery(e.target.value.replace(/[^\d,\s]/g, ''))}/><AccountFilter compact accounts={brokerAccountOptions} aliases={accountAliases} hasUnassigned={data?.has_unassigned_broker_account || false} selected={brokerAccounts} onChange={setBrokerAccounts}/><AssetFilter compact assets={assetOptions} selected={assets} onChange={setAssets}/><select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}><option value="all">All states</option>{Object.entries(stateLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select><select aria-label="Backtest status or audit" value={backtestStatusFilter} onChange={e => setBacktestStatusFilter(e.target.value as BacktestFilter)}><option value="all">All backtests</option><optgroup label="Backtest status">{Object.entries(backtestLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</optgroup><optgroup label="Risk audit">{Object.entries(backtestAuditFilterLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</optgroup></select><select value={linkFilter} onChange={e => setLinkFilter(e.target.value)}><option value="all">All sources</option>{Object.entries(linkLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select></div>
             <div className="overview-global-filters"><select aria-label="Time range" value={windowName} onChange={e => setWindowName(e.target.value)}><option value="30d">30 days</option><option value="90d">90 days</option><option value="all">All</option><option value="custom">Custom</option></select>{windowName === 'custom' && <><input aria-label="Start date" type="date" value={customStart} onChange={e => setCustomStart(e.target.value)}/><input aria-label="End date" type="date" value={customEnd} onChange={e => setCustomEnd(e.target.value)}/></>}<button className="button refresh icon-command" onClick={() => { void loadDashboard() }} disabled={dashboardLoading}><RefreshCw size={14}/>Refresh</button>{dashboardLoading && <span className="overview-loading" role="status" aria-live="polite">Actualizando…</span>}</div>
           </div>
           <div ref={overviewTopScrollRef} className="table-scroll-top" aria-label="Scrollable table columns" tabIndex={0} onScroll={() => syncOverviewScroll('top')}>
@@ -2224,7 +2362,7 @@ export default function App() {
                 const alias = accountAlias(accountAliases, strategy.account_login)
                 const stateLabel = stateLabels[strategy.state] || strategy.state
                 const healthTitle = strategy.health.reasons.join(', ') || 'No active alerts'
-                return <tr key={strategy.id} data-strategy-id={strategy.id} tabIndex={0} className={`${selectedId === strategy.id ? 'selected-row ' : ''}${strategy.selection ? 'stopped-row' : ''}`} onPointerEnter={() => prefetchPanelHistory(strategy.id, dashboardQuery, 'hover')} onFocus={() => prefetchPanelHistory(strategy.id, dashboardQuery, 'hover')} onClick={() => { setSelectedId(strategy.id); setPanelStrategyId(strategy.id) }}>
+                return <tr key={strategy.id} data-strategy-id={strategy.id} tabIndex={0} className={`${selectedId === strategy.id ? 'selected-row ' : ''}${strategy.selection ? 'stopped-row' : ''}`} onPointerEnter={() => prefetchPanelHistory(strategy.id, dashboardQuery, 'hover')} onFocus={() => prefetchPanelHistory(strategy.id, dashboardQuery, 'hover')} onClick={() => { setSelectedId(strategy.id); if (autoOpenPanel) setPanelStrategyId(strategy.id) }}>
                   <td>{strategy.id}</td>
                   <td className="selection-column"><input type="checkbox" aria-label={`Mark ${displayName(strategy)} as stopped`} checked={strategy.selection} disabled={selectionSaving.has(strategy.id)} onClick={event => event.stopPropagation()} onChange={event => updateStrategySelection(strategy.id, event.target.checked)}/></td>
                   <td className="backtest-cell"><BacktestBadge summary={strategy.backtest}/></td>
@@ -2252,7 +2390,7 @@ export default function App() {
           </div>
         </section>
       </>}
-      {tab === 'overview' && panelStrategy && <StrategySidePanel strategy={panelStrategy} query={dashboardQuery} refreshVersion={historyRefreshVersion} onClose={() => setPanelStrategyId(null)} onDeleted={handleDeleted} onNoteSaved={handleNoteSaved} onDisplayNameSaved={handleDisplayNameSaved} onStatusChange={updateStrategyStatus} statusSaving={strategyStatusSaving.has(panelStrategy.id)} onOpenDetail={strategyId => { setSelectedId(strategyId); setPanelStrategyId(null); navigateTo('detail') }} onBacktestRiskAcceptance={updateStrategyBacktestRiskAcceptance} savingBacktestRiskAcceptance={backtestRiskAcceptanceSaving.has(panelStrategy.id)} />}
+      {tab === 'overview' && panelStrategy && <PanelErrorBoundary key={`panel-${panelStrategy.id}`}><StrategySidePanel strategy={panelStrategy} allStrategies={allStrategies} query={dashboardQuery} refreshVersion={historyRefreshVersion} onClose={() => setPanelStrategyId(null)} onDeleted={handleDeleted} onNoteSaved={handleNoteSaved} onDisplayNameSaved={handleDisplayNameSaved} onStatusChange={updateStrategyStatus} statusSaving={strategyStatusSaving.has(panelStrategy.id)} onOpenDetail={strategyId => { setSelectedId(strategyId); setPanelStrategyId(null); navigateTo('detail') }} onBacktestRiskAcceptance={updateStrategyBacktestRiskAcceptance} savingBacktestRiskAcceptance={backtestRiskAcceptanceSaving.has(panelStrategy.id)} onPairedSaved={handlePairedSaved} /></PanelErrorBoundary>}
       {tab === 'performance' && <Performance
         strategies={brokerFilteredStrategies}
         onSelect={strategyId => { setSelectedId(strategyId); navigateTo('detail') }}

@@ -212,7 +212,17 @@ def _terminal_sources() -> dict[str, list[dict[str, Any]]]:
                     # record the concrete transport error later.
                     sibling_dirs_by_parent[parent_key] = [configured_dir]
             for data_dir in sibling_dirs_by_parent[parent_key]:
-                identity = (str(terminal["ssh_host"]), data_dir.casefold())
+                # The same VPS DataDir can be registered as a sibling source
+                # for more than one broker/account.  Keep the account/terminal
+                # in the identity: deduplicating only by host+path lets the
+                # first account (for example AXI) claim the shared directory and
+                # silently hides the same DataDir from Darwinex accounts.
+                identity = (
+                    str(terminal["ssh_host"]),
+                    str(terminal.get("account_login") or ""),
+                    int(terminal["id"]),
+                    data_dir.casefold(),
+                )
                 if identity in seen:
                     continue
                 seen.add(identity)
@@ -478,9 +488,25 @@ $experts | ConvertTo-Json -Compress -Depth 3
     }
 
 
-def _audit_candidates_uncached() -> dict[str, Any]:
+def _audit_candidates_uncached(
+    strategy_ids: set[int] | None = None,
+    include_completed: bool = False,
+) -> dict[str, Any]:
     sources = _terminal_sources()
     placeholders = ",".join("?" for _ in SOURCE_ACCOUNTS)
+    completed_filter = (
+        "" if include_completed else (
+            "AND NOT EXISTS ("
+            "SELECT 1 FROM backtest_runs r JOIN backtest_metrics m ON m.run_id=r.id "
+            "WHERE r.strategy_id=s.id AND r.status='completed')"
+        )
+    )
+    ids_filter = ""
+    audit_params: tuple[Any, ...] = SOURCE_ACCOUNTS
+    if strategy_ids:
+        ids_ph = ",".join("?" for _ in strategy_ids)
+        ids_filter = f"AND s.id IN ({ids_ph})"
+        audit_params = (*SOURCE_ACCOUNTS, *strategy_ids)
     with session() as conn:
         strategies = rows(conn.execute(
             f"""SELECT s.id,s.sqx_name,s.mql5_name,s.symbol,s.account_login,
@@ -490,11 +516,10 @@ def _audit_candidates_uncached() -> dict[str, Any]:
                   ON l.strategy_id=COALESCE(s.identity_strategy_id,s.id)
                 WHERE s.retired=0 AND s.archived_at IS NULL
                   AND s.account_login IN ({placeholders})
-                  AND NOT EXISTS (
-                    SELECT 1 FROM backtest_runs r JOIN backtest_metrics m ON m.run_id=r.id
-                    WHERE r.strategy_id=s.id AND r.status='completed'
-                  ) ORDER BY s.account_login,s.id""",
-            SOURCE_ACCOUNTS,
+                  {completed_filter}
+                  {ids_filter}
+                ORDER BY s.account_login,s.id""",
+            audit_params,
         ))
         deployments = rows(conn.execute(
             """SELECT d.* FROM bot_deployments d
@@ -798,6 +823,148 @@ def create_batch() -> dict[str, Any] | None:
                  None if state == "queued" else candidate["reason"], now, now),
             )
     return backtest_batches.get_batch(batch_id)
+
+
+def create_rerun_batch(
+    strategy_ids: set[int],
+    from_date: str,
+    to_date: str,
+    model: int = 1,
+    pilot_required: bool = False,
+) -> dict[str, Any]:
+    """Re-run already-backtested strategies with an explicit date window.
+
+    The standard create_batch() only queues strategies with no completed
+    backtest and uses the config date defaults.  This variant targets a given
+    set of strategy ids (which may already have completed backtests) and forces
+    the requested from_date/to_date through the same isolated Darwinex-Demo
+    runner.
+
+    Config resolution is a union of two proven sources:
+      * strategies the VPS audit resolves to ``eligible`` (exact chart profile),
+      * strategies that already produced a completed ``ssh_darwinex_demo`` run,
+        whose full config is reused verbatim except for the dates.
+    """
+    from . import backtest_batches
+
+    setup_runner()
+    authorized = isolated_runner_authorized()
+    if not authorized:
+        raise ValueError("Explicit authorization for the isolated Darwinex-Demo runner is required")
+    if not strategy_ids:
+        raise ValueError("No strategy ids were provided for the re-run batch")
+    audit = _audit_candidates_uncached(strategy_ids=set(strategy_ids), include_completed=True)
+    eligible = [candidate for candidate in audit["candidates"] if candidate["state"] == "eligible"]
+    eligible_by_id = {int(c["id"]): c for c in eligible}
+
+    now = utcnow()
+    cache = BACKTEST_DIR / "remote-experts"
+
+    def _prior_run_config(conn: Any, sid: int) -> dict[str, Any] | None:
+        row = conn.execute(
+            """SELECT * FROM backtest_runs WHERE strategy_id=?
+               AND status='completed' AND execution_target=?
+               ORDER BY finished_at DESC, id DESC LIMIT 1""",
+            (sid, EXECUTION_TARGET),
+        ).fetchone()
+        if not row:
+            return None
+        expert = Path(str(row["expert_path"] or ""))
+        if not expert.is_file():
+            return None
+        snapshot = json.loads(row["config_snapshot_json"] or "{}")
+        return {
+            "strategy_id": sid, "broker": "Darwinex",
+            "execution_target": EXECUTION_TARGET,
+            "remote_terminal_id": int(REMOTE_BACKTEST_TARGET["terminal_id"]),
+            "expert_path": str(expert), "expert_hash": str(row["expert_hash"] or ""),
+            "symbol": str(row["symbol"]), "timeframe": str(row["timeframe"]),
+            "from_date": from_date, "to_date": to_date,
+            "deposit": 100000, "currency": "USD", "leverage": "1:100", "model": 1,
+            "spread": row["spread"], "inputs": json.loads(row["inputs_json"] or "{}"),
+            "config_source": "prior_ssh_run_rerun",
+            "config_snapshot": {
+                **snapshot, "rerun": True,
+                "rerun_from_date": from_date, "rerun_to_date": to_date,
+                "authorized_isolated_runner": authorized,
+            },
+        }
+
+    configs: dict[int, dict[str, Any]] = {}
+    with session() as conn:
+        # 1) audit-eligible
+        for candidate in eligible:
+            bridge = _bridge_for_terminal(int(candidate["source_terminal_id"]))
+            expert_path = cache / candidate["expert_hash"][:12] / PureWindowsPath(candidate["remote_expert_path"]).name
+            if not expert_path.is_file() or _sha256_bytes(expert_path.read_bytes()) != candidate["expert_hash"]:
+                bridge.download_path(candidate["remote_expert_path"], expert_path)
+            if _sha256_bytes(expert_path.read_bytes()) != candidate["expert_hash"]:
+                raise SSHBridgeError("Downloaded EX5 hash does not match the VPS inventory")
+            configs[int(candidate["id"])] = {
+                "strategy_id": int(candidate["id"]), "broker": "Darwinex",
+                "execution_target": EXECUTION_TARGET,
+                "remote_terminal_id": int(REMOTE_BACKTEST_TARGET["terminal_id"]),
+                "expert_path": str(expert_path), "expert_hash": candidate["expert_hash"],
+                "symbol": candidate["target_symbol"], "timeframe": candidate["timeframe"],
+                "from_date": from_date, "to_date": to_date, "deposit": 100000,
+                "currency": "USD", "leverage": "1:100", "model": 1, "spread": None,
+                "inputs": candidate["inputs"], "config_source": "ssh_inventory_profile_rerun",
+                "config_snapshot": {
+                    "resolution_method": "exact_vps_profile", "source_account": candidate["account_login"],
+                    "source_terminal_id": candidate["source_terminal_id"],
+                    "remote_expert_path": candidate["remote_expert_path"],
+                    "remote_profile_path": candidate["remote_profile_path"],
+                    "expert_hash": candidate["expert_hash"], "magic": candidate["magic"],
+                    "comment": candidate["comment"], "history_source": "Darwinex-Demo",
+                    "authorized_isolated_runner": authorized, "rerun": True,
+                    "rerun_from_date": from_date, "rerun_to_date": to_date,
+                },
+            }
+        # 2) fall back to prior completed SSH runs for the rest
+        for sid in strategy_ids:
+            if sid in configs:
+                continue
+            prior = _prior_run_config(conn, sid)
+            if prior:
+                configs[sid] = prior
+
+    if not configs:
+        return {"created": False, "reason": "No target strategies could be resolved for a remote re-run", "audit": audit}
+
+    with session() as conn:
+        active = conn.execute(
+            """SELECT b.id FROM backtest_batches b
+               WHERE b.status IN ('resolving','waiting_terminal','queued','running')
+                  OR (b.status='paused' AND EXISTS (
+                        SELECT 1 FROM backtest_batch_items i
+                        WHERE i.batch_id=b.id AND i.status IN ('resolving','queued','running')
+                  ))"""
+        ).fetchone()
+        if active:
+            raise ValueError(f"Batch {active['id']} is already active")
+        batch_id = int(conn.execute(
+            """INSERT INTO backtest_batches(
+                 status,broker,model,policy,only_missing,execution_target,pilot_required,created_at
+               ) VALUES('queued','Darwinex',?,'strict',0,?,?,?)""",
+            (model, EXECUTION_TARGET, int(pilot_required), now),
+        ).lastrowid)
+        for sid, config in sorted(configs.items()):
+            conn.execute(
+                """INSERT INTO backtest_batch_items(
+                     batch_id,strategy_id,status,resolution_method,confidence,expert_path,
+                     expert_hash,config_json,error,created_at,updated_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (batch_id, sid, "queued", "exact_vps_profile", 1.0,
+                 config["expert_path"], config.get("expert_hash"),
+                 json.dumps(config, ensure_ascii=False), None, now, now),
+            )
+    result = backtest_batches.get_batch(batch_id)
+    result["resolved_eligible"] = sum(1 for c in eligible_by_id if c in configs)
+    result["resolved_prior_run"] = sum(
+        1 for sid in configs if sid not in eligible_by_id
+    )
+    result["unresolved_strategy_ids"] = sorted(strategy_ids - set(configs))
+    return result
 
 
 def _set_text(inputs: dict[str, Any]) -> str:

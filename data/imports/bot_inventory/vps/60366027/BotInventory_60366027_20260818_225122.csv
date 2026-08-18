@@ -1,0 +1,4 @@
+generated_utc,account_login,server,chart_id,symbol,timeframe,ex5_name,magic_number,mapping_source,mapping_confidence,expected_comment,observed_comments,attached,terminal_connected,algo_trading_global,account_trade_allowed,status,trade_status,activity_status,entry_deals,first_trade,last_trade,orders,first_order,last_order,order_states,warnings
+2026-08-18T22:51:22Z,60366027,Axi-US51-Live,Default\chart01.chr,NAS100.fs,M5,DosVelas_NAQ_M5.ex5,54952505,EVIDENCIA_PERFIL,CONFIRMADA_PERFIL,DosVelas_NAQ_m5,,SI,SI,SI,SI,ACTIVO,,,,,,,,,,
+2026-08-18T22:51:22Z,60366027,Axi-US51-Live,Default\chart02.chr,EURUSD.sa,M5,WF Optimization - EURUSD M5 SH JULStrategy 5.20.196.ex5,5201962,EVIDENCIA_PERFIL,CONFIRMADA_PERFIL,WF_Opt._EURUSD_M5_SH_JULStrate,,SI,SI,SI,SI,ACTIVO,,,,,,,,,,
+2026-08-18T22:51:22Z,60366027,Axi-US51-Live,Default\chart03.chr,USDJPY.sa,M15,USDJPY-M15-Strategy 3.7.47.ex5,37473,EVIDENCIA_PERFIL,CONFIRMADA_PERFIL,WF_Matrix_Strategy_3_7_47,,SI,SI,SI,SI,ACTIVO,,,,,,,,,,

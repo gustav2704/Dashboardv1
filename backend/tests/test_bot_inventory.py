@@ -125,12 +125,16 @@ def test_confirmed_operational_mapping_owns_inventory_deployment(tmp_path, monke
     _write_inventory(root, magic="991531386")
     bot_inventory.scan()
 
-    result = bot_inventory.confirm(bot_inventory.candidates()[0]["id"], selected_id)
-
-    assert result["strategy_id"] == owner_id
+    # The CSV import now auto-confirms deployments that uniquely match an
+    # existing confirmed live mapping, so this deployment is attached to its
+    # owner directly and no longer surfaces as a pending candidate.
+    assert bot_inventory.candidates() == []
     with db.session() as conn:
-        deployment = conn.execute("SELECT strategy_id FROM bot_deployments").fetchone()
+        deployment = conn.execute(
+            "SELECT strategy_id,confirmed FROM bot_deployments"
+        ).fetchone()
         assert deployment["strategy_id"] == owner_id
+        assert deployment["confirmed"] == 1
 
 
 def test_same_ex5_account_server_and_asset_reuses_id_across_magic_numbers(tmp_path, monkeypatch):

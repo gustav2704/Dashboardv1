@@ -1,4 +1,4 @@
-﻿:root {
+:root {
   font-family: "Segoe UI", system-ui, sans-serif;
   color: #dce7ee;
   background: #071018;
@@ -1083,16 +1083,19 @@ td.overview-symbol-column { padding-left: 10px; padding-right: 10px; }
 .strategy-status-button.live { color: #f5c451; }
 .strategy-status-button.monitor { color: #f7b267; }
 .strategy-status-button.candidate_live { color: #62d6a7; }
+.strategy-status-button.axi_live { color: #a78bfa; }
 .strategy-status-button.clear { color: #7890a1; }
 .strategy-status-button.active.live { border-color: #9a7622; background: #2a210c; }
 .strategy-status-button.active.monitor { border-color: #a86422; background: #2b1d0e; }
 .strategy-status-button.active.candidate_live { border-color: #287c5b; background: #10271f; }
+.strategy-status-button.active.axi_live { border-color: #6d4bb8; background: #211a33; }
 .strategy-status-button.active.clear { border-color: #526a7d; background: #172632; }
 .strategy-status-button:disabled { cursor: wait; opacity: .65; }
 .strategy-status-indicator { display: inline-flex; margin-right: 5px; vertical-align: -2px; }
 .strategy-status-indicator.live { color: #f5c451; }
 .strategy-status-indicator.monitor { color: #f7b267; }
 .strategy-status-indicator.candidate_live { color: #62d6a7; }
+.strategy-status-indicator.axi_live { color: #a78bfa; }
 .drawer-header strong {
   color: #e2edf4;
   font-size: 16px;
@@ -1517,6 +1520,154 @@ td.overview-symbol-column { padding-left: 10px; padding-right: 10px; }
 .equity-footer strong {
   color: #dce8ee;
   font: 700 13px Consolas;
+}
+.equity-svg polyline.paired {
+  stroke: #8a9aa6;
+  stroke-width: 2;
+  stroke-dasharray: 4 3;
+  opacity: .85;
+}
+.equity-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin-top: 6px;
+  color: #8a9aa6;
+  font-size: 10px;
+}
+.equity-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.equity-legend .paired-dot {
+  width: 14px;
+  height: 0;
+  border-top: 2px dashed #8a9aa6;
+  flex: 0 0 auto;
+}
+.equity-legend small {
+  color: #6f8798;
+  font-size: 9px;
+  white-space: nowrap;
+}
+.equity-time-axis {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 3px;
+  color: #5f7889;
+  font: 9px Consolas, monospace;
+}
+.equity-time-axis i {
+  flex: 1;
+  height: 1px;
+  background: repeating-linear-gradient(90deg, #263a49 0 3px, transparent 3px 6px);
+}
+.equity-curve-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.equity-curve-actions small {
+  color: #7f96a8;
+  font-size: 10px;
+}
+.paired-curves-toggle {
+  padding: 4px 8px;
+  font-size: 10px;
+  color: #8eb7c9;
+  border-color: #1d3a4e;
+  background: #0d1c28;
+}
+.paired-curves-toggle.active {
+  color: #d6e3ea;
+  border-color: #8a9aa6;
+  background: #16283a;
+}
+.drawer-paired-bots {
+  display: grid;
+  gap: 8px;
+}
+.drawer-paired-bots .help {
+  color: #6f8798;
+  font-size: 10px;
+  line-height: 1.4;
+  margin: 0;
+}
+.paired-input-label {
+  display: grid;
+  gap: 4px;
+  color: #60798a;
+  font: 9px Consolas, monospace;
+  letter-spacing: .7px;
+  text-transform: uppercase;
+}
+.paired-input-label input {
+  font: 12px Consolas, monospace;
+  letter-spacing: normal;
+  text-transform: none;
+}
+.paired-suggestions {
+  display: grid;
+  gap: 5px;
+}
+.paired-suggestions > small {
+  color: #6f8798;
+  font-size: 10px;
+}
+.paired-suggestion-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.paired-chip {
+  display: grid;
+  gap: 2px;
+  text-align: left;
+  padding: 6px 9px;
+  font-size: 11px;
+  border: 1px solid #1d3a4e;
+  background: #0d1c28;
+  color: #d6e3ea;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.paired-chip strong {
+  color: #49e1bd;
+  font: 700 11px Consolas, monospace;
+}
+.paired-chip span {
+  font-size: 11px;
+}
+.paired-chip small {
+  color: #6f8798;
+  font-size: 10px;
+}
+.paired-chip:hover {
+  border-color: #396078;
+}
+.paired-chip.selected {
+  border-color: #49e1bd;
+  background: #0c2a26;
+}
+.paired-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.paired-actions .button {
+  padding: 6px 14px;
+  font-size: 11px;
+}
+.paired-actions .button:disabled {
+  cursor: not-allowed;
+  opacity: .45;
 }
 .drawer-history {
   padding: 0;

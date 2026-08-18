@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import subprocess
 import sys
 import threading
@@ -168,7 +169,7 @@ class StrategySelectionUpdate(BaseModel):
 
 
 class StrategyStatusUpdate(BaseModel):
-    status: Literal["", "live", "monitor", "candidate_live"]
+    status: Literal["", "live", "monitor", "candidate_live", "axi_live"]
 
 
 class StrategyNoMmAcceptanceUpdate(BaseModel):
@@ -178,6 +179,11 @@ class StrategyNoMmAcceptanceUpdate(BaseModel):
 class StrategyBacktestRiskAcceptanceUpdate(BaseModel):
     accepted: bool
     run_id: int = Field(gt=0)
+
+
+class StrategyPairedUpdate(BaseModel):
+    """Internal strategy ids of duplicated bots, whitespace-separated."""
+    paired_ids: str = Field(default="", max_length=2000)
 
 
 class SQXLinkReconcile(BaseModel):
@@ -632,6 +638,74 @@ def _active_strategy_accounts(
         for account in lineage_accounts["current"]
         if str(account or "").strip()
     }
+
+
+def _parse_paired_ids(raw: str | None) -> list[int]:
+    """Parse a whitespace-separated list of internal strategy ids."""
+    seen: set[int] = set()
+    result: list[int] = []
+    for token in str(raw or "").split():
+        try:
+            value = int(token)
+        except (TypeError, ValueError):
+            continue
+        if value > 0 and value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
+
+
+def _normalize_name(raw: str | None) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(raw or "").lower())
+
+
+def _strategy_normalized_names(conn: Any, strategy: Any) -> set[str]:
+    """Normalized sqx/mql5/manual display names used to detect duplicated bots."""
+    names = set()
+    for raw in (strategy["sqx_name"], strategy["mql5_name"]):
+        normalized = _normalize_name(raw)
+        if normalized:
+            names.add(normalized)
+    for row in conn.execute(
+        """SELECT display_name FROM strategy_display_names WHERE strategy_id=?""",
+        (int(strategy["id"]),),
+    ).fetchall():
+        normalized = _normalize_name(row["display_name"])
+        if normalized:
+            names.add(normalized)
+    return names
+
+
+def _strategy_accounts(conn: Any, strategy: Any) -> set[str]:
+    """Accounts that scope a strategy: assigned login plus current lineage."""
+    accounts = {str(strategy["account_login"] or "").strip()}
+    accounts.update(_lineage_accounts(conn, int(strategy["id"]))["current"])
+    return {account for account in accounts if account}
+
+
+def _paired_group_members(conn: Any, seeds: list[int]) -> set[int]:
+    """Transitive closure over the current paired_strategy_ids graph.
+
+    A pairing is a symmetric group: every member lists every other member, so
+    rewriting one member's list must also rewrite everyone who currently shares
+    the group (former members get unlinked, new members get linked).
+    """
+    seen: set[int] = set()
+    stack = list(seeds)
+    while stack:
+        current = stack.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        row = conn.execute(
+            "SELECT paired_strategy_ids FROM strategies WHERE id=?", (current,)
+        ).fetchone()
+        if not row:
+            continue
+        for neighbor in _parse_paired_ids(str(row["paired_strategy_ids"] or "")):
+            if neighbor not in seen:
+                stack.append(neighbor)
+    return seen
 
 
 def _window_start(window: str, start: str | None) -> int:
@@ -1592,6 +1666,7 @@ def dashboard_data(
                     "primary_magic_number": primary_magic_number,
                     "magic_number_details": magic_number_details,
                     "recent_equity_curve": recent_equity_curve,
+                    "paired_ids": _parse_paired_ids(str(strategy["paired_strategy_ids"] or "")),
                 }
             )
         asset_options = [
@@ -2457,6 +2532,109 @@ def put_strategy_status(
         if result.rowcount == 0:
             raise HTTPException(404, "Strategy not found")
     return {"strategy_id": strategy_id, "status": payload.status}
+
+
+@app.get("/api/strategies/{strategy_id}/duplicates")
+def get_strategy_duplicates(strategy_id: int) -> list[dict[str, Any]]:
+    """Suggest duplicated bots: same normalized name and symbol on another account.
+
+    The suggestions only pre-fill the pairing field; the user keeps full
+    control over which internal ids are finally paired.
+    """
+    with session() as conn:
+        strategy = conn.execute(
+            "SELECT * FROM strategies WHERE id=? AND archived_at IS NULL",
+            (strategy_id,),
+        ).fetchone()
+        if not strategy:
+            raise HTTPException(404, "Strategy not found")
+        self_names = _strategy_normalized_names(conn, strategy)
+        self_symbol = _normalize_name(str(strategy["symbol"] or ""))
+        self_accounts = _strategy_accounts(conn, strategy)
+        already_paired = set(_parse_paired_ids(str(strategy["paired_strategy_ids"] or "")))
+        candidates: list[dict[str, Any]] = []
+        for row in conn.execute(
+            """SELECT * FROM strategies
+               WHERE id<>? AND retired=0 AND archived_at IS NULL
+               ORDER BY symbol,id""",
+            (strategy_id,),
+        ).fetchall():
+            candidate_names = _strategy_normalized_names(conn, row)
+            candidate_symbol = _normalize_name(str(row["symbol"] or ""))
+            if not self_names.intersection(candidate_names):
+                continue
+            if not self_symbol or not candidate_symbol or candidate_symbol != self_symbol:
+                continue
+            candidate_accounts = _strategy_accounts(conn, row)
+            if candidate_accounts.intersection(self_accounts):
+                continue
+            candidate_id = int(row["id"])
+            candidates.append({
+                "id": candidate_id,
+                "account_login": str(row["account_login"] or ""),
+                "symbol": str(row["symbol"] or ""),
+                "sqx_name": str(row["sqx_name"] or ""),
+                "mql5_name": str(row["mql5_name"] or ""),
+                "reason": "same name and symbol on a different account",
+                "already_paired": candidate_id in already_paired,
+            })
+    return candidates
+
+
+@app.put("/api/strategies/{strategy_id}/paired")
+def put_strategy_paired(
+    strategy_id: int, payload: StrategyPairedUpdate
+) -> dict[str, Any]:
+    """Save the duplicated-bot pairing and mirror it across the whole group.
+
+    The pairing is symmetric: every member lists every other member of the
+    group.  Saving one member's list therefore rewrites the lists of every
+    strategy that currently shares the group (former members are unlinked).
+    """
+    requested = _parse_paired_ids(payload.paired_ids)
+    with session() as conn:
+        strategy = conn.execute(
+            "SELECT * FROM strategies WHERE id=? AND archived_at IS NULL",
+            (strategy_id,),
+        ).fetchone()
+        if not strategy:
+            raise HTTPException(404, "Strategy not found")
+        if strategy_id in requested:
+            raise HTTPException(422, "A strategy cannot be paired with itself")
+        if requested:
+            placeholders = ",".join("?" for _ in requested)
+            existing_ids = {
+                int(row["id"])
+                for row in conn.execute(
+                    f"""SELECT id FROM strategies
+                        WHERE id IN ({placeholders})
+                          AND archived_at IS NULL AND retired=0""",
+                    requested,
+                ).fetchall()
+            }
+            missing = [value for value in requested if value not in existing_ids]
+            if missing:
+                raise HTTPException(
+                    422, f"Unknown or archived strategy ids: {', '.join(map(str, missing))}"
+                )
+        old_group = _paired_group_members(conn, [strategy_id, *requested])
+        new_group = {strategy_id} | set(requested)
+        affected = old_group | new_group
+        updates: dict[int, list[int]] = {}
+        for member in affected:
+            # Members of the new group list every other member; former members
+            # that were dropped from the group get unlinked entirely.
+            member_ids = sorted(new_group - {member}) if member in new_group else []
+            updates[member] = member_ids
+            conn.execute(
+                "UPDATE strategies SET paired_strategy_ids=? WHERE id=?",
+                (" ".join(map(str, member_ids)), member),
+            )
+    return {
+        "strategy_id": strategy_id,
+        "paired_ids": updates[strategy_id],
+        "updates": updates,
+    }
 
 
 @app.put("/api/strategies/{strategy_id}/no-mm-acceptance")
