@@ -1900,6 +1900,12 @@ export default function App() {
   const dashboardRequestRef = useRef<{ id: number; controller: AbortController | null }>({ id: 0, controller: null })
   const journalRequestRef = useRef<{ id: number; controller: AbortController | null }>({ id: 0, controller: null })
   const dashboardQuery = useMemo(() => buildDashboardQuery(windowName, customStart, customEnd, brokerAccounts, assets), [windowName, customStart, customEnd, brokerAccounts, assets])
+  // The query that the currently rendered strategy rows were actually loaded
+  // with.  While a filter change is in flight, the rows still show the previous
+  // account's data, so prefetching must use this query rather than the live
+  // one: otherwise every account switch prefetches the old rows against the
+  // new account and fires a burst of 404 panel-history requests.
+  const [appliedDashboardQuery, setAppliedDashboardQuery] = useState('')
   const restoreOverviewScroll = useCallback((scrollLeft: number, scrollTop: number) => {
     requestAnimationFrame(() => {
       if (overviewTopScrollRef.current) overviewTopScrollRef.current.scrollLeft = scrollLeft
@@ -1919,6 +1925,7 @@ export default function App() {
       const payload = await api<Dashboard>(`/api/dashboard?${dashboardQuery}`, { signal: controller.signal })
       if (dashboardRequestRef.current.id !== id) return
       setData(payload)
+      setAppliedDashboardQuery(dashboardQuery)
       setHistoryRefreshVersion(current => current + 1)
       // null represents "all" and avoids a second request after initial load.
       setAssets(current => current === null ? null : new Set([...current].filter(asset => payload.asset_options.some(option => option.key === asset))))
@@ -2223,7 +2230,7 @@ export default function App() {
     return [...filtered].sort((a, b) => compareStrategies(a, b, sort.key, sort.direction))
   }, [filtered, sort])
   useEffect(() => {
-    if (tab !== 'overview') return
+    if (tab !== 'overview' || !appliedDashboardQuery) return
     const idleCallbacks = new Set<number>()
     const observer = new IntersectionObserver(entries => {
       entries.forEach(entry => {
@@ -2234,7 +2241,7 @@ export default function App() {
         const schedule = window.requestIdleCallback || ((callback: IdleRequestCallback) => window.setTimeout(callback, 1))
         const callbackId = schedule(() => {
           idleCallbacks.delete(callbackId)
-          prefetchPanelHistory(strategyId, dashboardQuery, 'idle')
+          prefetchPanelHistory(strategyId, appliedDashboardQuery, 'idle')
         })
         idleCallbacks.add(callbackId)
       })
@@ -2248,7 +2255,7 @@ export default function App() {
         else window.clearTimeout(callbackId)
       })
     }
-  }, [tab, sortedStrategies, dashboardQuery])
+  }, [tab, sortedStrategies, appliedDashboardQuery])
   useEffect(() => {
     const topScroll = overviewTopScrollRef.current
     const tableScroll = overviewTableScrollRef.current
@@ -2362,7 +2369,7 @@ export default function App() {
                 const alias = accountAlias(accountAliases, strategy.account_login)
                 const stateLabel = stateLabels[strategy.state] || strategy.state
                 const healthTitle = strategy.health.reasons.join(', ') || 'No active alerts'
-                return <tr key={strategy.id} data-strategy-id={strategy.id} tabIndex={0} className={`${selectedId === strategy.id ? 'selected-row ' : ''}${strategy.selection ? 'stopped-row' : ''}`} onPointerEnter={() => prefetchPanelHistory(strategy.id, dashboardQuery, 'hover')} onFocus={() => prefetchPanelHistory(strategy.id, dashboardQuery, 'hover')} onClick={() => { setSelectedId(strategy.id); if (autoOpenPanel) setPanelStrategyId(strategy.id) }}>
+                return <tr key={strategy.id} data-strategy-id={strategy.id} tabIndex={0} className={`${selectedId === strategy.id ? 'selected-row ' : ''}${strategy.selection ? 'stopped-row' : ''}`} onPointerEnter={() => appliedDashboardQuery && prefetchPanelHistory(strategy.id, appliedDashboardQuery, 'hover')} onFocus={() => appliedDashboardQuery && prefetchPanelHistory(strategy.id, appliedDashboardQuery, 'hover')} onClick={() => { setSelectedId(strategy.id); if (autoOpenPanel) setPanelStrategyId(strategy.id) }}>
                   <td>{strategy.id}</td>
                   <td className="selection-column"><input type="checkbox" aria-label={`Mark ${displayName(strategy)} as stopped`} checked={strategy.selection} disabled={selectionSaving.has(strategy.id)} onClick={event => event.stopPropagation()} onChange={event => updateStrategySelection(strategy.id, event.target.checked)}/></td>
                   <td className="backtest-cell"><BacktestBadge summary={strategy.backtest}/></td>

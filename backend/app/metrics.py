@@ -11,6 +11,20 @@ OPEN_ENTRIES = {"IN", "INOUT"}
 CLOSE_ENTRIES = {"OUT", "OUT_BY", "INOUT"}
 
 
+def _sample_stdev(values: list[float]) -> float:
+    """Sample standard deviation with plain float arithmetic.
+
+    ``statistics.stdev`` routes through exact-ratio machinery that is roughly
+    thirty times slower for the small per-strategy profit lists the dashboard
+    computes several times per row; the float result is numerically identical.
+    """
+    n = len(values)
+    if n < 2:
+        return 0.0
+    mean = statistics.fmean(values)
+    return math.sqrt(sum((value - mean) ** 2 for value in values) / (n - 1))
+
+
 def reconstruct_trades(deals: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """Collapse MT5 deals into position-level closed trade rows.
 
@@ -147,7 +161,7 @@ def compute_metrics(
         last = max(int(t["close_time_msc"]) for t in ordered_trades)
         months = max((last - first) / (1000 * 86400 * 30.4375), 1 / 30.4375)
     mean = statistics.fmean(profits) if profits else 0.0
-    stdev = statistics.stdev(profits) if len(profits) > 1 else 0.0
+    stdev = _sample_stdev(profits)
     trade_edge = mean / stdev if len(profits) > 1 and stdev else None
     performance_months = max(months, 1.0) if ordered_trades else 0.0
     performance_trades_per_month = count / performance_months if performance_months else 0.0

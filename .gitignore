@@ -9,6 +9,7 @@ data/backups/
 data/chr_all/
 data/chr_probe/
 backend/tmp_pairs_test/
+.pytest-tmp/
 *.log
 *.tsbuildinfo
 __pycache__/

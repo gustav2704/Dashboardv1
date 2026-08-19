@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
@@ -22,7 +23,7 @@ from .catalog import import_catalog
 from .catalog_export import export_catalog
 from .config import ACTIVE_BACKTEST_BROKER, BACKTEST_DIR, DEFAULT_CATALOG, DEFAULT_TERMINAL, EXPORT_DIR, FRONTEND_DIST, REFRESH_SECONDS
 from .db import DB_PATH, DEFAULT_ALERTS, init_db, rows, session, utcnow
-from .history_import import import_tradebuddy_history, imported_history_trades
+from .history_import import import_tradebuddy_history, imported_history_index, imported_history_trades
 from .identity_audit import audit as identity_audit
 from .expert_identity_migration import audit as expert_identity_audit
 from .mapping import annotate_magic_scope_counts, asset_key, asset_label, auto_confirm_suggestions, confirm_mapping, stable_comment, suggestions
@@ -55,6 +56,31 @@ _WORKER_CYCLE_LOCK = threading.Lock()
 _PENDING_CANDIDATE_CACHE_TTL_SECONDS = 300.0
 _pending_candidate_cache_lock = threading.Lock()
 _pending_candidate_cache: tuple[float, str, int, frozenset[int]] | None = None
+# _backtest_summaries is rebuilt for every dashboard read and is the single
+# most expensive phase: it parses every run's JSON config/metrics and performs
+# dozens of filesystem artifact checks.  Its inputs only change when backtest
+# runs/batch items/strategies change (no-MM or risk acceptance is re-applied
+# per row after the cache), so a version-keyed in-process cache makes repeated
+# account-filtered reads cheap.  The TTL also picks up report files that the
+# equity-curve preload thread writes after a run row already exists.
+_BACKTEST_SUMMARIES_CACHE_TTL_SECONDS = 20.0
+_backtest_summaries_cache_lock = threading.Lock()
+_backtest_summaries_cache: tuple[str, float, dict[int, dict[str, Any]]] | None = None
+# Reconstructed trades depend only on immutable deal rows; cache the rebuilt
+# trade list and its indexes across requests until the deals table changes.
+# Keyed per database file so isolated test databases never share stale rows.
+_deals_cache_lock = threading.Lock()
+_deals_cache: tuple[
+    str, list[dict[str, Any]],
+    dict[int, list[dict[str, Any]]],
+    dict[tuple[int, int], list[dict[str, Any]]],
+    dict[tuple[int, int, str], list[dict[str, Any]]],
+] | None = None
+# The latest balance and the oldest snapshot per broker account are derived by
+# scanning every account snapshot (thousands of rows).  Snapshots are
+# append-mostly, so cache the derived maps until the table content changes.
+_account_snapshots_cache_lock = threading.Lock()
+_account_snapshots_cache: tuple[str, dict[str, float | None], dict[str, float]] | None = None
 
 
 class TerminalCreate(BaseModel):
@@ -953,7 +979,43 @@ def _latest_sqx_analytics(conn: Any, strategy_id: int) -> dict[str, Any] | None:
     }
 
 
+def _db_file_identity(conn: Any) -> str:
+    """Return the absolute database file backing a connection.
+
+    Tests run against isolated temporary databases; caches keyed only on row
+    counts could otherwise leak state across databases that happen to have the
+    same table shapes.
+    """
+    row = conn.execute("PRAGMA database_list").fetchone()
+    return str(row["file"]) if row else ""
+
+
+def _backtest_summaries_version(conn: Any) -> str:
+    row = conn.execute(
+        """SELECT
+             (SELECT COALESCE(MAX(id),0)||':'||COUNT(*) FROM backtest_runs),
+             (SELECT COALESCE(MAX(id),0)||':'||COUNT(*) FROM backtest_batch_items),
+             (SELECT COALESCE(MAX(id),0)||':'||COUNT(*) FROM strategies)"""
+    ).fetchone()
+    return f"{_db_file_identity(conn)}:{':'.join(str(value) for value in row)}"
+
+
 def _backtest_summaries(conn: Any) -> dict[int, dict[str, Any]]:
+    """Return the aggregated per-strategy backtest summaries, cached."""
+    global _backtest_summaries_cache
+    version = _backtest_summaries_version(conn)
+    now = time.monotonic()
+    with _backtest_summaries_cache_lock:
+        cached = _backtest_summaries_cache
+        if cached and cached[0] == version and now - cached[1] < _BACKTEST_SUMMARIES_CACHE_TTL_SECONDS:
+            return cached[2]
+    result = _build_backtest_summaries(conn)
+    with _backtest_summaries_cache_lock:
+        _backtest_summaries_cache = (version, now, result)
+    return result
+
+
+def _build_backtest_summaries(conn: Any) -> dict[int, dict[str, Any]]:
     summary_rows = conn.execute(
         """
         WITH ranked AS (
@@ -1117,6 +1179,306 @@ def _invalidate_pending_candidate_cache() -> None:
         _pending_candidate_cache = None
 
 
+def _identity_by_strategy(conn: Any) -> dict[int, int]:
+    return {
+        int(row["id"]): int(row["identity_strategy_id"] or row["id"])
+        for row in conn.execute("SELECT id,identity_strategy_id FROM strategies")
+    }
+
+
+def _preload_sqx_analytics(conn: Any) -> dict[int, dict[str, Any] | None]:
+    """Latest SQX analytics snapshot per strategy, one query instead of N."""
+    result: dict[int, dict[str, Any] | None] = {}
+    for row in rows(conn.execute(
+        """SELECT strategy_id,project,databank,analytics_json,synced_at,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY strategy_id ORDER BY synced_at DESC,rowid DESC
+                  ) AS rn
+           FROM sqx_analytics_snapshots"""
+    )):
+        if int(row["rn"]) != 1:
+            continue
+        try:
+            payload = json.loads(row["analytics_json"])
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+        result[int(row["strategy_id"])] = {
+            "project": row["project"],
+            "databank": row["databank"],
+            "synced_at": row["synced_at"],
+            "edge": payload.get("edge", {"available": False, "reason": "No disponible"}),
+            "egt": payload.get("egt", {"available": False, "reason": "No disponible"}),
+            "doctor": payload.get("doctor", {"available": False, "reason": "No disponible"}),
+        }
+    return result
+
+
+def _preload_baselines_by_identity(conn: Any) -> dict[int, list[dict[str, Any]]]:
+    """Newest baseline of each kind per identity root, one query instead of N.
+
+    Mirrors ``_latest_baselines`` exactly: rows are visited in SQX-first then
+    ``synced_at`` order and the first occurrence of each (source, sample_type)
+    pair wins.  Identity families are resolved through ``identity_strategy_id``.
+    """
+    identity_by_strategy = _identity_by_strategy(conn)
+    result: dict[int, list[dict[str, Any]]] = {}
+    for row in rows(conn.execute(
+        """SELECT * FROM baseline_snapshots
+           ORDER BY CASE source WHEN 'sqx' THEN 0 ELSE 1 END,synced_at DESC"""
+    )):
+        if (
+            str(row["source"] or "").lower() == "mt5_backtest"
+            and str(row["databank"] or "") != ACTIVE_BACKTEST_BROKER
+        ):
+            continue
+        root = identity_by_strategy.get(int(row["strategy_id"]), int(row["strategy_id"]))
+        bucket = result.setdefault(root, [])
+        key = (str(row["source"]).lower(), str(row["sample_type"]).lower())
+        if any(
+            (str(item["source"]).lower(), str(item["sample_type"]).lower()) == key
+            for item in bucket
+        ):
+            continue
+        item = dict(row)
+        try:
+            item["metrics"] = json.loads(item.pop("metrics_json"))
+        except (TypeError, json.JSONDecodeError):
+            item["metrics"] = {}
+        item.pop("orders_json", None)
+        bucket.append(item)
+    return result
+
+
+def _preload_sqx_links(conn: Any) -> dict[int, dict[str, Any] | None]:
+    """Latest SQX strategy link per strategy, one query instead of N."""
+    result: dict[int, dict[str, Any] | None] = {}
+    for row in rows(conn.execute(
+        """SELECT strategy_id,project,databank,strategy_name,symbol,timeframe,
+                  filter_result,last_synced_at,missing_from_sqx_at,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY strategy_id ORDER BY last_synced_at DESC,rowid DESC
+                  ) AS rn
+           FROM sqx_strategy_links"""
+    )):
+        if int(row["rn"]) != 1:
+            continue
+        result[int(row["strategy_id"])] = {
+            "project": row["project"],
+            "databank": row["databank"],
+            "strategy_name": row["strategy_name"],
+            "symbol": row["symbol"],
+            "timeframe": row["timeframe"],
+            "filter_result": row["filter_result"],
+            "last_synced_at": row["last_synced_at"],
+            "missing_from_sqx_at": row["missing_from_sqx_at"],
+        }
+    return result
+
+
+def _preload_latest_alert_runs(conn: Any) -> dict[int, dict[str, Any] | None]:
+    """Latest backtest run (by requested_at,id) per identity family, batched."""
+    identity_by_strategy = _identity_by_strategy(conn)
+    result: dict[int, dict[str, Any] | None] = {}
+    for row in rows(conn.execute(
+        "SELECT strategy_id,status,requested_at,id FROM backtest_runs"
+    )):
+        root = identity_by_strategy.get(int(row["strategy_id"]), int(row["strategy_id"]))
+        current = result.get(root)
+        if current is None or (
+            str(row["requested_at"] or ""), int(row["id"])
+        ) > (
+            str(current["requested_at"] or ""), int(current["id"])
+        ):
+            result[root] = row
+    return result
+
+
+def _preload_display_names(conn: Any) -> dict[tuple[int, str], dict[str, Any]]:
+    result: dict[tuple[int, str], dict[str, Any]] = {}
+    for row in conn.execute(
+        "SELECT strategy_id,account_login,display_name,source FROM strategy_display_names"
+    ):
+        # First row wins, matching the original fetchone() semantics.
+        result.setdefault((int(row["strategy_id"]), str(row["account_login"] or "")), dict(row))
+    return result
+
+
+def _preload_alert_rules(conn: Any) -> tuple[dict[int, dict[str, Any]], dict[str, Any]]:
+    """Load every per-strategy alert rule plus the defaults in two queries."""
+    custom: dict[int, dict[str, Any]] = {}
+    for row in conn.execute("SELECT key,value_json FROM settings WHERE key LIKE 'alerts:%'"):
+        sid = str(row["key"]).removeprefix("alerts:")
+        if not sid.isdigit():
+            continue
+        try:
+            custom[int(sid)] = json.loads(row["value_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            custom[int(sid)] = {}
+    defaults: dict[str, Any] = {}
+    row = conn.execute("SELECT value_json FROM settings WHERE key='alert_defaults'").fetchone()
+    if row:
+        try:
+            defaults = json.loads(row["value_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            defaults = {}
+    return custom, {**DEFAULT_ALERTS, **defaults}
+
+
+def _cached_reconstructed_trades(
+    conn: Any,
+) -> tuple[
+    list[dict[str, Any]],
+    dict[int, list[dict[str, Any]]],
+    dict[tuple[int, int], list[dict[str, Any]]],
+    dict[tuple[int, int, str], list[dict[str, Any]]],
+]:
+    """Return reconstructed trades plus the per-terminal/magic/symbol indexes.
+
+    Deals are append-only in practice, so the expensive reconstruction and
+    index building are reused until the deals table content changes.  The key
+    includes the database file so isolated test databases cannot collide.
+    """
+    global _deals_cache
+    version_row = conn.execute(
+        "SELECT COALESCE(MAX(id),0)||':'||COUNT(*) FROM deals"
+    ).fetchone()
+    version = f"{_db_file_identity(conn)}:{version_row[0]}"
+    with _deals_cache_lock:
+        cached = _deals_cache
+        if cached and cached[0] == version:
+            return cached[1], cached[2], cached[3], cached[4]
+    trades_all = reconstruct_trades(rows(conn.execute("SELECT * FROM deals ORDER BY time_msc,ticket")))
+    trades_by_terminal: dict[int, list[dict[str, Any]]] = {}
+    trades_by_terminal_magic: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    trades_by_terminal_magic_symbol: dict[tuple[int, int, str], list[dict[str, Any]]] = {}
+    for trade in trades_all:
+        terminal_id = int(trade.get("terminal_id") or 0)
+        magic = int(trade.get("magic") or 0)
+        symbol = str(trade.get("symbol") or "").lower()
+        trades_by_terminal.setdefault(terminal_id, []).append(trade)
+        trades_by_terminal_magic.setdefault((terminal_id, magic), []).append(trade)
+        trades_by_terminal_magic_symbol.setdefault((terminal_id, magic, symbol), []).append(trade)
+    with _deals_cache_lock:
+        _deals_cache = (version, trades_all, trades_by_terminal, trades_by_terminal_magic, trades_by_terminal_magic_symbol)
+    return trades_all, trades_by_terminal, trades_by_terminal_magic, trades_by_terminal_magic_symbol
+
+
+def _cached_account_snapshot_maps(
+    conn: Any,
+) -> tuple[dict[str, float | None], dict[str, float]]:
+    """Latest balance and oldest balance per broker account, cached."""
+    global _account_snapshots_cache
+    # Snapshots are append-only in this application (nothing deletes them), so
+    # MAX(id) is a sufficient version signal and avoids a slow COUNT(*) scan
+    # over the thousands of snapshot rows on every dashboard read.
+    version_row = conn.execute(
+        "SELECT COALESCE(MAX(id),0) FROM account_snapshots"
+    ).fetchone()
+    version = f"{_db_file_identity(conn)}:{version_row[0]}"
+    with _account_snapshots_cache_lock:
+        cached = _account_snapshots_cache
+        if cached and cached[0] == version:
+            return cached[1], cached[2]
+    account_balances: dict[str, float | None] = {}
+    balance_rows = conn.execute(
+        """SELECT t.account_login,s.balance
+           FROM account_snapshots s
+           JOIN terminals t ON t.id=s.terminal_id
+           WHERE t.account_login IS NOT NULL AND t.account_login<>''
+           ORDER BY s.captured_at DESC,s.id DESC"""
+    ).fetchall()
+    for balance_row in balance_rows:
+        account_login = str(balance_row["account_login"] or "").strip()
+        if account_login and account_login not in account_balances:
+            balance = balance_row["balance"]
+            account_balances[account_login] = float(balance) if balance is not None else None
+    account_initial_capitals: dict[str, float] = {}
+    initial_balance_rows = conn.execute(
+        """SELECT t.account_login,s.balance
+           FROM account_snapshots s
+           JOIN terminals t ON t.id=s.terminal_id
+           WHERE t.account_login IS NOT NULL AND t.account_login<>''
+             AND s.balance IS NOT NULL
+           ORDER BY s.captured_at ASC,s.id ASC"""
+    ).fetchall()
+    for balance_row in initial_balance_rows:
+        account_login = str(balance_row["account_login"] or "").strip()
+        if account_login and account_login not in account_initial_capitals:
+            account_initial_capitals[account_login] = float(balance_row["balance"])
+    with _account_snapshots_cache_lock:
+        _account_snapshots_cache = (version, account_balances, account_initial_capitals)
+    return account_balances, account_initial_capitals
+
+
+def _dashboard_lookups_version(conn: Any) -> str:
+    """Version the batched per-strategy lookups by their source tables.
+
+    These tables are all small (hundreds of rows), so COUNT(*) is cheap; only
+    account_snapshots is large enough to need a MAX(id)-only signal.
+    """
+    row = conn.execute(
+        """SELECT
+             (SELECT COALESCE(MAX(id),0)||':'||COUNT(*) FROM sqx_analytics_snapshots),
+             (SELECT COALESCE(MAX(id),0)||':'||COUNT(*) FROM baseline_snapshots),
+             (SELECT COALESCE(MAX(id),0)||':'||COUNT(*) FROM sqx_strategy_links),
+             (SELECT COUNT(*) FROM alert_episodes WHERE resolved_at IS NULL),
+             (SELECT COALESCE(MAX(id),0)||':'||COUNT(*) FROM imported_history_trades),
+             (SELECT COALESCE(MAX(id),0)||':'||COUNT(*) FROM backtest_runs),
+             (SELECT COALESCE(MAX(id),0)||':'||COUNT(*) FROM strategies),
+             (SELECT COALESCE(MAX(id),0)||':'||COUNT(*) FROM strategy_display_names),
+             (SELECT COUNT(*) FROM settings)"""
+    ).fetchone()
+    return f"{_db_file_identity(conn)}:{':'.join(str(value) for value in row)}"
+
+
+_DASHBOARD_LOOKUPS_CACHE_TTL_SECONDS = 20.0
+_dashboard_lookups_cache_lock = threading.Lock()
+_dashboard_lookups_cache: tuple[str, float, dict[str, Any]] | None = None
+
+
+def _dashboard_lookups(conn: Any) -> dict[str, Any]:
+    """Return the batched per-strategy lookups, cached until their sources change.
+
+    Batching replaces the per-strategy N+1 queries, but building the batch still
+    reads data for every strategy; caching it keeps repeated (filtered) reads
+    from paying that fixed cost on each request.
+    """
+    global _dashboard_lookups_cache
+    version = _dashboard_lookups_version(conn)
+    now = time.monotonic()
+    with _dashboard_lookups_cache_lock:
+        cached = _dashboard_lookups_cache
+        if cached and cached[0] == version and now - cached[1] < _DASHBOARD_LOOKUPS_CACHE_TTL_SECONDS:
+            return cached[2]
+    custom_alert_rules, merged_alert_defaults = _preload_alert_rules(conn)
+    active_episodes_by_strategy: dict[int, list[dict[str, Any]]] = {}
+    for row in conn.execute(
+        """SELECT * FROM alert_episodes WHERE resolved_at IS NULL
+           ORDER BY CASE severity WHEN 'red' THEN 0 ELSE 1 END,
+                    first_detected_at,id"""
+    ):
+        item = dict(row)
+        try:
+            item["details"] = json.loads(item.pop("details_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            item["details"] = {}
+        active_episodes_by_strategy.setdefault(int(row["strategy_id"]), []).append(item)
+    lookups = {
+        "sqx_analytics_by_identity": _preload_sqx_analytics(conn),
+        "baselines_by_identity": _preload_baselines_by_identity(conn),
+        "sqx_links_by_strategy": _preload_sqx_links(conn),
+        "display_names_by_key": _preload_display_names(conn),
+        "latest_alert_run_by_identity": _preload_latest_alert_runs(conn),
+        "custom_alert_rules": custom_alert_rules,
+        "merged_alert_defaults": merged_alert_defaults,
+        "active_episodes_by_strategy": active_episodes_by_strategy,
+        "imported_history_index": imported_history_index(conn),
+    }
+    with _dashboard_lookups_cache_lock:
+        _dashboard_lookups_cache = (version, now, lookups)
+    return lookups
+
+
 def dashboard_data(
     window: str = "all",
     start: str | None = None,
@@ -1145,20 +1507,23 @@ def dashboard_data(
             "SELECT * FROM strategies WHERE archived_at IS NULL ORDER BY symbol,sqx_name"
         ).fetchall()
         mappings_by_strategy = _dashboard_confirmed_mappings(conn)
-        deals = rows(conn.execute("SELECT * FROM deals ORDER BY time_msc,ticket"))
-        trades_all = reconstruct_trades(deals)
-        trades_by_terminal: dict[int, list[dict[str, Any]]] = {}
-        trades_by_terminal_magic: dict[tuple[int, int], list[dict[str, Any]]] = {}
-        trades_by_terminal_magic_symbol: dict[tuple[int, int, str], list[dict[str, Any]]] = {}
-        for trade in trades_all:
-            terminal_id = int(trade.get("terminal_id") or 0)
-            magic = int(trade.get("magic") or 0)
-            symbol = str(trade.get("symbol") or "").lower()
-            trades_by_terminal.setdefault(terminal_id, []).append(trade)
-            trades_by_terminal_magic.setdefault((terminal_id, magic), []).append(trade)
-            trades_by_terminal_magic_symbol.setdefault((terminal_id, magic, symbol), []).append(trade)
+        trades_all, trades_by_terminal, trades_by_terminal_magic, trades_by_terminal_magic_symbol = _cached_reconstructed_trades(conn)
         positions_all = rows(conn.execute("SELECT * FROM positions"))
         backtest_summaries = _backtest_summaries(conn)
+        # Batched per-strategy lookups replace the N+1 queries that the account
+        # filter previously made especially visible; cached across requests.
+        lookups = _dashboard_lookups(conn)
+        sqx_analytics_by_identity = lookups["sqx_analytics_by_identity"]
+        baselines_by_identity = lookups["baselines_by_identity"]
+        sqx_links_by_strategy = lookups["sqx_links_by_strategy"]
+        display_names_by_key = lookups["display_names_by_key"]
+        latest_alert_run_by_identity = lookups["latest_alert_run_by_identity"]
+        custom_alert_rules = lookups["custom_alert_rules"]
+        merged_alert_defaults = lookups["merged_alert_defaults"]
+        active_episodes_by_strategy = lookups["active_episodes_by_strategy"]
+        imported_history_index_ = lookups["imported_history_index"]
+        def rules_for(identity_id: int) -> dict[str, Any]:
+            return {**merged_alert_defaults, **custom_alert_rules.get(identity_id, {})}
         lineages_by_strategy: dict[int, dict[str, list[str]]] = {}
         for row in conn.execute(
             "SELECT strategy_id,account_login,role FROM strategy_account_lineage"
@@ -1199,32 +1564,7 @@ def dashboard_data(
                 profile_timeframes.setdefault(key, set()).add(
                     str(deployment["timeframe"]).strip().upper()
                 )
-        account_balances: dict[str, float | None] = {}
-        balance_rows = conn.execute(
-            """SELECT t.account_login,s.balance
-               FROM account_snapshots s
-               JOIN terminals t ON t.id=s.terminal_id
-               WHERE t.account_login IS NOT NULL AND t.account_login<>''
-               ORDER BY s.captured_at DESC,s.id DESC"""
-        ).fetchall()
-        for balance_row in balance_rows:
-            account_login = str(balance_row["account_login"] or "").strip()
-            if account_login and account_login not in account_balances:
-                balance = balance_row["balance"]
-                account_balances[account_login] = float(balance) if balance is not None else None
-        account_initial_capitals: dict[str, float] = {}
-        initial_balance_rows = conn.execute(
-            """SELECT t.account_login,s.balance
-               FROM account_snapshots s
-               JOIN terminals t ON t.id=s.terminal_id
-               WHERE t.account_login IS NOT NULL AND t.account_login<>''
-                 AND s.balance IS NOT NULL
-               ORDER BY s.captured_at ASC,s.id ASC"""
-        ).fetchall()
-        for balance_row in initial_balance_rows:
-            account_login = str(balance_row["account_login"] or "").strip()
-            if account_login and account_login not in account_initial_capitals:
-                account_initial_capitals[account_login] = float(balance_row["balance"])
+        account_balances, account_initial_capitals = _cached_account_snapshot_maps(conn)
         output = []
         asset_symbols_by_key: dict[str, set[str]] = {}
         available_accounts: set[str] = set()
@@ -1286,11 +1626,7 @@ def dashboard_data(
                         continue
                 elif not displayed_account_scope.intersection(selected_accounts):
                     continue
-            display_name_row = conn.execute(
-                """SELECT display_name,source FROM strategy_display_names
-                   WHERE strategy_id=? AND account_login=?""",
-                (strategy_id, effective_account),
-            ).fetchone()
+            display_name_row = display_names_by_key.get((strategy_id, effective_account))
             display_name = (
                 str(display_name_row["display_name"])
                 if display_name_row else strategy["mql5_name"] or strategy["sqx_name"]
@@ -1298,12 +1634,7 @@ def dashboard_data(
             historical_mappings = _historical_mappings_for_strategy(
                 mappings, live_mappings, predecessor_accounts, operational_mappings
             )
-            sqx_link = conn.execute(
-                """SELECT project,databank,strategy_name,symbol,timeframe,filter_result,
-                          last_synced_at,missing_from_sqx_at
-                   FROM sqx_strategy_links WHERE strategy_id=? ORDER BY last_synced_at DESC LIMIT 1""",
-                (identity_id,),
-            ).fetchone()
+            sqx_link = sqx_links_by_strategy.get(identity_id)
             deployment_timeframes = sorted({
                 str(deployment["timeframe"] or "").strip()
                 for deployment in deployments
@@ -1358,7 +1689,7 @@ def dashboard_data(
                 ],
                 key=lambda t: (int(t.get("close_time_msc", 0)), int(t.get("deal_ticket", 0))),
             )
-            imported_trades = imported_history_trades(conn, historical_mappings)
+            imported_trades = imported_history_trades(conn, historical_mappings, imported_history_index_)
             historical_magic_numbers = sorted({
                 int(trade["magic"])
                 for trade in imported_trades
@@ -1461,10 +1792,10 @@ def dashboard_data(
                 if current_account_metrics is not None and account_initial_capital not in (None, 0)
                 else None
             )
-            baselines = _latest_baselines(conn, identity_id)
-            sqx_analytics = _latest_sqx_analytics(conn, identity_id)
+            baselines = baselines_by_identity.get(identity_id, [])
+            sqx_analytics = sqx_analytics_by_identity.get(identity_id)
             baseline = pick_baseline(baselines)
-            rules = _load_rules(conn, identity_id)
+            rules = rules_for(identity_id)
             risk_guard = risk_guard_status(risk_metrics, baselines, rules)
             health = health_status(metrics, baseline, rules, risk_guard)
             backtest_summary = backtest_summaries.get(
@@ -1483,14 +1814,7 @@ def dashboard_data(
             )
             backtest_summary = _with_strategy_backtest_acceptance(dict(backtest_summary), strategy)
             persistent_health = health_status(risk_metrics, baseline, rules, risk_guard)
-            latest_alert_run = conn.execute(
-                """SELECT status FROM backtest_runs
-                   WHERE strategy_id=? OR strategy_id IN (
-                     SELECT id FROM strategies WHERE identity_strategy_id=?
-                   )
-                   ORDER BY requested_at DESC,id DESC LIMIT 1""",
-                (identity_id, identity_id),
-            ).fetchone()
+            latest_alert_run = latest_alert_run_by_identity.get(identity_id)
             latest_alert_backtest_status = (
                 str(latest_alert_run["status"]) if latest_alert_run else None
             )
@@ -1512,7 +1836,7 @@ def dashboard_data(
                     latest_alert_backtest_status,
                 )
             else:
-                active_alerts = alert_engine.active_episodes(conn, strategy_id)
+                active_alerts = active_episodes_by_strategy.get(strategy_id, [])
             health = alert_engine.merge_health(health, active_alerts)
             relevant_terminals = [
                 terminal for terminal in terminal_rows
@@ -1748,7 +2072,7 @@ def journal_analysis_data(
             "SELECT * FROM strategies WHERE archived_at IS NULL ORDER BY symbol,sqx_name"
         ).fetchall()
         mappings_by_strategy = _dashboard_confirmed_mappings(conn)
-        trades_all = reconstruct_trades(rows(conn.execute("SELECT * FROM deals ORDER BY time_msc,ticket")))
+        trades_all, _, _, _ = _cached_reconstructed_trades(conn)
         terminal_accounts = {
             int(row["id"]): str(row["account_login"] or "")
             for row in conn.execute("SELECT id,account_login FROM terminals")
@@ -2038,6 +2362,9 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Dashboardv1", version="1.0.0", lifespan=lifespan)
+# The dashboard payload is 1.3-3.2 MB of highly repetitive JSON; gzip cuts the
+# wire size by roughly an order of magnitude for localhost transfer and parse.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 
 @app.get("/api/health")

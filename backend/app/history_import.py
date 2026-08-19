@@ -433,11 +433,34 @@ def import_tradebuddy_history(
     }
 
 
-def imported_history_trades(conn: Any, mappings: list[Any]) -> list[dict[str, Any]]:
+def imported_history_index(conn: Any) -> tuple[dict[str, list[dict[str, Any]]], dict[tuple[str, int], list[dict[str, Any]]]]:
+    """Load every imported-history row and index it by source account and magic.
+
+    The table is small (about a thousand rows) but the dashboard matches it per
+    strategy; pre-indexing avoids re-scanning the whole table for every row.
+    """
+    by_account: dict[str, list[dict[str, Any]]] = {}
+    by_account_magic: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    for row in rows(conn.execute("SELECT * FROM imported_history_trades")):
+        account = str(row["source_account"] or "")
+        magic = int(row["magic"] or 0)
+        by_account.setdefault(account, []).append(row)
+        by_account_magic.setdefault((account, magic), []).append(row)
+    return by_account, by_account_magic
+
+
+def imported_history_trades(
+    conn: Any,
+    mappings: list[Any],
+    index: tuple[dict[str, list[dict[str, Any]]], dict[tuple[str, int], list[dict[str, Any]]]] | None = None,
+) -> list[dict[str, Any]]:
+    """Return imported-history trades matching the supplied historical mappings.
+
+    ``index`` lets callers build ``imported_history_index`` once and reuse it
+    across many strategies; without it the index is built from the database.
+    """
     if not mappings:
         return []
-    clauses = []
-    params: list[Any] = []
     eligible_mappings: list[Any] = []
     for mapping in mappings:
         comment = str(mapping["comment_pattern"] or "").casefold().strip()
@@ -446,26 +469,10 @@ def imported_history_trades(conn: Any, mappings: list[Any]) -> list[dict[str, An
         # bot identity across accounts.
         if not comment:
             continue
-        flexible = bool(mapping.get("historical_magic_flexible", 0)) if isinstance(mapping, dict) else bool(mapping["historical_magic_flexible"] if "historical_magic_flexible" in mapping.keys() else 0)
-        identity = "source_account=? AND LOWER(comment) LIKE ?"
-        values: list[Any] = [str(mapping["account_login"] or ""), f"%{comment}%"]
-        if not flexible:
-            identity += " AND magic=?"
-            values.append(int(mapping["magic"] or 0))
-        clauses.append(f"({identity})")
-        params.extend(
-            values
-        )
         eligible_mappings.append(mapping)
-    if not clauses:
+    if not eligible_mappings:
         return []
-    history = rows(
-        conn.execute(
-            f"""SELECT * FROM imported_history_trades WHERE {' OR '.join(clauses)}
-                ORDER BY close_time_msc,source_ticket""",
-            params,
-        )
-    )
+    by_account, by_account_magic = index if index is not None else imported_history_index(conn)
     def matches_identity(row: dict[str, Any], mapping: Any) -> bool:
         pattern = str(mapping["comment_pattern"] or "").casefold().strip()
         flexible = bool(mapping.get("historical_magic_flexible", 0)) if isinstance(mapping, dict) else bool(mapping["historical_magic_flexible"] if "historical_magic_flexible" in mapping.keys() else 0)
@@ -478,7 +485,25 @@ def imported_history_trades(conn: Any, mappings: list[Any]) -> list[dict[str, An
             and (flexible or int(row["magic"] or 0) == int(mapping["magic"] or 0))
             and (not historical_until_msc or int(row["close_time_msc"] or 0) <= historical_until_msc)
         )
-    history = [row for row in history if any(matches_identity(row, mapping) for mapping in eligible_mappings)]
+    matched: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for mapping in eligible_mappings:
+        account = str(mapping["account_login"] or "")
+        flexible = bool(mapping.get("historical_magic_flexible", 0)) if isinstance(mapping, dict) else bool(mapping["historical_magic_flexible"] if "historical_magic_flexible" in mapping.keys() else 0)
+        candidates = (
+            by_account.get(account, [])
+            if flexible
+            else by_account_magic.get((account, int(mapping["magic"] or 0)), [])
+        )
+        for row in candidates:
+            marker = id(row)
+            if marker in seen:
+                continue
+            if any(matches_identity(row, item) for item in eligible_mappings):
+                seen.add(marker)
+                matched.append(row)
+    matched.sort(key=lambda row: (int(row["close_time_msc"] or 0), int(row["source_ticket"] or 0)))
+    history = matched
     result = []
     for row in history:
         result.append(
