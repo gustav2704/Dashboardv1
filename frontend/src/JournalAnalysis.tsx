@@ -57,6 +57,64 @@ const MONTHS = [
 ];
 
 export type PerformanceGrouping = "bot" | "mn";
+export type EquityView = "balance" | "pnl" | "percent";
+export type EquityPoint = { label: string; equity: number; time_msc?: number };
+export type EquityPnlPoint = EquityPoint & {
+  pnl: number;
+  positivePnl: number | null;
+  negativePnl: number | null;
+  pnlPercent: number;
+  positivePnlPercent: number | null;
+  negativePnlPercent: number | null;
+  isZeroCrossing?: boolean;
+};
+
+export function equityDomain(values: number[]): [number, number] {
+  const finiteValues = values.filter(Number.isFinite);
+  if (!finiteValues.length) return [0, 1];
+
+  const minimum = Math.min(...finiteValues);
+  const maximum = Math.max(...finiteValues);
+  const spread = maximum - minimum;
+  const padding = spread > 0
+    ? Math.max(spread * 0.08, 1)
+    : Math.max(Math.abs(minimum) * 0.02, 1);
+  return [minimum - padding, maximum + padding];
+}
+
+function equityPnlPoint(point: EquityPoint, pnl: number, baseEquity: number, isZeroCrossing = false): EquityPnlPoint {
+  const pnlPercent = baseEquity ? pnl / baseEquity * 100 : 0;
+  return {
+    ...point,
+    pnl,
+    positivePnl: pnl >= 0 ? pnl : null,
+    negativePnl: pnl <= 0 ? pnl : null,
+    pnlPercent,
+    positivePnlPercent: pnlPercent >= 0 ? pnlPercent : null,
+    negativePnlPercent: pnlPercent <= 0 ? pnlPercent : null,
+    isZeroCrossing,
+  };
+}
+
+export function buildEquityPnlPoints(points: EquityPoint[]): EquityPnlPoint[] {
+  if (!points.length) return [];
+  const baseEquity = points[0].equity;
+  const result: EquityPnlPoint[] = [];
+  let previousPnl = 0;
+
+  points.forEach((point, index) => {
+    const pnl = point.equity - baseEquity;
+    if (index > 0 && previousPnl * pnl < 0) {
+      // A zero-value point prevents Recharts from joining the green and red
+      // segments directly across the reference line.
+      result.push(equityPnlPoint({ ...point, label: "" }, 0, baseEquity, true));
+    }
+    result.push(equityPnlPoint(point, pnl, baseEquity));
+    previousPnl = pnl;
+  });
+
+  return result;
+}
 
 function dayKey(ms: number) {
   const date = new Date(ms);
@@ -342,6 +400,34 @@ function ChartTip({
     </div>
   );
 }
+function EquityChartTip({
+  active,
+  payload,
+  view,
+}: {
+  active?: boolean;
+  payload?: Array<{ payload?: EquityPnlPoint }>;
+  view: EquityView;
+}) {
+  const point = payload?.[0]?.payload;
+  if (!active || !point) return null;
+  const value = view === "balance" ? point.equity : view === "pnl" ? point.pnl : point.pnlPercent;
+  const label = view === "balance" ? "Saldo real" : view === "pnl" ? "P/L desde inicio" : "Rendimiento desde inicio";
+  const time = point.time_msc ? new Date(point.time_msc).toLocaleString("es-ES", { dateStyle: "medium", timeStyle: "short" }) : point.label;
+  return (
+    <div className="journal-tooltip">
+      <div>
+        <span>{point.isZeroCrossing ? `Cruce de cero · ${time}` : time}</span>
+        <strong>{label}</strong>
+      </div>
+      <div>
+        <span>{label}</span>
+        <strong>{value >= 0 && view !== "balance" ? "+" : ""}{value.toLocaleString("en-US", { maximumFractionDigits: 2 })}{view === "percent" ? "%" : ""}</strong>
+      </div>
+      {!point.isZeroCrossing && point.label && <small>{point.label}</small>}
+    </div>
+  );
+}
 function strategyIdentifier(row: BotRanking) {
   const category = row.strategyStatus ? `Categoría: ${strategyStatusLabels[row.strategyStatus]}\n` : "";
   if (row.magicNumber != null) {
@@ -373,7 +459,7 @@ function JournalChart({
   bodyHeight,
   methodology,
 }: {
-  title: string;
+  title: ReactNode;
   children: ReactNode;
   wide?: boolean;
   bodyHeight?: number;
@@ -1372,17 +1458,23 @@ export default function JournalAnalysis({
   capitalEligible?: boolean;
 }) {
   const [botEquityExpanded, setBotEquityExpanded] = useState(false);
+  const [equityView, setEquityView] = useState<EquityView>("balance");
   const charts = useMemo(() => {
     const trades = data?.trades || [],
-      equity: Array<{ label: string; equity: number }> = [];
-    let total = 0;
-    for (const trade of trades) {
-      total += trade.net_profit;
-      equity.push({
-        label: new Date(trade.close_time_msc).toLocaleDateString(),
-        equity: total,
-      });
-    }
+      // Use the real balance-based equity curve when available; fall back to
+      // cumulative net profit for databases that haven't been updated yet.
+      equity: EquityPoint[] =
+        data?.real_equity_curve && data.real_equity_curve.length > 0
+          ? data.real_equity_curve.map(p => ({ label: p.label, equity: p.equity, time_msc: p.time_msc }))
+          : (() => {
+              let total = 0;
+              const arr: typeof equity = [];
+              for (const trade of trades) {
+                total += trade.net_profit;
+                arr.push({ label: trade.symbol, equity: total, time_msc: trade.close_time_msc });
+              }
+              return arr;
+            })();
     const monthlyMap = new Map<string, JournalTrade[]>(),
       weekday = DAYS.map((day) => ({ day, wins: 0, count: 0 })),
       hourly = Array.from({ length: 24 }, (_, hour) => ({
@@ -1414,6 +1506,13 @@ export default function JournalAnalysis({
       hourly,
     };
   }, [data]);
+  const equityPnl = useMemo(() => buildEquityPnlPoints(charts.equity), [charts.equity]);
+  const equityValues = equityView === "balance"
+    ? charts.equity.map((point) => point.equity)
+    : equityView === "pnl"
+      ? equityPnl.map((point) => point.pnl)
+      : equityPnl.map((point) => point.pnlPercent);
+  const equityYAxisDomain = useMemo(() => equityDomain(equityValues), [equityValues]);
   if (!data)
     return (
       <div className="panel empty-state performance-empty">
@@ -1439,24 +1538,66 @@ export default function JournalAnalysis({
         </p>
       </div>
       <div className="journal-grid">
-        <JournalChart wide title="Equity curve — cumulative net profit">
+        <JournalChart
+          wide
+          title={<>
+            <span>Equity curve — {equityView === "balance" ? "saldo real de la cuenta" : equityView === "pnl" ? "P/L desde inicio" : "rendimiento porcentual"}</span>
+            <div className="equity-view-toggle" role="group" aria-label="Vista de curva de equity">
+              <button type="button" className={equityView === "balance" ? "active" : ""} aria-pressed={equityView === "balance"} onClick={() => setEquityView("balance")}>
+                Saldo ampliado
+              </button>
+              <button type="button" className={equityView === "pnl" ? "active" : ""} aria-pressed={equityView === "pnl"} onClick={() => setEquityView("pnl")}>
+                P/L desde inicio
+              </button>
+              <button type="button" className={equityView === "percent" ? "active" : ""} aria-pressed={equityView === "percent"} onClick={() => setEquityView("percent")}>
+                P/L %
+              </button>
+            </div>
+          </>}
+        >
           <ResponsiveContainer>
-            <AreaChart data={charts.equity}>
+            <AreaChart data={equityView === "balance" ? charts.equity : equityPnl}>
               <defs>
                 <linearGradient id="equityFill" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="0" stopColor={GREEN} stopOpacity={0.35} />
                   <stop offset="1" stopColor={GREEN} stopOpacity={0} />
                 </linearGradient>
+                <linearGradient id="equityPositiveFill" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0" stopColor={GREEN} stopOpacity={0.35} />
+                  <stop offset="1" stopColor={GREEN} stopOpacity={0.04} />
+                </linearGradient>
+                <linearGradient id="equityNegativeFill" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0" stopColor={RED} stopOpacity={0.04} />
+                  <stop offset="1" stopColor={RED} stopOpacity={0.35} />
+                </linearGradient>
               </defs>
               <CartesianGrid stroke={GRID} />
               <XAxis
-                dataKey="label"
+                dataKey="time_msc"
+                type="number"
+                scale="time"
+                domain={["dataMin", "dataMax"]}
                 tick={{ fill: "#74899a", fontSize: 9 }}
                 minTickGap={30}
+                tickFormatter={(value) => new Date(Number(value)).toLocaleDateString("es-ES", { day: "2-digit", month: "short" })}
               />
-              <YAxis tick={{ fill: "#74899a", fontSize: 9 }} />
-              <Tooltip content={<ChartTip />} />
-              <Area dataKey="equity" stroke={GREEN} fill="url(#equityFill)" />
+              <YAxis domain={equityYAxisDomain} tick={{ fill: "#74899a", fontSize: 9 }} tickFormatter={(value) => equityView === "percent" ? `${Number(value).toFixed(1)}%` : Number(value).toLocaleString("en-US", { maximumFractionDigits: 0 })} />
+              <Tooltip content={<EquityChartTip view={equityView} />} />
+              {equityView === "balance" ? (
+                <Area dataKey="equity" stroke={GREEN} fill="url(#equityFill)" baseValue={equityYAxisDomain[0]} />
+              ) : equityView === "pnl" ? (
+                <>
+                  <ReferenceLine y={0} stroke="#8fa4b0" strokeDasharray="4 4" />
+                  <Area dataKey="positivePnl" name="P/L positivo" stroke={GREEN} fill="url(#equityPositiveFill)" baseValue={0} connectNulls={false} />
+                  <Area dataKey="negativePnl" name="P/L negativo" stroke={RED} fill="url(#equityNegativeFill)" baseValue={0} connectNulls={false} />
+                </>
+              ) : (
+                <>
+                  <ReferenceLine y={0} stroke="#8fa4b0" strokeDasharray="4 4" />
+                  <Area dataKey="positivePnlPercent" name="Rendimiento positivo" stroke={GREEN} fill="url(#equityPositiveFill)" baseValue={0} connectNulls={false} />
+                  <Area dataKey="negativePnlPercent" name="Rendimiento negativo" stroke={RED} fill="url(#equityNegativeFill)" baseValue={0} connectNulls={false} />
+                </>
+              )}
             </AreaChart>
           </ResponsiveContainer>
         </JournalChart>

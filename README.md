@@ -23,11 +23,13 @@ La primera ejecución crea `.venv`, instala dependencias y compila el frontend. 
 ## Datos
 
 - Fuente operativa: MT5. La identidad desplegada es servidor + cuenta + activo normalizado + nombre EX5 normalizado. Terminal y Magic Number son atributos; las observaciones sin EX5 o alias confirmado se conservan, pero no crean estrategias ni alimentan métricas.
-- Catálogo adicional: `..\EA_track\Track_v1.xlsx`; aporta nombres y KPIs históricos, pero nunca se modifica ni bloquea bots nuevos.
-- Exportación: `GET /api/catalog/export` crea en `data\exports` un ranking multifuente con hojas para SQX, backtest MT5, Live MT5, comparativo y metodología; la hoja original se conserva intacta.
+- El overview sólo publica estrategias con evidencia confirmada de terminal o inventario VPS. SQX y backtests pueden enriquecerlas, pero no crean filas operativas.
 - SQLite: `data\dashboard.db`.
 - Cola MT5: `<DataDir>\MQL5\Files\Dashboardv1`.
-- SQX: sincronización read-only cuando SQX está abierto; los snapshots quedan persistidos.
+- SQX: sincronización read-only cuando SQX está abierto; los snapshots quedan persistidos. Para recuperar el EGT de un único bot, use la actualización dirigida por `strategy_id`: dedica como máximo 5 segundos a localizarlo y 15 a inspeccionarlo (20 segundos en total); no lanza el lote completo ni el análisis Doctor.
+
+La regla operativa y el tratamiento de timeouts están documentados en
+[docs/SQX_EGT_SINGLE_BOT_RUNBOOK.md](docs/SQX_EGT_SINGLE_BOT_RUNBOOK.md).
 - Refresco: 5 minutos. Una terminal queda desconectada tras 10 minutos sin respuesta.
 
 ### Terminal remota por SSH
@@ -50,6 +52,12 @@ posiciones, órdenes, historial y velas. Un script de Windows ejecutado por SSH
 no puede obtener ese estado interno de MT5 de forma fiable sin un componente
 que se ejecute dentro de la terminal.
 
+La guía operativa completa y validada para preparar una nueva VPS Windows con
+clave ED25519, permisos de `Administrator`, huella de host y diagnóstico está
+en [docs/SSH_VPS_MT5_RUNBOOK.md](docs/SSH_VPS_MT5_RUNBOOK.md). La excepción es
+`GuardianCuenta`: se registra como fuente observadora SFTP y no utiliza
+`DashboardBridge`.
+
 ## Inventarios de VPS
 
 Los CSV principales generados por `BotInventoryReport` en una terminal real se
@@ -60,14 +68,15 @@ usa para atribuir operaciones hasta conocer un magic fiable.
 
 ## API
 
-- `GET /api/dashboard`, `GET /api/strategies/{id}`
+- `GET /api/dashboard`, `GET /api/strategies/{id}`, `GET /api/strategies/{id}/analytics`
 - `GET|POST /api/terminals`, `POST /api/terminals/{id}/sync`
 - `GET /api/chart/{strategy_id}`
-- `POST /api/catalog/import`, `GET /api/catalog/export`
 - `GET /api/strategy-identities/conflicts`
 - `POST /api/strategy-identities/merge` (`dry_run=true` por defecto)
 - `GET /api/mappings/suggestions`, `POST /api/mappings/confirm`
 - `GET /api/sqx/status`, `POST /api/sqx/sync`
+  - Lote completo: `{ "project": "Retester", "databank": "Results" }`.
+  - Un solo bot/EGT: `{ "project": "Retester", "databank": "Results", "strategy_id": 453 }`. Esta es la opción obligatoria para investigar una fila concreta; falla rápido si SQX no responde, en vez de recorrer todas las estrategias.
 - `GET|PUT /api/alerts`
 - `GET|POST /api/backtests`, `GET /api/backtests/{id}`
 - `POST /api/backtests/{id}/cancel`, `POST /api/backtests/{id}/retry`

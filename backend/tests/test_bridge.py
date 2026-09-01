@@ -1,4 +1,6 @@
 import json
+import sys
+import types
 from pathlib import Path
 
 from app import db
@@ -9,6 +11,76 @@ from app.mt5_bridge import (
     register_terminal,
     reuse_terminal_for_account,
 )
+
+
+def test_ssh_bridge_uses_bounded_socket_timeouts(monkeypatch):
+    """One dead VPS must not hold the shared refresh worker forever."""
+    from app import ssh_bridge
+
+    captured = {}
+
+    class FakeSocket:
+        def settimeout(self, timeout):
+            captured["io_timeout"] = timeout
+
+    class FakeKey:
+        @classmethod
+        def from_private_key_file(cls, _path):
+            return object()
+
+    class FakeServerKey:
+        def asbytes(self):
+            return b"server-key"
+
+    class FakeSftp:
+        def close(self):
+            captured["sftp_closed"] = True
+
+    class FakeTransport:
+        def __init__(self, sock):
+            captured["transport_socket"] = sock
+            self.banner_timeout = None
+            self.auth_timeout = None
+
+        def connect(self, **_kwargs):
+            captured["banner_timeout"] = self.banner_timeout
+            captured["auth_timeout"] = self.auth_timeout
+
+        def get_remote_server_key(self):
+            return FakeServerKey()
+
+        def close(self):
+            captured["transport_closed"] = True
+
+    fake_paramiko = types.SimpleNamespace(
+        Ed25519Key=FakeKey,
+        RSAKey=FakeKey,
+        ECDSAKey=FakeKey,
+        Transport=FakeTransport,
+        SFTPClient=types.SimpleNamespace(from_transport=lambda _transport: FakeSftp()),
+    )
+    fake_socket = FakeSocket()
+    monkeypatch.setattr(
+        ssh_bridge.socket, "create_connection",
+        lambda address, timeout: captured.update(address=address, connect_timeout=timeout) or fake_socket,
+    )
+    monkeypatch.setitem(sys.modules, "paramiko", fake_paramiko)
+    monkeypatch.setattr(ssh_bridge, "_fingerprint", lambda _key: "SHA256:test")
+
+    bridge = ssh_bridge.SSHBridge({
+        "ssh_host": "vps.example.test", "ssh_port": 2222, "ssh_username": "Administrator",
+        "ssh_key_path": "C:/key", "ssh_host_fingerprint": "SHA256:test",
+        "remote_data_dir": "C:/MT5",
+    })
+    with bridge._connection():
+        pass
+
+    assert captured["address"] == ("vps.example.test", 2222)
+    assert captured["connect_timeout"] == ssh_bridge.SSH_CONNECT_TIMEOUT_SECONDS
+    assert captured["io_timeout"] == ssh_bridge.SSH_IO_TIMEOUT_SECONDS
+    assert captured["banner_timeout"] == ssh_bridge.SSH_CONNECT_TIMEOUT_SECONDS
+    assert captured["auth_timeout"] == ssh_bridge.SSH_CONNECT_TIMEOUT_SECONDS
+    assert captured["transport_closed"]
 
 
 def test_register_ssh_terminal_keeps_remote_settings(tmp_path, monkeypatch):
@@ -67,9 +139,11 @@ def test_reusing_data_dir_archives_old_account_rows(tmp_path, monkeypatch):
         assert conn.execute(
             "SELECT terminal_id FROM positions WHERE ticket=1"
         ).fetchone()[0] == result["archive_terminal_id"]
-        assert conn.execute(
-            "SELECT terminal_id FROM mappings WHERE strategy_id=?", (strategy_id,)
-        ).fetchone()[0] == result["archive_terminal_id"]
+        mapping = conn.execute(
+            "SELECT terminal_id,role FROM mappings WHERE strategy_id=?", (strategy_id,)
+        ).fetchone()
+        assert mapping["terminal_id"] == result["archive_terminal_id"]
+        assert mapping["role"] == "historical"
 
 
 def test_sync_response_is_ingested_and_deduplicated(tmp_path, monkeypatch):
@@ -304,13 +378,13 @@ def test_sync_identity_change_archives_old_account_before_import(tmp_path, monke
         assert (event["old_account_login"], event["new_account_login"], event["source"]) == ("demo", "live", "bridge_sync")
 
 
-def test_sync_server_change_with_same_login_is_an_identity_change(tmp_path, monkeypatch):
+def test_sync_server_change_with_same_login_preserves_terminal_history(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "server-change.db")
     db.init_db()
     data_dir = tmp_path / "terminal"
     (data_dir / "MQL5").mkdir(parents=True)
     (data_dir / "origin.txt").write_text("C:\\MT5", encoding="utf-8")
-    register_terminal("Fixture", str(data_dir))
+    terminal = register_terminal("Fixture", str(data_dir))
     response_dir = data_dir / BRIDGE_RELATIVE / "Responses"
     response_dir.mkdir(parents=True)
     for server, ticket in (("Broker-A", 1), ("Broker-B", 2)):
@@ -320,7 +394,11 @@ def test_sync_server_change_with_same_login_is_an_identity_change(tmp_path, monk
         ingest_responses()
     with db.session() as conn:
         assert conn.execute("SELECT COUNT(*) FROM terminal_identity_events").fetchone()[0] == 1
-        assert conn.execute("SELECT COUNT(*) FROM deals WHERE terminal_id IN (SELECT id FROM terminals WHERE data_dir LIKE 'archive://%')").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM terminals WHERE data_dir LIKE 'archive://%'").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM deals WHERE terminal_id=?", (terminal["id"],)).fetchone()[0] == 2
+        event = conn.execute("SELECT * FROM terminal_identity_events").fetchone()
+        assert event["archive_terminal_id"] is None
+        assert event["source"] == "bridge_sync_server_metadata"
 
 
 def test_connected_response_without_identity_is_rejected(tmp_path, monkeypatch):

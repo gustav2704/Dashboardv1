@@ -10,11 +10,14 @@ import base64
 import hashlib
 import json
 import posixpath
+import socket
 import time
 from contextlib import contextmanager
 from pathlib import Path
 from pathlib import PureWindowsPath
 from typing import Any, Iterator
+
+from .config import SSH_CONNECT_TIMEOUT_SECONDS, SSH_IO_TIMEOUT_SECONDS
 
 
 class SSHBridgeError(RuntimeError):
@@ -63,8 +66,21 @@ class SSHBridge:
             import paramiko
         except ImportError as exc:  # pragma: no cover - installation configuration
             raise SSHBridgeError("paramiko is required for SSH terminals") from exc
-        transport = paramiko.Transport((self.host, self.port))
+        transport = None
         try:
+            # Passing a host/port tuple to Paramiko lets the platform socket
+            # choose its own connection timeout.  On an unreachable VPS that
+            # can hold the single dashboard worker indefinitely, preventing
+            # fresh replies from the remaining healthy terminals being
+            # ingested.  Create the socket ourselves so both connection and
+            # subsequent SFTP I/O are explicitly bounded.
+            sock = socket.create_connection(
+                (self.host, self.port), timeout=SSH_CONNECT_TIMEOUT_SECONDS
+            )
+            sock.settimeout(SSH_IO_TIMEOUT_SECONDS)
+            transport = paramiko.Transport(sock)
+            transport.banner_timeout = SSH_CONNECT_TIMEOUT_SECONDS
+            transport.auth_timeout = SSH_CONNECT_TIMEOUT_SECONDS
             transport.connect(username=self.username, pkey=_load_private_key(paramiko, self.key_path))
             actual = _fingerprint(transport.get_remote_server_key())
             if actual != self.host_fingerprint:
@@ -79,7 +95,8 @@ class SSHBridge:
         except Exception as exc:
             raise SSHBridgeError(f"SSH transport failed: {type(exc).__name__}: {exc}") from exc
         finally:
-            transport.close()
+            if transport is not None:
+                transport.close()
 
     @contextmanager
     def _client(self) -> Iterator[Any]:
@@ -199,16 +216,15 @@ class SSHBridge:
     def write_json_atomic(self, payload: dict[str, Any], *parts: str) -> None:
         destination = self.bridge_path(*parts)
         directory = posixpath.dirname(destination)
-        temporary = f"{destination}.dashboard-{int(time.time() * 1000)}.tmp"
         encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         with self._client() as sftp:
-            try:
-                sftp.mkdir(directory)
-            except IOError:
-                pass
-            with sftp.open(temporary, "wb") as handle:
+            self._mkdirs(sftp, directory)
+            # Win32 OpenSSH SFTP cannot reliably rename over an existing
+            # request file.  Requests are idempotent latest-state messages,
+            # so replace the exact file in place rather than leaving a stale
+            # request queued when a previous one exists.
+            with sftp.open(destination, "wb") as handle:
                 handle.write(encoded)
-            sftp.rename(temporary, destination)
 
     def archive_response(self, kind: str) -> None:
         source = self.bridge_path("Responses", f"{kind}.response.json")

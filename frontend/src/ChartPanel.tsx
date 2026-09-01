@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { createChart, CrosshairMode, type IChartApi, type Time } from 'lightweight-charts'
+import { createChart, CrosshairMode, type IChartApi, type ISeriesApi, type Time } from 'lightweight-charts'
 import { api } from './api'
 
 type ChartPayload = {
@@ -11,21 +11,25 @@ type ChartPayload = {
 export default function ChartPanel({ strategyId, accountQuery }: { strategyId: number; accountQuery: string }) {
   const host = useRef<HTMLDivElement>(null)
   const chart = useRef<IChartApi | null>(null)
+  const candles = useRef<ISeriesApi<'Candlestick'> | null>(null)
+  const fittedSource = useRef<string | null>(null)
+  const requestSequence = useRef(0)
   const [timeframe, setTimeframe] = useState('H1')
   const [data, setData] = useState<ChartPayload | null>(null)
   const [message, setMessage] = useState('Loading chart…')
 
-  async function load(refresh = false, requestId?: string) {
+  async function load(refresh = false, requestId?: string, requestedTimeframe = timeframe, isCurrent = () => true) {
     const end = Math.floor(Date.now() / 1000)
     const start = end - 90 * 86400
     try {
       const params = new URLSearchParams(accountQuery)
-      params.set('timeframe', timeframe)
+      params.set('timeframe', requestedTimeframe)
       params.set('start', String(start))
       params.set('end', String(end))
       params.set('refresh', String(refresh))
       if (requestId) params.set('request_id', requestId)
       const payload = await api<ChartPayload>(`/api/chart/${strategyId}?${params}`)
+      if (!isCurrent()) return
       setData(payload)
       if (payload.message) setMessage(payload.message)
       else if (requestId && !payload.chart_ready) setMessage('Requesting candles from MT5…')
@@ -38,17 +42,21 @@ export default function ChartPanel({ strategyId, accountQuery }: { strategyId: n
   useEffect(() => {
     let cancelled = false
     let timer: number | undefined
+    const sequence = ++requestSequence.current
+    const isCurrent = () => !cancelled && requestSequence.current === sequence
     async function requestAndPoll() {
       // Render persisted candles first. Requesting a fresh snapshot can require
       // a round trip to a remote MT5 terminal, so it must not delay the chart.
-      await load(false)
+      setData(null)
+      setMessage(`Loading ${timeframe} chart…`)
+      await load(false, undefined, timeframe, isCurrent)
       if (cancelled) return
-      const initial = await load(true)
+      const initial = await load(true, undefined, timeframe, isCurrent)
       const requestId = initial?.request_id
       if (!requestId || cancelled) return
       for (let attempt = 0; attempt < 12 && !cancelled; attempt += 1) {
         await new Promise(resolve => { timer = window.setTimeout(resolve, 1000) })
-        const next = await load(false, requestId)
+        const next = await load(false, requestId, timeframe, isCurrent)
         if (next?.chart_ready) return
       }
       if (!cancelled) setMessage('MT5 did not return candles in time. Check that the terminal and DashboardBridge are running, then retry.')
@@ -57,8 +65,7 @@ export default function ChartPanel({ strategyId, accountQuery }: { strategyId: n
     return () => { cancelled = true; if (timer) window.clearTimeout(timer) }
   }, [strategyId, timeframe, accountQuery])
   useEffect(() => {
-    if (!host.current || !data?.candles.length) return
-    chart.current?.remove()
+    if (!host.current) return
     const instance = createChart(host.current, {
       height: 470,
       layout: { background: { color: '#0b151f' }, textColor: '#8da1b3' },
@@ -67,15 +74,32 @@ export default function ChartPanel({ strategyId, accountQuery }: { strategyId: n
       rightPriceScale: { borderColor: '#263847' },
       timeScale: { borderColor: '#263847', timeVisible: true },
     })
-    const candles = instance.addCandlestickSeries({ upColor: '#2dd4bf', downColor: '#fb7185', borderVisible: false, wickUpColor: '#2dd4bf', wickDownColor: '#fb7185' })
-    candles.setData(data.candles.map(item => ({ ...item, time: item.time as Time })))
-    candles.setMarkers(data.markers.map(item => ({ ...item, time: item.time as Time })))
-    instance.timeScale().fitContent()
+    candles.current = instance.addCandlestickSeries({ upColor: '#2dd4bf', downColor: '#fb7185', borderVisible: false, wickUpColor: '#2dd4bf', wickDownColor: '#fb7185' })
     chart.current = instance
     const observer = new ResizeObserver(() => host.current && instance.applyOptions({ width: host.current.clientWidth }))
     observer.observe(host.current)
-    return () => { observer.disconnect(); instance.remove(); chart.current = null }
-  }, [data])
+    return () => { observer.disconnect(); instance.remove(); chart.current = null; candles.current = null; fittedSource.current = null }
+  }, [])
+
+  useEffect(() => {
+    if (!chart.current || !candles.current) return
+    if (!data?.candles.length) {
+      candles.current.setData([])
+      candles.current.setMarkers([])
+      return
+    }
+    candles.current.setData(data.candles.map(item => ({ ...item, time: item.time as Time })))
+    candles.current.setMarkers(data.markers.map(item => ({ ...item, time: item.time as Time })))
+
+    // MT5 replies can arrive just after the user releases the wheel.  Updating
+    // the existing series preserves the visible range instead of recreating the
+    // chart and fitting all candles again, which was the source of the jump.
+    const source = `${strategyId}:${timeframe}`
+    if (fittedSource.current !== source) {
+      chart.current.timeScale().fitContent()
+      fittedSource.current = source
+    }
+  }, [data, strategyId, timeframe])
 
   return <section className="panel chart-panel">
     <div className="panel-heading">

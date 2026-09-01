@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { buildAccountAnalytics, runsTest, type TemporalBucket } from './journalAnalytics'
-import { buildBotEquityCurves, buildBotRankings, buildRemovalCandidates, temporalDomain, temporalVisualValue } from './JournalAnalysis'
+import { buildBotEquityCurves, buildBotRankings, buildEquityPnlPoints, buildRemovalCandidates, equityDomain, temporalDomain, temporalVisualValue } from './JournalAnalysis'
 import type { JournalAnalysisData, JournalTrade } from './journalTypes'
 
 const DAY = 86_400_000
@@ -50,6 +50,40 @@ function journal(trades: JournalTrade[], overrides: Partial<JournalAnalysisData>
 }
 
 describe('account analytics', () => {
+  it('uses a tight equity domain without forcing the balance scale through zero', () => {
+    expect(equityDomain([100_000, 101_000])).toEqual([99_920, 101_080])
+  })
+
+  it('gives a flat equity curve a visible minimum range', () => {
+    expect(equityDomain([100_000, 100_000])).toEqual([98_000, 102_000])
+  })
+
+  it('builds P/L from the first equity point and splits a zero crossing', () => {
+    const points = buildEquityPnlPoints([
+      { label: 'first', equity: 100 },
+      { label: 'up', equity: 120 },
+      { label: 'down', equity: 80 },
+    ])
+
+    expect(points.map(point => point.pnl)).toEqual([0, 20, 0, -20])
+    expect(points[0]).toMatchObject({ positivePnl: 0, negativePnl: 0 })
+    expect(points[2]).toMatchObject({ pnl: 0, isZeroCrossing: true })
+    expect(points[1].negativePnl).toBeNull()
+    expect(points[3].positivePnl).toBeNull()
+  })
+
+  it('also derives percentage return from the first visible balance', () => {
+    const points = buildEquityPnlPoints([
+      { label: 'first', equity: 1_000, time_msc: 1 },
+      { label: 'up', equity: 1_050, time_msc: 2 },
+      { label: 'down', equity: 975, time_msc: 3 },
+    ])
+
+    expect(points.map(point => point.pnlPercent)).toEqual([0, 5, 0, -2.5])
+    expect(points[1].positivePnlPercent).toBe(5)
+    expect(points[3].negativePnlPercent).toBe(-2.5)
+  })
+
   it('builds individual equity only at each active bot closing trade', () => {
     const curves = buildBotEquityCurves([
       trade({ strategy_id: 1, strategy_name: 'Bot 1', close_time_msc: 1, net_profit: 10 }),

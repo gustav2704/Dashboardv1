@@ -23,6 +23,50 @@ class SQXUnavailable(RuntimeError):
     pass
 
 
+def _main_ui_pid_args() -> list[str]:
+    """Select the main SQX window when its CodeEditor helper is also open.
+
+    The extractor intentionally refuses to guess between multiple Electron
+    windows.  SQX normally starts a second ``StrategyQuantX_ui.exe`` process
+    for CodeEditor, though; its command line identifies the actual trading
+    application as ``SQUANT StrategyQuantX``.  Passing that single PID keeps
+    the read-only sync working without ever selecting an arbitrary process.
+    """
+    configured_pid = os.environ.get("SQX_PID", "").strip()
+    if configured_pid:
+        return ["--pid", configured_pid]
+    if os.name != "nt":
+        return []
+    command = (
+        "Get-CimInstance Win32_Process -Filter \"Name='StrategyQuantX_ui.exe'\" "
+        "| Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"
+    )
+    try:
+        completed = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", command],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+        )
+        if completed.returncode:
+            return []
+        payload = json.loads(completed.stdout or "[]")
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return []
+    processes = payload if isinstance(payload, list) else [payload]
+    main_processes = [
+        process for process in processes
+        if isinstance(process, dict)
+        and "SQUANT STRATEGYQUANTX" in str(process.get("CommandLine") or "").upper()
+        and str(process.get("ProcessId") or "").isdigit()
+    ]
+    if len(main_processes) != 1:
+        return []
+    return ["--pid", str(main_processes[0]["ProcessId"])]
+
+
 def _run(*args: str, timeout: int = 60) -> Any:
     if not SQX_EXTRACTOR.is_file():
         raise SQXUnavailable(f"Could not find the SQX extractor: {SQX_EXTRACTOR}")
@@ -33,6 +77,7 @@ def _run(*args: str, timeout: int = 60) -> Any:
         str(SQX_DIR),
         "--format",
         "json",
+        *_main_ui_pid_args(),
         *args,
     ]
     environment = os.environ.copy()
@@ -79,6 +124,7 @@ def inspect_strategy(
     databank: str,
     strategy_name: str,
     source_format: str | None = None,
+    timeout: int = 90,
 ) -> dict[str, Any]:
     args = [
         "inspect",
@@ -91,7 +137,7 @@ def inspect_strategy(
     ]
     if source_format:
         args.extend(["--source-format", source_format])
-    payload = _run(*args, timeout=90)
+    payload = _run(*args, timeout=timeout)
     if not isinstance(payload, dict):
         raise SQXUnavailable("SQX returned an invalid strategy inspection")
     return payload
@@ -321,20 +367,215 @@ def _upsert_analytics(
     )
 
 
-def sync(project: str, databank: str) -> dict[str, Any]:
+def _number(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _keep_existing_oos(existing: dict[str, Any], incoming: dict[str, Any]) -> bool:
+    """Do not replace a known OOS sample with an empty SQX response."""
+    return (
+        _number(existing.get("NumberOfTrades")) > 0
+        and _number(incoming.get("NumberOfTrades")) <= 0
+    )
+
+
+def _merge_analytics_snapshot(
+    existing: dict[str, Any], incoming: dict[str, Any]
+) -> tuple[dict[str, Any], int]:
+    """Keep a valid Edge/EGT value when SQX returns an unavailable placeholder."""
+    merged = dict(incoming)
+    preserved = 0
+    # A Results-grid refresh intentionally cannot calculate Edge.  Keeping an
+    # old Edge value in that case would label stale data as current, so retain
+    # only the EGT value when the incoming grid does not supply one.
+    keys = ("egt",) if incoming.get("sync_mode") == "sqx_results_grid" else ("edge", "egt")
+    for key in keys:
+        old_value = existing.get(key)
+        new_value = incoming.get(key)
+        if (
+            isinstance(old_value, dict)
+            and old_value.get("available")
+            and isinstance(new_value, dict)
+            and not new_value.get("available")
+        ):
+            merged[key] = old_value
+            preserved += 1
+    return merged, preserved
+
+
+def _fallback_payload(
+    project: str, databank: str, bulk_error: SQXUnavailable
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Recover a partial refresh when a single SQX Results call stalls.
+
+    SQX serializes Results-plugin reads. A failed bulk request must not make a
+    healthy strategy look absent, so inspect each grid row independently.
+    """
+    try:
+        rows = _items(_run("strategies", "--project", project, "--databank", databank, timeout=60))
+    except SQXUnavailable:
+        raise bulk_error
+    recovered: list[dict[str, Any]] = []
+    failures: list[dict[str, str]] = []
+    for row in rows:
+        name = _identity_name(row)
+        if not name:
+            continue
+        try:
+            payload = inspect_strategy(project, databank, name, timeout=15)
+        except SQXUnavailable as exc:
+            failures.append({"strategy_name": name, "reason": str(exc)[:300]})
+            continue
+        if isinstance(payload, dict):
+            recovered.append(payload)
+    if not recovered:
+        raise bulk_error
+    return recovered, failures
+
+
+def _grid_number(value: Any) -> float | None:
+    """Return a grid number without treating a legitimate zero as missing."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _grid_payload(project: str, databank: str) -> list[dict[str, Any]]:
+    """Build a safe partial payload from the fast Results databank grid.
+
+    SQX 144 can stall on ``bulk`` and ``inspect`` after a large manual retest,
+    while ``strategies`` continues to expose the current symbol, timeframe,
+    OOS metrics and EGT custom column.  The grid has no orders, so Edge is
+    explicitly marked unavailable rather than fabricated from stale trades.
+    """
+    rows = _items(_run("strategies", "--project", project, "--databank", databank, timeout=60))
+    payload: list[dict[str, Any]] = []
+    for row in rows:
+        name = _identity_name(row)
+        columns = row.get("columns")
+        if not name or not isinstance(columns, dict):
+            continue
+        egt_value = _grid_number(columns.get("EGT"))
+
+        def sample(label: str) -> dict[str, Any]:
+            values = {
+                "NetProfit": _grid_number(columns.get(f"Net profit ({label})")),
+                "NumberOfTrades": _grid_number(columns.get(f"# of trades ({label})")),
+                "ProfitFactor": _grid_number(columns.get(f"Profit factor ({label})")),
+                "SharpeRatio": _grid_number(columns.get(f"Sharpe Ratio ({label})")),
+            }
+            return {key: value for key, value in values.items() if value is not None}
+
+        oos = sample("OOS")
+        payload.append({
+            "identity": {
+                "strategy_name": name,
+                "symbol": str(columns.get("Symbol (IS)") or ""),
+                "timeframe": str(columns.get("TimeFrame (IS)") or ""),
+                "filter_result": str(row.get("filter_result") or ""),
+            },
+            "stats": {"is": sample("IS"), "oos": oos},
+            "analytics": {
+                "sync_mode": "sqx_results_grid",
+                "egt": {
+                    "available": egt_value is not None,
+                    "total": egt_value,
+                    "source": "sqx_results_grid",
+                },
+                "edge": {
+                    "available": False,
+                    "reason": (
+                        "Sin trades OOS" if _number(oos.get("NumberOfTrades")) <= 0
+                        else "Pendiente de cálculo: inspección SQX no disponible"
+                    ),
+                },
+            },
+        })
+    return payload
+
+
+def sync(
+    project: str,
+    databank: str,
+    strategy_names: list[str] | None = None,
+    include_doctor: bool = True,
+) -> dict[str, Any]:
     if not project or not databank:
         raise ValueError("project and databank are required")
-    payload = _run("bulk", "--project", project, "--databank", databank, timeout=360)
-    incoming = _items(payload)
+    targets = list(dict.fromkeys(
+        name.strip() for name in (strategy_names or []) if name and name.strip()
+    ))
+    if len(targets) > 1:
+        raise ValueError("A targeted SQX refresh accepts exactly one strategy")
+    bulk_error: str | None = None
+    partial_failures: list[dict[str, str]] = []
+    complete_snapshot = not targets
+    if targets:
+        # A request for one missing EGT must never fan out into the 90-strategy
+        # bulk refresh.  The grid is fast; the one expensive SQX inspection is
+        # capped at 15 seconds after a five-second grid lookup.  The complete
+        # targeted request therefore cannot consume more than 20 seconds, and
+        # we deliberately omit the optional Doctor orders analysis.
+        rows = _items(_run(
+            "strategies", "--project", project, "--databank", databank, timeout=5,
+        ))
+        requested = targets[0]
+        matched_rows = [
+            row for row in rows
+            if normalize(_identity_name(row)) == normalize(requested)
+        ]
+        if len(matched_rows) != 1:
+            raise ValueError(f"SQX could not uniquely find strategy: {requested}")
+        incoming = [inspect_strategy(
+            project, databank, _identity_name(matched_rows[0]), timeout=15,
+        )]
+    else:
+        try:
+            payload = _run("bulk", "--project", project, "--databank", databank, timeout=360)
+            incoming = _items(payload)
+        except SQXUnavailable as exc:
+            try:
+                incoming = _grid_payload(project, databank)
+                partial_failures = [{
+                    "strategy_name": "*",
+                    "reason": f"Bulk unavailable; grid fallback used: {exc}",
+                }]
+            except SQXUnavailable as fallback_exc:
+                raise exc from fallback_exc
+            if not incoming:
+                raise exc
+            bulk_error = str(exc)[:300]
+            complete_snapshot = False
+    if not incoming:
+        # An empty databank commonly means SQX has not finished loading after a
+        # restart. It is never evidence that every linked strategy disappeared.
+        return {
+            "project": project,
+            "databank": databank,
+            "received": 0,
+            "imported": 0,
+            "skipped_empty": True,
+            "reason": "SQX returned an empty databank; existing snapshots were kept",
+            "synced_at": utcnow(),
+        }
     doctor_names = [name for item in incoming if (name := _identity_name(item))]
     # SQX's local API serializes Results-plugin reads. Keep one client request
     # at a time so a Doctor refresh cannot exhaust its authenticated session.
-    doctor_by_name = dict(
-        _doctor_for_strategy(project, databank, name) for name in doctor_names
+    doctor_by_name = (
+        dict(_doctor_for_strategy(project, databank, name) for name in doctor_names)
+        if include_doctor
+        else {}
     )
     imported = matched = variant_matched = created = unmatched = baselines = passed = 0
     edge_available = egt_available = doctor_available = analytics_unavailable = 0
     marked_missing = restored = renamed = promoted = 0
+    preserved_analytics = preserved_oos_baselines = 0
     rename_conflicts: list[dict[str, Any]] = []
     synced_at = utcnow()
     incoming_names = {
@@ -618,6 +859,22 @@ def sync(project: str, databank: str) -> dict[str, Any]:
                 metrics = stats.get(sample)
                 if not isinstance(metrics, dict) or not metrics:
                     continue
+                if sample == "oos":
+                    existing_baseline = conn.execute(
+                        """SELECT metrics_json FROM baseline_snapshots
+                           WHERE strategy_id=? AND source='sqx' AND project=?
+                             AND databank=? AND sample_type='oos'
+                           ORDER BY id DESC LIMIT 1""",
+                        (strategy["id"], project, databank),
+                    ).fetchone()
+                    if existing_baseline:
+                        try:
+                            old_metrics = json.loads(existing_baseline["metrics_json"])
+                        except (TypeError, json.JSONDecodeError):
+                            old_metrics = {}
+                        if _keep_existing_oos(old_metrics, metrics):
+                            preserved_oos_baselines += 1
+                            continue
                 _upsert_baseline(
                     conn,
                     int(strategy["id"]),
@@ -631,9 +888,24 @@ def sync(project: str, databank: str) -> dict[str, Any]:
             analytics = item.get("analytics")
             if isinstance(analytics, dict):
                 analytics = dict(analytics)
-                analytics["doctor"] = doctor_by_name.get(
-                    name.casefold(), {"available": False, "reason": "Sin órdenes SQX"}
-                )
+                existing_snapshot = conn.execute(
+                    """SELECT analytics_json FROM sqx_analytics_snapshots
+                       WHERE strategy_id=? AND project=? AND databank=?""",
+                    (strategy["id"], project, databank),
+                ).fetchone()
+                if existing_snapshot:
+                    try:
+                        previous_analytics = json.loads(existing_snapshot["analytics_json"])
+                    except (TypeError, json.JSONDecodeError):
+                        previous_analytics = {}
+                    analytics, preserved = _merge_analytics_snapshot(
+                        previous_analytics, analytics
+                    )
+                    preserved_analytics += preserved
+                if include_doctor:
+                    analytics["doctor"] = doctor_by_name.get(
+                        name.casefold(), {"available": False, "reason": "Sin órdenes SQX"}
+                    )
                 _upsert_analytics(
                     conn,
                     int(strategy["id"]),
@@ -660,18 +932,20 @@ def sync(project: str, databank: str) -> dict[str, Any]:
                WHERE project=? COLLATE NOCASE AND databank=? COLLATE NOCASE""",
             (project, databank),
         ).fetchall()
-        for link in scoped_links:
-            if str(link["strategy_name"]).casefold() in incoming_names:
-                continue
-            if not link["missing_from_sqx_at"]:
-                conn.execute(
-                    "UPDATE sqx_strategy_links SET missing_from_sqx_at=? WHERE id=?",
-                    (synced_at, link["id"]),
-                )
-                marked_missing += 1
+        if complete_snapshot:
+            for link in scoped_links:
+                if str(link["strategy_name"]).casefold() in incoming_names:
+                    continue
+                if not link["missing_from_sqx_at"]:
+                    conn.execute(
+                        "UPDATE sqx_strategy_links SET missing_from_sqx_at=? WHERE id=?",
+                        (synced_at, link["id"]),
+                    )
+                    marked_missing += 1
     return {
         "project": project,
         "databank": databank,
+        "targeted": bool(targets),
         "received": len(incoming),
         "imported": imported,
         "matched": matched,
@@ -685,6 +959,11 @@ def sync(project: str, databank: str) -> dict[str, Any]:
         "doctor_available": doctor_available,
         "analytics_unavailable": analytics_unavailable,
         "marked_missing": marked_missing,
+        "complete_snapshot": complete_snapshot,
+        "bulk_error": bulk_error,
+        "partial_failures": partial_failures,
+        "preserved_analytics": preserved_analytics,
+        "preserved_oos_baselines": preserved_oos_baselines,
         "restored": restored,
         "renamed": renamed,
         "promoted": promoted,

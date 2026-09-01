@@ -31,9 +31,9 @@ SYMBOL_FALLBACKS = {
     "us30": "US30",
 }
 CUSTOM_HISTORY_SOURCE = "Custom"
-# Backtests requested for the current Darwinex comparison begin in 2025.  The
-# end date remains bounded by the broker's available Custom history.
-CUSTOM_START_DATE = "2025-01-01"
+# User-approved comparison window begins on 2017-01-01. The end date remains
+# bounded by the broker's available Custom history.
+CUSTOM_START_DATE = "2017-01-01"
 # User-approved exclusions. Keep IDs explicit: they are scope decisions, not
 # identity failures, and must survive a future batch rebuild.
 EXCLUDED_BACKTEST_STRATEGY_IDS: set[int] = {
@@ -42,6 +42,8 @@ EXCLUDED_BACKTEST_STRATEGY_IDS: set[int] = {
     360,  # AltisimaPrecision [86-2] XAUUSD
     448,  # EA_AlgoTAP_MT5_4.3
     472,
+    254,  # US30v4 BUY (WS30 M5) — user excluded (too-slow/long backtest)
+    347, 350, 368, 369, 481,  # M5 timeframe bots — user excluded (too heavy)
 }
 EXCLUDED_BACKTEST_NAMES = {
     normalize("WF Matrix - Strategy 3.10.85-XAUUSD-M15"),
@@ -144,32 +146,23 @@ def _sha256(path: Path) -> str:
 
 
 def _expert_files(broker: str = "FPM") -> list[Path]:
-    profile = mt5_backtests.broker_profile(broker)
     found: dict[str, Path] = {}
-    roots = [Path(profile["data_dir"]) / "MQL5" / "Experts"]
-    if profile["broker"] != "FPM":
-        roots.append(DEFAULT_TERMINAL / "MQL5" / "Experts")
-    for root in roots:
+    # Use the explicitly configured search roots. This keeps discovery
+    # deterministic in tests and lets deployments add forensic/alternate EX5
+    # stores without silently ignoring the configuration.
+    for root in EXPERT_SEARCH_ROOTS:
         if root.is_dir():
             for path in root.rglob("*.ex5"):
                 found[str(path.resolve()).casefold()] = path.resolve()
     return list(found.values())
 
 
-def _catalog_alias(raw: str) -> str:
-    try:
-        payload = json.loads(raw or "{}")
-    except json.JSONDecodeError:
-        return ""
-    return str(payload.get("mql5 bot name (alternative)") or "").strip()
-
-
 def _candidate_names(strategy: dict[str, Any]) -> list[str]:
+    origin_tokens = set(str(strategy.get("origin") or "").split("+"))
     values = (
         strategy.get("mql5_name"),
         strategy.get("strategy_name"),
-        _catalog_alias(str(strategy.get("catalog_json") or "")),
-        strategy.get("sqx_name"),
+        strategy.get("sqx_name") if "sqx" in origin_tokens else None,
     )
     return list(dict.fromkeys(str(value).strip() for value in values if value))
 
@@ -231,7 +224,7 @@ def discover_candidates(broker: str = ACTIVE_BACKTEST_BROKER, history_source: st
 
     with session() as conn:
         strategies = rows(conn.execute(
-            """SELECT s.id,s.sqx_name,s.mql5_name,s.symbol,s.catalog_json,
+            """SELECT s.id,s.sqx_name,s.mql5_name,s.symbol,s.origin,
                       l.project,l.databank,l.strategy_name,l.symbol AS sqx_symbol,l.timeframe,
                       l.missing_from_sqx_at
                FROM strategies s
@@ -808,6 +801,16 @@ def _finish_batch(
         _restart_live_terminal(broker)
 
 
+def _needs_sqx(item: dict[str, Any]) -> bool:
+    """Return True when this batch item requires a live SQX session to resolve.
+
+    Items with an already-known EX5 (user-confirmed, exact-name, exact-identity,
+    or backed by an FPM reference run) can resolve without SQX.  Only items
+    whose resolution method depends on SQX-generated MQ5 source need the gate.
+    """
+    return bool(item and str(item.get("resolution_method") or "") == "generated_from_sqx")
+
+
 def process_once() -> bool:
     with session() as conn:
         batch = conn.execute(
@@ -830,18 +833,24 @@ def process_once() -> bool:
         ).fetchone()
     with session() as conn:
         resolving = conn.execute(
-            "SELECT id FROM backtest_batch_items WHERE batch_id=? AND status='resolving' ORDER BY id LIMIT 1",
+            "SELECT * FROM backtest_batch_items WHERE batch_id=? AND status='resolving' ORDER BY id LIMIT 1",
             (batch_id,),
         ).fetchone()
     if resolving and not queued:
-        sqx_ready, sqx_reason = _sqx_retester_results_ready()
-        if not sqx_ready:
-            with session() as conn:
-                conn.execute(
-                    "UPDATE backtest_batches SET status='paused',current_strategy_id=NULL,error=? WHERE id=?",
-                    (sqx_reason, batch_id),
-                )
-            return False
+        # Only require SQX when the resolving item actually needs it.
+        # Items backed by a user-confirmed EX5, an exact-name match, an exact
+        # identity suffix match, or an FPM reference run can resolve without
+        # a live SQX session, which is the most common manual gate.
+        needs_sqx = _needs_sqx(resolving)
+        if needs_sqx:
+            sqx_ready, sqx_reason = _sqx_retester_results_ready()
+            if not sqx_ready:
+                with session() as conn:
+                    conn.execute(
+                        "UPDATE backtest_batches SET status='paused',current_strategy_id=NULL,error=? WHERE id=?",
+                        (sqx_reason, batch_id),
+                    )
+                return False
         try:
             _resolve_item(int(resolving["id"]), int(batch["model"]), str(batch["broker"] or "FPM"))
         except Exception as exc:
@@ -1001,6 +1010,25 @@ def recover_batches() -> None:
             """UPDATE backtest_batches SET status='queued',current_strategy_id=NULL
                WHERE status='running'"""
         )
+        # Auto-finish paused batches whose items are all terminal (no active
+        # work remains).  A previous run may have paused the batch after a
+        # transient error, but with no pending items there is nothing left to
+        # do and the paused state only blocks new batches.
+        for row in conn.execute(
+            """SELECT b.id,b.broker,b.execution_target
+               FROM backtest_batches b
+               WHERE b.status='paused'
+                 AND NOT EXISTS (
+                   SELECT 1 FROM backtest_batch_items i
+                   WHERE i.batch_id=b.id AND i.status IN ('resolving','queued','running')
+                 )"""
+        ):
+            _finish_batch(
+                int(row["id"]),
+                status="completed",
+                broker=str(row["broker"] or "FPM"),
+                execution_target=str(row["execution_target"] or "local"),
+            )
 
 
 def pause_batch(batch_id: int) -> dict[str, Any]:

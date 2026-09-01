@@ -10,6 +10,8 @@
 
 - Symbol corrected to **NDX** (not US100).
 - Run 410: **completed**; equity curve generated.
+- Run 417 (ID 512): **completed**; equity curve generated.
+- Run 418 (ID 157): **completed** with standard EX5 profile on `WS30/H1`; 76 trades; equity curve generated. No `mmStep` fallback was needed.
 
 ## Excluded — not included in the table
 
@@ -21,18 +23,18 @@
 | ID | Name | Account | Source VPS | Status | Reason |
 |---:|---|---|---|---|---|
 | 140 | ORB_American_EMA9 | 3000097316 | 100.107.77.50 · CloudTrading SRV - Darwinex Demo (Tailscale) / 145.63.135.196 · Darwinex Demo VPS | blocked | No exact chart profile matches EX5, symbol, Magic and comment |
-| 149 | TemaEA_V2 | 3000097316 | 100.107.77.50 · CloudTrading SRV - Darwinex Demo (Tailscale) / 145.63.135.196 · Darwinex Demo VPS | blocked | No exact chart profile matches EX5, symbol, Magic and comment |
-| 157 | WF_Matrix_Strategy_4_7_21_2 | 3000097316 | 100.107.77.50 · CloudTrading SRV - Darwinex Demo (Tailscale) / 145.63.135.196 · Darwinex Demo VPS | blocked | Darwinex Demo has no exact symbol mapping/history for WS30 |
+| 149 | TemaEA_V2 | 3000097316 | 145.63.135.196 | completed/no curve | Runs 510/511 completed; mmStep=0.01 fallback also ran, but only summary HTML was produced (no transaction table) |
+| 157 | WF_Matrix_Strategy_4_7_21_2 | 3000097316 | 145.63.135.196 | completed | Run 418: WS30/H1, 76 trades, equity curve generated |
 | 246 | MomentA BuyStop | 3000097316 | 100.107.77.50 · CloudTrading SRV - Darwinex Demo (Tailscale) / 145.63.135.196 · Darwinex Demo VPS | blocked | No exact chart profile matches EX5, symbol, Magic and comment |
 | 248 | GannPullbackBuyStop | 3000097316 | 100.107.77.50 · CloudTrading SRV - Darwinex Demo (Tailscale) / 145.63.135.196 · Darwinex Demo VPS | blocked | No exact chart profile matches EX5, symbol, Magic and comment |
 | 391 | ULTRADAX_D1 | 3000097316 | 100.107.77.50 · CloudTrading SRV - Darwinex Demo (Tailscale) / 145.63.135.196 · Darwinex Demo VPS | blocked | No exact chart profile matches EX5, symbol, Magic and comment |
 | 435 | XAUWF Matrix - Strategy 3.13.39dwnx | 3000097316 | 100.107.77.50 · CloudTrading SRV - Darwinex Demo (Tailscale) / 145.63.135.196 · Darwinex Demo VPS | blocked | No exact chart profile matches EX5, symbol, Magic and comment |
 | 509 | SencillayEstupida | 3000097316 | 100.107.77.50 · CloudTrading SRV - Darwinex Demo (Tailscale) / 145.63.135.196 · Darwinex Demo VPS | blocked | No exact chart profile matches EX5, symbol, Magic and comment |
 | 515 | USDJPY_M30_1139 | 3000097316 | 100.107.77.50 · CloudTrading SRV - Darwinex Demo (Tailscale) / 145.63.135.196 · Darwinex Demo VPS | blocked | No exact chart profile matches EX5, symbol, Magic and comment |
-| 512 | USDJPY_M15_3_7_47_Real | 4000094894 | 145.63.135.196 · Darwinex Live VPS | eligible | Exact VPS EX5 and chart configuration resolved |
+| 512 | USDJPY_M15_3_7_47_Real | 4000094894 | 145.63.135.196 | completed | Run 417; equity curve generated |
 | 513 | US30v4 BUY | 4000094894 | 145.63.135.196 · Darwinex Live VPS | blocked | No exact chart profile matches EX5, symbol, Magic and comment |
 | 514 | XAU_M15_3_69_opt | 4000094894 | 145.63.135.196 · Darwinex Live VPS | blocked | No exact chart profile matches EX5, symbol, Magic and comment |
-| 430 | WF_Matrix_NAQStrategy_1_11_24d | 7396577 | 100.107.77.50 · CloudTrading SRV - FP Markets Demo (Tailscale) / 100.107.77.50 · CloudTrading SRV - FP Markets EURUSD (Tailscale) / 100.107.77.50 · CloudTrading SRV - FP Markets US30 (Tailscale) / 100.107.77.50 · CloudTrading SRV - FP Markets XAU (Tailscale) / 145.63.135.196 · FP Markets Demo 7396577 VPS | eligible | Exact VPS EX5 and chart configuration resolved |
+| 430 | WF_Matrix_NAQStrategy_1_11_24d | 7396577 | 100.107.77.50 | completed | Run 410: NDX/H1, equity curve generated |
 | 431 | XAU_M15_GWF_Opt._Strategy_3_36 | 7396577 | 100.107.77.50 · CloudTrading SRV - FP Markets Demo (Tailscale) / 100.107.77.50 · CloudTrading SRV - FP Markets EURUSD (Tailscale) / 100.107.77.50 · CloudTrading SRV - FP Markets US30 (Tailscale) / 100.107.77.50 · CloudTrading SRV - FP Markets XAU (Tailscale) / 145.63.135.196 · FP Markets Demo 7396577 VPS | blocked | No exact chart profile matches EX5, symbol, Magic and comment |
 | 432 | XAUWF_Matrix_Strategy_3_11_46d | 7396577 | 100.107.77.50 · CloudTrading SRV - FP Markets Demo (Tailscale) / 100.107.77.50 · CloudTrading SRV - FP Markets EURUSD (Tailscale) / 100.107.77.50 · CloudTrading SRV - FP Markets US30 (Tailscale) / 100.107.77.50 · CloudTrading SRV - FP Markets XAU (Tailscale) / 145.63.135.196 · FP Markets Demo 7396577 VPS | blocked | No exact chart profile matches EX5, symbol, Magic and comment |
 | 433 | XAUWF_Matrix_Strategy_3_13_39d | 7396577 | 100.107.77.50 · CloudTrading SRV - FP Markets Demo (Tailscale) / 100.107.77.50 · CloudTrading SRV - FP Markets EURUSD (Tailscale) / 100.107.77.50 · CloudTrading SRV - FP Markets US30 (Tailscale) / 100.107.77.50 · CloudTrading SRV - FP Markets XAU (Tailscale) / 145.63.135.196 · FP Markets Demo 7396577 VPS | blocked | No exact chart profile matches EX5, symbol, Magic and comment |

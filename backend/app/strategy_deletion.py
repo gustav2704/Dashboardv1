@@ -9,7 +9,10 @@ from .db import session
 
 
 ACTIVE_RUN_STATES = {"queued", "preflight", "running"}
-OPEN_BATCH_STATES = {"resolving", "waiting_terminal", "queued", "running", "paused"}
+# A paused batch can safely lose a strategy: its batch item is removed by the
+# strategy foreign-key cascade. Batches that may still schedule work remain
+# protected.
+BLOCKING_BATCH_STATES = {"resolving", "waiting_terminal", "queued", "running"}
 
 
 def _impact(conn: Any, strategy_id: int) -> dict[str, Any]:
@@ -74,16 +77,16 @@ def _impact(conn: Any, strategy_id: int) -> dict[str, Any]:
     ).fetchone()[0])
     if active_runs:
         blockers.append("Strategy has an active backtest")
-    batch_placeholders = ",".join("?" for _ in OPEN_BATCH_STATES)
-    open_batches = int(conn.execute(
+    batch_placeholders = ",".join("?" for _ in BLOCKING_BATCH_STATES)
+    blocking_batches = int(conn.execute(
         f"""SELECT COUNT(DISTINCT b.id)
             FROM backtest_batches b
             JOIN backtest_batch_items i ON i.batch_id=b.id
             WHERE i.strategy_id=? AND b.status IN ({batch_placeholders})""",
-        (strategy_id, *sorted(OPEN_BATCH_STATES)),
+        (strategy_id, *sorted(BLOCKING_BATCH_STATES)),
     ).fetchone()[0])
-    if open_batches:
-        blockers.append("Strategy belongs to an active or paused batch")
+    if blocking_batches:
+        blockers.append("Strategy belongs to an active batch")
     return {
         "strategy_id": strategy_id,
         "name": str(strategy["mql5_name"] or strategy["sqx_name"]),
@@ -109,6 +112,13 @@ def delete_strategy(strategy_id: int) -> dict[str, Any]:
             "SELECT id,run_dir FROM backtest_runs WHERE strategy_id=?",
             (strategy_id,),
         ).fetchall()
+        # Older databases added this self-reference without ON DELETE SET NULL.
+        # Clear it explicitly so removing a canonical strategy cannot leave an
+        # alias/duplicate strategy pointing at a deleted row.
+        conn.execute(
+            "UPDATE strategies SET identity_strategy_id=NULL WHERE identity_strategy_id=?",
+            (strategy_id,),
+        )
         conn.execute("DELETE FROM settings WHERE key=?", (f"alerts:{strategy_id}",))
         conn.execute("DELETE FROM strategies WHERE id=?", (strategy_id,))
 

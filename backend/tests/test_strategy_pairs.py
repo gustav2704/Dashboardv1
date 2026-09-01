@@ -34,11 +34,22 @@ def pair_dir() -> Path:
 
 
 def _insert_strategy(conn, symbol: str, sqx_name: str, account: str) -> int:
-    return conn.execute(
+    now = db.utcnow()
+    strategy_id = conn.execute(
         """INSERT INTO strategies(symbol,sqx_name,account_login,created_at)
            VALUES(?,?,?,?)""",
-        (symbol, sqx_name, account, db.utcnow()),
+        (symbol, sqx_name, account, now),
     ).lastrowid
+    terminal_id = conn.execute(
+        "INSERT INTO terminals(name,data_dir,account_login,status,created_at) VALUES(?,?,?,?,?)",
+        (f"VPS {strategy_id}", f"C:/vps/{strategy_id}", account, "connected", now),
+    ).lastrowid
+    conn.execute(
+        """INSERT INTO mappings(strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,confirmed,created_at)
+           VALUES(?,?,?,?,?,?,1,?)""",
+        (strategy_id, terminal_id, account, symbol, strategy_id, sqx_name, now),
+    )
+    return strategy_id
 
 
 def test_init_db_migrates_existing_databases_without_data_loss(pair_dir):

@@ -153,3 +153,69 @@ def test_safe_delete_cascades_history_and_removes_owned_reports(tmp_path, monkey
         assert conn.execute(
             "SELECT COUNT(*) FROM backtest_runs WHERE strategy_id=?", (strategy_id,)
         ).fetchone()[0] == 0
+
+
+def test_safe_delete_clears_legacy_identity_references(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "legacy-identity.db")
+    db.init_db()
+    now = db.utcnow()
+    with db.session() as conn:
+        strategy_id = _missing_strategy(conn, "Canonical")
+        dependent_id = conn.execute(
+            "INSERT INTO strategies(sqx_name,origin,identity_strategy_id,created_at) VALUES(?,'sqx',?,?)",
+            ("Alias", strategy_id, now),
+        ).lastrowid
+
+    strategy_deletion.delete_strategy(strategy_id)
+
+    with db.session() as conn:
+        assert conn.execute(
+            "SELECT identity_strategy_id FROM strategies WHERE id=?", (dependent_id,)
+        ).fetchone()[0] is None
+
+
+def test_safe_delete_removes_item_from_paused_batch_but_blocks_active_batches(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "paused-batch.db")
+    db.init_db()
+    now = db.utcnow()
+    with db.session() as conn:
+        paused_strategy_id = _missing_strategy(conn, "Paused item")
+        retained_strategy_id = _missing_strategy(conn, "Retained item")
+        paused_batch_id = conn.execute(
+            "INSERT INTO backtest_batches(status,created_at) VALUES('paused',?)", (now,)
+        ).lastrowid
+        for strategy_id in (paused_strategy_id, retained_strategy_id):
+            conn.execute(
+                """INSERT INTO backtest_batch_items(
+                     batch_id,strategy_id,status,created_at,updated_at
+                   ) VALUES(?,?,'blocked',?,?)""",
+                (paused_batch_id, strategy_id, now, now),
+            )
+        active_strategy_id = _missing_strategy(conn, "Active batch item")
+        active_batch_id = conn.execute(
+            "INSERT INTO backtest_batches(status,created_at) VALUES('queued',?)", (now,)
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO backtest_batch_items(
+                 batch_id,strategy_id,status,created_at,updated_at
+               ) VALUES(?,?,'queued',?,?)""",
+            (active_batch_id, active_strategy_id, now, now),
+        )
+
+    assert strategy_deletion.deletion_impact(paused_strategy_id)["allowed"] is True
+    strategy_deletion.delete_strategy(paused_strategy_id)
+
+    with db.session() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM backtest_batch_items WHERE strategy_id=?", (paused_strategy_id,)
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM backtest_batch_items WHERE batch_id=?", (paused_batch_id,)
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT status FROM backtest_batches WHERE id=?", (paused_batch_id,)
+        ).fetchone()[0] == "paused"
+
+    active_impact = strategy_deletion.deletion_impact(active_strategy_id)
+    assert active_impact["allowed"] is False
+    assert active_impact["blockers"] == ["Strategy belongs to an active batch"]

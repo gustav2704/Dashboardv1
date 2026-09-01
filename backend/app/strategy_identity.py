@@ -69,13 +69,15 @@ def resolve_catalog_identity(
     strategies = conn.execute(
         """SELECT s.*,l.strategy_name AS linked_name,l.symbol AS linked_symbol
            FROM strategies s
-           LEFT JOIN sqx_strategy_links l ON l.strategy_id=s.id""",
+           LEFT JOIN sqx_strategy_links l ON l.strategy_id=s.id
+           WHERE s.archived_at IS NULL""",
     ).fetchall()
     aliases: dict[int, set[str]] = defaultdict(set)
     for row in conn.execute(
         """SELECT a.strategy_id,a.normalized_alias
            FROM strategy_aliases a
-           JOIN strategies s ON s.id=a.strategy_id""",
+           JOIN strategies s ON s.id=a.strategy_id
+           WHERE s.archived_at IS NULL""",
     ).fetchall():
         aliases[int(row["strategy_id"])].add(str(row["normalized_alias"]))
 
@@ -934,15 +936,6 @@ def merge_strategies(
         ).fetchall()
         origins = [str(row["origin"] or "") for row in strategies]
         merged_retired = int(all(bool(row["retired"]) for row in strategies))
-        catalog_candidates = [
-            row for row in strategies if str(row["catalog_json"] or "{}") != "{}"
-        ]
-        latest_catalog = max(
-            catalog_candidates,
-            key=lambda row: (str(row["created_at"]), int(row["id"])),
-            default=None,
-        )
-
         for link in [
             impact.get("sqx_link"),
             *impact.get("dropped_sqx_links", []),
@@ -1018,18 +1011,6 @@ def merge_strategies(
             merged_origin = origin_with(merged_origin, *origin.split("+"))
         assignments = ["origin=?", "retired=?"]
         values: list[Any] = [merged_origin, merged_retired]
-        if latest_catalog:
-            assignments.extend(
-                ["symbol=?", "mql5_name=?", "catalog_row=?", "catalog_json=?"]
-            )
-            values.extend(
-                [
-                    latest_catalog["symbol"],
-                    latest_catalog["mql5_name"],
-                    latest_catalog["catalog_row"],
-                    latest_catalog["catalog_json"],
-                ]
-            )
         values.append(canonical_id)
         conn.execute(
             f"UPDATE strategies SET {','.join(assignments)} WHERE id=?",

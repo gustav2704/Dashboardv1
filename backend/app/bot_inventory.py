@@ -6,11 +6,11 @@ import io
 import re
 import zipfile
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from .config import BOT_INVENTORY_DIR
-from .db import session, utcnow
+from .db import rows, session, utcnow
 from .mapping import _deployment_for_mapping, asset_key, normalize, symbol_family
 from .operational_identity import normalize_expert
 
@@ -163,6 +163,20 @@ def _inventory_terminal(conn: Any, account: str, server: str, observed_at: str, 
     ).lastrowid)
 
 
+def _mapping_role_for_terminal(conn: Any, terminal_id: int) -> str:
+    terminal = conn.execute(
+        "SELECT data_dir,status FROM terminals WHERE id=?", (terminal_id,)
+    ).fetchone()
+    if not terminal:
+        raise KeyError(f"Terminal {terminal_id} not found")
+    data_dir = str(terminal["data_dir"] or "")
+    # ``status`` describes reachability, not ownership. A current VPS terminal
+    # remains the live mapping source while it is temporarily disconnected; its
+    # already-ingested deals must continue to feed the dashboard. Only explicit
+    # archive/import stores are historical sources.
+    return "historical" if data_dir.startswith(("archive://", "import://")) else "live"
+
+
 def _create_mt5_only_strategy(conn: Any, row: dict[str, str], now: str) -> int:
     account, server, symbol = row["account_login"], row["server"], row["symbol"]
     expert = Path(row["ex5_name"]).stem
@@ -205,13 +219,14 @@ def _safe_evidence_strategy(conn: Any, row: dict[str, str], terminal_id: int, no
     if len(matches) == 1:
         return int(matches[0]["strategy_id"]), True
     strategy_id = _create_mt5_only_strategy(conn, row, now)
+    role = _mapping_role_for_terminal(conn, terminal_id)
     conn.execute(
         """INSERT INTO mappings(strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,
                                  role,confidence,confirmed,created_at)
-           VALUES(?,?,?,?,?,?,'live',1,1,?)
+           VALUES(?,?,?,?,?,?,?,1,1,?)
            ON CONFLICT(strategy_id,terminal_id,symbol,magic,comment_pattern)
-           DO UPDATE SET confirmed=1,role='live'""",
-        (strategy_id, terminal_id, row["account_login"], row["symbol"], _magic(row["magic_number"]), row["expected_comment"], now),
+           DO UPDATE SET confirmed=1,role=excluded.role""",
+        (strategy_id, terminal_id, row["account_login"], row["symbol"], _magic(row["magic_number"]), row["expected_comment"], role, now),
     )
     return strategy_id, False
 
@@ -563,13 +578,14 @@ def confirm(deployment_id: int, strategy_id: int) -> dict[str, Any]:
             (strategy_deployment_id, now, deployment_id),
         )
         if magic is not None:
+            role = _mapping_role_for_terminal(conn, int(terminal_id or 0))
             conn.execute(
                 """INSERT INTO mappings(strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,
-                     role,confidence,confirmed,created_at) VALUES(?,?,?,?,?,?,'live',1,1,?)
+                     role,confidence,confirmed,created_at) VALUES(?,?,?,?,?,?,?,1,1,?)
                    ON CONFLICT(strategy_id,terminal_id,symbol,magic,comment_pattern)
-                   DO UPDATE SET confirmed=1,role='live'""",
+                   DO UPDATE SET confirmed=1,role=excluded.role""",
                 (strategy_deployment_id, terminal_id, deployment["account_login"], deployment["symbol"],
-                 int(magic), str(deployment["expected_comment"] or ""), now),
+                 int(magic), str(deployment["expected_comment"] or ""), role, now),
             )
         return {"deployment_id": deployment_id, "strategy_id": strategy_deployment_id,
                 "canonical_strategy_id": canonical_id, "mapping_created": magic is not None}
@@ -587,3 +603,346 @@ def imports_status() -> dict[str, Any]:
                FROM bot_deployments"""
         ).fetchone())
         return {"folder": str(BOT_INVENTORY_DIR), "counts": counts, "imports": imports}
+
+
+# ---------------------------------------------------------------------------
+# Anticipated chart-profile scan
+#
+# The CSV and evidence-ZIP paths both require trade activity (orders or
+# entries) before a bot is imported.  ``scan_chart_profiles`` reads the MT5
+# chart profiles directly so a freshly attached EA that has not placed a
+# single order yet is still detected, and ``gap_report`` flags whether the
+# matched strategy is missing its backtest or its .sqx link.
+# ---------------------------------------------------------------------------
+
+
+def _read_chr_payloads(terminal: dict[str, Any]) -> dict[str, bytes]:
+    """Return ``{profile_key: chr_payload}`` for every ``.chr`` under the
+    terminal's ``MQL5\\Profiles\\Charts`` tree.  SSH terminals read over a
+    single pinned SFTP session; local terminals read from disk.
+
+    The key is the path relative to the ``Charts`` root (for example
+    ``Default\\chart03.chr``), NOT the bare filename: MT5 keeps several
+    profile folders (Default, Euro, ...) that all contain ``chart01.chr``
+    style names, and keying by basename silently dropped every profile
+    except the last folder read.
+    """
+    transport = str(terminal.get("transport") or "local").lower()
+    if transport == "ssh":
+        from .ssh_bridge import SSHBridge
+        bridge = SSHBridge(terminal)
+        # Charts live under the MT5 data dir, not the Dashboardv1 bridge folder.
+        remote_root = str(terminal.get("remote_data_dir") or "").rstrip("/")
+        if not remote_root:
+            return {}
+        charts_root = f"{remote_root}/MQL5/Profiles/Charts"
+        names = bridge.list_files(charts_root, (".chr",))
+        if not names:
+            return {}
+        payloads = bridge.read_many_paths(names)
+        result: dict[str, bytes] = {}
+        anchor = PureWindowsPath(charts_root)
+        for name, payload in payloads.items():
+            candidate = PureWindowsPath(name)
+            try:
+                rel = candidate.relative_to(anchor)
+            except ValueError:
+                rel = PureWindowsPath(candidate.name)
+            result[str(rel)] = payload
+        return result
+    data_dir = terminal.get("data_dir")
+    if not data_dir:
+        return {}
+    root = Path(data_dir) / "MQL5" / "Profiles" / "Charts"
+    if not root.exists():
+        return {}
+    result: dict[str, bytes] = {}
+    for path in root.rglob("*.chr"):
+        try:
+            result[str(path.relative_to(root))] = path.read_bytes()
+        except OSError:
+            continue
+    return result
+
+
+def _resolve_terminal_account(conn: Any, terminal: dict[str, Any]) -> tuple[str, str]:
+    account = str(terminal.get("account_login") or "").strip()
+    server = str(terminal.get("server") or "").strip()
+    if account and server:
+        return account, server
+    row = conn.execute(
+        """SELECT account_login, server FROM account_ingestion_sources
+           WHERE terminal_id=? ORDER BY updated_at DESC LIMIT 1""",
+        (terminal["id"],),
+    ).fetchone()
+    if row:
+        account = account or str(row["account_login"] or "").strip()
+        server = server or str(row["server"] or "").strip()
+    return account, server
+
+
+def scan_chart_profiles(terminal_id: int) -> dict[str, Any]:
+    """Scan ``.chr`` profiles of a terminal and return every attached EA,
+    including bots that have never placed an order.  Safe to call repeatedly;
+    it does not write to the database."""
+    with session() as conn:
+        terminal = conn.execute(
+            "SELECT * FROM terminals WHERE id=?", (terminal_id,)
+        ).fetchone()
+        if not terminal:
+            raise KeyError("Terminal not found")
+        terminal = dict(terminal)
+        account, server = _resolve_terminal_account(conn, terminal)
+    payloads = _read_chr_payloads(terminal)
+    detected: list[dict[str, Any]] = []
+    now = utcnow()
+    for profile_name in sorted(payloads):
+        config = _profile_fields(payloads[profile_name])
+        expert_path = config["expert_path"]
+        magic = _magic(config["magic_number"])
+        symbol = config["symbol"].strip()
+        if not expert_path or not symbol:
+            continue
+        ex5 = expert_path.replace("/", "\\").rsplit("\\", 1)[-1]
+        if not ex5 or ex5.lower() == ".ex5":
+            continue
+        detected.append({
+            "terminal_id": terminal_id,
+            "account_login": account,
+            "server": server,
+            "profile_name": profile_name,
+            "chart_id": profile_name,
+            "symbol": symbol,
+            "ex5_name": ex5,
+            "magic_number": magic,
+            "magic_missing": magic is None,
+            "expected_comment": config["expected_comment"],
+            "scanned_at": now,
+        })
+    gaps = gap_report(detected)
+    summary = {
+        "total": len(detected),
+        "new": sum(1 for item in gaps if item["is_new_deployment"]),
+        "missing_sqx": sum(1 for item in gaps if not item["has_sqx"] and item["matched_strategy_id"]),
+        "missing_backtest": sum(1 for item in gaps if not item["has_backtest"] and item["matched_strategy_id"]),
+        "missing_magic": sum(1 for item in gaps if item["magic_missing"]),
+        "unmatched": sum(1 for item in gaps if not item["matched_strategy_id"]),
+    }
+    return {"terminal_id": terminal_id, "detected": gaps, "summary": summary}
+
+
+def gap_report(detected: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Annotate each detected chart-profile bot with its matched strategy and
+    the backtest/.sqx gaps.  Uses the same safe-match rule as the evidence
+    path so ambiguous bots stay ``UNMATCHED`` for manual review."""
+    if not detected:
+        return []
+    with session() as conn:
+        # Index existing confirmed live mappings by (account, server, symbol, magic).
+        mapping_index: dict[tuple[str, str, str, int], list[int]] = {}
+        for row in conn.execute(
+            """SELECT DISTINCT m.strategy_id, m.account_login, m.symbol, m.magic, t.server
+               FROM mappings m JOIN terminals t ON t.id=m.terminal_id
+               WHERE m.confirmed=1"""
+        ):
+            key = (
+                str(row["account_login"] or "").strip(),
+                str(row["server"] or "").strip().lower(),
+                str(row["symbol"] or "").strip(),
+                int(row["magic"]) if row["magic"] is not None else 0,
+            )
+            mapping_index.setdefault(key, []).append(int(row["strategy_id"]))
+        # Existing deployments to detect "new" bots.
+        existing_keys = {
+            (str(row["account_login"] or "").strip(), str(row["server"] or "").strip(),
+             str(row["chart_id"] or "").strip(), str(row["normalized_ex5"] or "").strip())
+            for row in conn.execute(
+                "SELECT account_login,server,chart_id,normalized_ex5 FROM bot_deployments"
+            )
+        }
+        sqx_links = {
+            int(row["strategy_id"]): row["missing_from_sqx_at"] is None
+            for row in conn.execute(
+                "SELECT strategy_id, missing_from_sqx_at FROM sqx_strategy_links"
+            )
+        }
+        backtest_counts = {
+            int(row["strategy_id"]): int(row["n"])
+            for row in conn.execute(
+                """SELECT strategy_id, COUNT(*) n FROM backtest_runs
+                   WHERE status='completed' GROUP BY strategy_id"""
+            )
+        }
+        result = []
+        for bot in detected:
+            account = str(bot.get("account_login") or "").strip()
+            server = str(bot.get("server") or "").strip()
+            symbol = str(bot.get("symbol") or "").strip()
+            magic = bot.get("magic_number")
+            ex5 = str(bot.get("ex5_name") or "").strip()
+            normalized = normalize(Path(ex5).stem) if ex5 else ""
+            matched_id: int | None = None
+            matched_name = ""
+            match_confidence = ""
+            if magic is not None and account and server:
+                matches = mapping_index.get((account, server.lower(), symbol, int(magic)), [])
+                if len(matches) == 1:
+                    matched_id = matches[0]
+                    match_confidence = "CONFIRMADA_MAPPING"
+            if matched_id is None and normalized:
+                # Fall back to a name/alias match against non-retired strategies
+                # of the same symbol family.  Ambiguous matches stay unmatched.
+                family = symbol_family(symbol)
+                name_hits: list[int] = []
+                for strat in conn.execute(
+                    "SELECT id, sqx_name, mql5_name, symbol FROM strategies WHERE retired=0 AND archived_at IS NULL"
+                ):
+                    if symbol_family(str(strat["symbol"] or "")) != family:
+                        continue
+                    names = {
+                        normalize(str(strat["sqx_name"] or "")),
+                        normalize(str(strat["mql5_name"] or "")),
+                    }
+                    if normalized in names:
+                        name_hits.append(int(strat["id"]))
+                if len(name_hits) == 1:
+                    matched_id = name_hits[0]
+                    match_confidence = "NOMBRE_EXACTO"
+            # Resolve name for display.
+            if matched_id is not None:
+                strat = conn.execute(
+                    "SELECT sqx_name, mql5_name FROM strategies WHERE id=?", (matched_id,)
+                ).fetchone()
+                matched_name = str(strat["mql5_name"] or strat["sqx_name"]) if strat else ""
+            is_new = (
+                account, server, str(bot.get("chart_id") or ""), normalized
+            ) not in existing_keys
+            has_sqx = bool(sqx_links.get(matched_id)) if matched_id else False
+            has_backtest = bool(backtest_counts.get(matched_id)) if matched_id else False
+            if matched_id is None:
+                gap = "UNMATCHED"
+            elif bot.get("magic_missing"):
+                gap = "MISSING_MAGIC"
+            elif not has_sqx:
+                gap = "MISSING_SQX"
+            elif not has_backtest:
+                gap = "MISSING_BACKTEST"
+            elif is_new:
+                gap = "NEW"
+            else:
+                gap = "OK"
+            result.append({
+                **bot,
+                "id": None,
+                "normalized_ex5": normalized,
+                "matched_strategy_id": matched_id,
+                "matched_name": matched_name,
+                "match_confidence": match_confidence,
+                "has_sqx": has_sqx,
+                "has_backtest": has_backtest,
+                "is_new_deployment": is_new,
+                "gap": gap,
+            })
+        return result
+
+
+def import_chart_profiles(terminal_id: int) -> dict[str, Any]:
+    """Persist every detected chart-profile bot as a pending ``bot_deployments``
+    row (``confirmed=0``) and auto-confirm the safe unique matches, mirroring
+    the CSV import path.  Returns the scan result with the import id."""
+    scan_result = scan_chart_profiles(terminal_id)
+    detected = scan_result["detected"]
+    if not detected:
+        return {**scan_result, "import_id": None}
+    account = str(detected[0].get("account_login") or "").strip()
+    server = str(detected[0].get("server") or "").strip()
+    if not account or not server:
+        raise ValueError("El terminal no tiene cuenta ni servidor resueltos")
+    imported_at = utcnow()
+    source_path = f"chart-profile://terminal/{terminal_id}/{imported_at}"
+    digest = hashlib.sha256(source_path.encode("utf-8")).hexdigest()
+    with session() as conn:
+        import_id = conn.execute(
+            """INSERT INTO bot_inventory_imports(
+                 source_path,source_hash,generated_at,account_login,server,status,row_count,imported_at
+               ) VALUES(?,?,?,?,?,'chart_profile',?,?)""",
+            (source_path, digest, imported_at, account, server, len(detected), imported_at),
+        ).lastrowid
+        for row in detected:
+            ex5 = str(row.get("ex5_name") or "").strip()
+            normalized = normalize(Path(ex5).stem) if ex5 else ""
+            magic = row.get("magic_number")
+            confidence = "CONFIRMADA_PERFIL" if magic is not None else "PERFIL_SIN_MAGIC"
+            conn.execute(
+                """INSERT INTO bot_deployments(
+                     account_login,server,chart_id,symbol,timeframe,ex5_name,normalized_ex5,
+                     magic,expected_comment,mapping_source,mapping_confidence,attached,
+                     terminal_connected,algo_trading_global,account_trade_allowed,
+                     deployment_status,trade_status,activity_status,first_trade_at,last_trade_at,observed_at,
+                     order_count,first_order_at,last_order_at,order_states,
+                     source_import_id,created_at,updated_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(account_login,server,chart_id,normalized_ex5) DO UPDATE SET
+                     symbol=excluded.symbol,ex5_name=excluded.ex5_name,
+                     magic=CASE
+                       WHEN bot_deployments.mapping_confidence='CONFIRMADA_DEALS'
+                         THEN bot_deployments.magic
+                       ELSE COALESCE(excluded.magic,bot_deployments.magic)
+                     END,
+                     expected_comment=COALESCE(NULLIF(excluded.expected_comment,''),bot_deployments.expected_comment),
+                     mapping_source=CASE
+                       WHEN bot_deployments.mapping_confidence='CONFIRMADA_DEALS'
+                         THEN bot_deployments.mapping_source
+                       ELSE excluded.mapping_source
+                     END,
+                     mapping_confidence=CASE
+                       WHEN bot_deployments.mapping_confidence='CONFIRMADA_DEALS'
+                         THEN bot_deployments.mapping_confidence
+                       ELSE excluded.mapping_confidence
+                     END,
+                     attached=excluded.attached,
+                     algo_trading_global=excluded.algo_trading_global,
+                     account_trade_allowed=excluded.account_trade_allowed,
+                     deployment_status=excluded.deployment_status,observed_at=excluded.observed_at,
+                     source_import_id=excluded.source_import_id,updated_at=excluded.updated_at""",
+                (
+                    account, server, str(row.get("chart_id") or ""), str(row.get("symbol") or ""),
+                    "", ex5, normalized, magic,
+                    str(row.get("expected_comment") or "").strip(),
+                    "EVIDENCIA_PERFIL", confidence, 1, None, None, None,
+                    "attached_active", "NUNCA_OPERO", "SIN_ACTIVIDAD", None, None, row.get("scanned_at") or imported_at,
+                    0, None, None, "",
+                    import_id, imported_at, imported_at,
+                ),
+            )
+        _auto_confirm_safe_deployments(conn, account, imported_at)
+        # Attach the persisted deployment ids so the UI can launch backtests.
+        id_by_key = {
+            (str(row["account_login"] or ""), str(row["server"] or ""),
+             str(row["chart_id"] or ""), str(row["normalized_ex5"] or "")): int(row["id"])
+            for row in conn.execute(
+                """SELECT id, account_login, server, chart_id, normalized_ex5
+                   FROM bot_deployments WHERE account_login=? AND server=?""",
+                (account, server),
+            )
+        }
+    for bot in detected:
+        bot["id"] = id_by_key.get(
+            (account, server, str(bot.get("chart_id") or ""), str(bot.get("normalized_ex5") or ""))
+        )
+    return {**scan_result, "import_id": import_id}
+
+
+def chart_scan_accounts() -> list[dict[str, Any]]:
+    """List terminals that can be scanned for chart profiles (those with a
+    remote_data_dir for SSH or a local data_dir)."""
+    with session() as conn:
+        return rows(conn.execute(
+            """SELECT t.id, t.name, t.transport, t.account_login, t.server,
+                      t.remote_data_dir, t.data_dir,
+                      (SELECT COUNT(*) FROM account_ingestion_sources s WHERE s.terminal_id=t.id) accounts
+               FROM terminals t
+               WHERE t.transport='ssh' AND t.remote_data_dir IS NOT NULL AND t.remote_data_dir<>''
+                  OR (t.transport<>'ssh' AND t.data_dir IS NOT NULL AND t.data_dir<>'')
+               ORDER BY t.name"""
+        ))

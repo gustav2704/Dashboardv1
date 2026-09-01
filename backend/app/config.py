@@ -39,7 +39,7 @@ REMOTE_MT5_TESTER_TIMEOUT = int(os.environ.get("REMOTE_MT5_TESTER_TIMEOUT", "720
 BACKTEST_LOG_TAIL_LINES = int(os.environ.get("MT5_BACKTEST_LOG_TAIL_LINES", "2000"))
 BACKTEST_ARTIFACT_KEEP_RUNS = int(os.environ.get("MT5_BACKTEST_ARTIFACT_KEEP_RUNS", "1"))
 REMOTE_BACKTEST_JOB_RETENTION_DAYS = int(os.environ.get("MT5_REMOTE_JOB_RETENTION_DAYS", "7"))
-BACKTEST_START_DATE = os.environ.get("MT5_BACKTEST_START_DATE", "2024-01-01")
+BACKTEST_START_DATE = os.environ.get("MT5_BACKTEST_START_DATE", "2017-01-01")
 BACKTEST_END_DATE = os.environ.get("MT5_BACKTEST_END_DATE", "2024-12-31")
 DARWINEX_TERMINAL = Path(
     os.environ.get(
@@ -94,8 +94,23 @@ EXPERT_SEARCH_ROOTS = tuple(
     if value
 )
 
-# One minute keeps the terminal availability useful without repeatedly reading
-# the complete history: the bridge asks MT5 only for rows newer than its cursor.
+# One minute keeps the operational view current while the bridge still asks MT5
+# only for rows newer than its cursor.  The old five-minute cadence made a
+# healthy source look stuck between polls.
 REFRESH_SECONDS = int(os.environ.get("DASHBOARDV1_REFRESH_SECONDS", "60"))
 STALE_SECONDS = int(os.environ.get("DASHBOARDV1_STALE_SECONDS", "180"))
+# A user-initiated Refresh requests an MT5 snapshot and waits briefly for the
+# bridge EA to write its reply before rebuilding the dashboard read model.
+SYNC_RESPONSE_WAIT_SECONDS = float(
+    os.environ.get("DASHBOARDV1_SYNC_RESPONSE_WAIT_SECONDS", "8")
+)
+# Every remote collection phase shares the dashboard worker.  A dead or
+# firewalled SSH endpoint must therefore fail within a bounded time instead of
+# preventing every other terminal from being polled and eventually making their
+# otherwise healthy status appear stale.
+# Polling is an availability feature. A nonresponsive VPS must not hold the
+# complete dashboard cycle for minutes; successful bridge round trips are
+# normally measured in seconds.
+SSH_CONNECT_TIMEOUT_SECONDS = int(os.environ.get("DASHBOARDV1_SSH_CONNECT_TIMEOUT_SECONDS", "5"))
+SSH_IO_TIMEOUT_SECONDS = int(os.environ.get("DASHBOARDV1_SSH_IO_TIMEOUT_SECONDS", "8"))
 TERMINAL_EVENT_RETENTION_DAYS = int(os.environ.get("DASHBOARDV1_EVENT_RETENTION_DAYS", "5"))

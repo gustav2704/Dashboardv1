@@ -15,6 +15,7 @@ from openpyxl.chart import BarChart, Reference
 from openpyxl.formatting.rule import ColorScaleRule, DataBarRule, FormulaRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.workbook.properties import CalcProperties
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
 from .config import ACTIVE_BACKTEST_BROKER
@@ -1424,6 +1425,8 @@ def export_catalog(
         formula_cache,
     )
     workbook.active = workbook.sheetnames.index("Ranking")
+    if workbook.calculation is None:
+        workbook.calculation = CalcProperties()
     workbook.calculation.fullCalcOnLoad = True
     workbook.calculation.forceFullCalc = True
     workbook.calculation.calcMode = "auto"

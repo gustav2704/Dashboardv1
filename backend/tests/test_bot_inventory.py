@@ -3,7 +3,6 @@ from zipfile import ZipFile
 
 from app import bot_inventory, db, main
 
-
 HEADER = (
     "generated_utc,account_login,server,chart_id,symbol,timeframe,ex5_name,magic_number,"
     "mapping_source,mapping_confidence,expected_comment,observed_comments,attached,"
@@ -96,6 +95,7 @@ def test_known_magic_creates_scoped_mapping_and_reports_no_recent_trades(tmp_pat
         mapping = conn.execute("SELECT * FROM mappings").fetchone()
         assert mapping["magic"] == 991531386
         assert mapping["account_login"] == "100121894"
+        assert mapping["role"] == "live"
         assert str(conn.execute("SELECT data_dir FROM terminals WHERE id=?", (mapping["terminal_id"],)).fetchone()[0]).startswith("inventory://")
 
     row = next(item for item in main.dashboard_data(window="30d")["strategies"] if item["id"] == strategy_id)
@@ -247,3 +247,91 @@ def test_evidence_zip_auto_links_unique_magic_and_creates_mt5_only_for_unmatched
         assert created and created["origin"] == "mt5"
     dashboard = {row["id"]: row for row in main.dashboard_data()["strategies"]}
     assert all(dashboard[row["strategy_id"]]["metrics"]["trades"] == 0 for row in deployments)
+
+
+def _chr_payload(symbol: str, expert: str, magic: str, comment: str = "") -> bytes:
+    text = f"<chart>\r\nsymbol={symbol}\r\n<expert>\r\npath=Experts\\{expert}\r\n<inputs>\r\nCustomComment={comment}\r\nMagicNumber={magic}\r\n</inputs>\r\n</expert>\r\n"
+    return ("\ufeff" + text).encode("utf-16le")
+
+
+def _terminal(tmp_path, monkeypatch, name: str = "Scan") -> int:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "dashboard.db")
+    monkeypatch.setattr(main, "suggestions", lambda: [])
+    db.init_db()
+    with db.session() as conn:
+        terminal_id = conn.execute(
+            """INSERT INTO terminals(name,data_dir,account_login,server,status,created_at)
+               VALUES(?,'local://scan','10025867','Axi-US50-Demo','connected',?)""",
+            (name, db.utcnow()),
+        ).lastrowid
+    return terminal_id
+
+
+def test_chart_scan_keeps_profiles_from_all_folders(tmp_path, monkeypatch):
+    """A terminal whose Charts tree has several profile folders (each with
+    chart01.chr) must detect every attached EA, not only the last folder."""
+    terminal_id = _terminal(tmp_path, monkeypatch)
+    charts = tmp_path / "scan_data" / "MQL5" / "Profiles" / "Charts"
+    (charts / "Default").mkdir(parents=True)
+    (charts / "Euro").mkdir(parents=True)
+    (charts / "Default" / "chart01.chr").write_bytes(
+        _chr_payload("EURUSD", "WF Optimization - EURUSD M5 SH JULStrategy 5.20.196.ex5", "5201962", "WF_Opt._EURUSD_M5_SH_JULStrate")
+    )
+    (charts / "Default" / "chart03.chr").write_bytes(
+        _chr_payload("XAUUSD", "XAU M15 GWF Optimization - Strategy 3.44.152.ex5", "11111", "XAU_M15_GWF_Opt._Strategy_3_44")
+    )
+    (charts / "Euro" / "chart01.chr").write_bytes(
+        _chr_payload("GBPUSD", "BB_GBPUSD_LONG_H4.ex5", "37001", "BB_GBPUSD_LONG")
+    )
+    (charts / "Euro" / "chart02.chr").write_bytes(
+        _chr_payload("USDJPY", "USDJPY-M15-Strategy 3.7.47.ex5", "37473", "WF_Matrix_Strategy_3_7_47")
+    )
+    with db.session() as conn:
+        conn.execute("UPDATE terminals SET data_dir=? WHERE id=?", (str(tmp_path / "scan_data"), terminal_id))
+
+    result = bot_inventory.scan_chart_profiles(terminal_id)
+    detected = {bot["profile_name"]: bot for bot in result["detected"]}
+    # Before the fix, only the last folder's chart01.chr survived (4 basenames),
+    # so Default\chart01.chr and Default\chart03.chr were lost.
+    assert set(detected) == {
+        "Default\\chart01.chr", "Default\\chart03.chr", "Euro\\chart01.chr", "Euro\\chart02.chr",
+    }
+    assert detected["Default\\chart03.chr"]["ex5_name"] == "XAU M15 GWF Optimization - Strategy 3.44.152.ex5"
+    assert detected["Default\\chart03.chr"]["magic_number"] == 11111
+    assert detected["Euro\\chart01.chr"]["magic_number"] == 37001
+
+
+def test_chart_scan_import_persists_confirmed_deployments(tmp_path, monkeypatch):
+    """Importing a chart scan writes bot_deployments rows (auto-confirmed when
+    a unique confirmed live mapping exists) so the new bot becomes visible."""
+    terminal_id = _terminal(tmp_path, monkeypatch)
+    now = db.utcnow()
+    with db.session() as conn:
+        strategy_id = conn.execute(
+            """INSERT INTO strategies(symbol,sqx_name,account_login,origin,created_at)
+               VALUES('XAUUSD','XAU_M15_GWF_Opt._Strategy_3_44','10025867','mt5',?)""",
+            (now,),
+        ).lastrowid
+        conn.execute("UPDATE strategies SET identity_strategy_id=? WHERE id=?", (strategy_id, strategy_id))
+        conn.execute(
+            """INSERT INTO mappings(strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,role,confirmed,created_at)
+               VALUES(?,?, '10025867','XAUUSD',11111,'XAU_M15_GWF_Opt._Strategy_3_44','live',1,?)""",
+            (strategy_id, terminal_id, now),
+        )
+    charts = tmp_path / "scan_data" / "MQL5" / "Profiles" / "Charts" / "Default"
+    charts.mkdir(parents=True)
+    (charts / "chart03.chr").write_bytes(
+        _chr_payload("XAUUSD", "XAU M15 GWF Optimization - Strategy 3.44.152.ex5", "11111", "XAU_M15_GWF_Opt._Strategy_3_44")
+    )
+    with db.session() as conn:
+        conn.execute("UPDATE terminals SET data_dir=? WHERE id=?", (str(tmp_path / "scan_data"), terminal_id))
+
+    result = bot_inventory.import_chart_profiles(terminal_id)
+    assert result["import_id"] is not None
+    with db.session() as conn:
+        deployment = conn.execute("SELECT * FROM bot_deployments").fetchone()
+        assert deployment["account_login"] == "10025867"
+        assert deployment["ex5_name"] == "XAU M15 GWF Optimization - Strategy 3.44.152.ex5"
+        assert deployment["magic"] == 11111
+        assert deployment["strategy_id"] == strategy_id
+        assert deployment["confirmed"] == 1

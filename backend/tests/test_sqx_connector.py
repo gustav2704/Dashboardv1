@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 from app import db, sqx_connector
 
@@ -25,6 +26,61 @@ def _item(name, symbol, filter_result="PASSED"):
         },
         "orders_count": 120,
     }
+
+
+def test_main_ui_pid_uses_squant_and_ignores_code_editor(monkeypatch):
+    monkeypatch.delenv("SQX_PID", raising=False)
+    monkeypatch.setattr(sqx_connector.os, "name", "nt")
+    monkeypatch.setattr(
+        sqx_connector.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps([
+                {"ProcessId": 7880, "CommandLine": "StrategyQuantX_ui.exe SQUANT StrategyQuantX"},
+                {"ProcessId": 6576, "CommandLine": "StrategyQuantX_ui.exe SQEDITOR CodeEditor"},
+            ]),
+        ),
+    )
+
+    assert sqx_connector._main_ui_pid_args() == ["--pid", "7880"]
+
+
+def test_targeted_sync_does_not_run_bulk_or_doctor(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "targeted-sync.db")
+    db.init_db()
+    name = "CADJPY_M30_Long_Strategy 4.10.64"
+    with db.session() as conn:
+        strategy_id = conn.execute(
+            "INSERT INTO strategies(symbol,sqx_name,origin,created_at) VALUES(?,?,?,?)",
+            ("CADJPY", name, "mt5", db.utcnow()),
+        ).lastrowid
+    calls = []
+
+    def fake_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        if args[0] == "strategies":
+            return [{"strategy_name": name}]
+        if args[0] == "inspect":
+            return _item(name, "CADJPY_M1_DK_utc2")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(sqx_connector, "_run", fake_run)
+    result = sqx_connector.sync(
+        "Retester", "Results", strategy_names=[name], include_doctor=False,
+    )
+
+    assert result["targeted"] is True
+    assert result["imported"] == 1
+    assert [call[0][0] for call in calls] == ["strategies", "inspect"]
+    assert calls[0][1]["timeout"] == 5
+    assert calls[1][1]["timeout"] == 15
+    with db.session() as conn:
+        row = conn.execute(
+            "SELECT analytics_json FROM sqx_analytics_snapshots WHERE strategy_id=?",
+            (strategy_id,),
+        ).fetchone()
+    assert json.loads(row["analytics_json"])["egt"]["total"] == 4.7
 
 
 def test_sync_persists_strategy_doctor_summary(tmp_path, monkeypatch):
@@ -239,6 +295,50 @@ def test_failed_sync_does_not_change_missing_state(tmp_path, monkeypatch):
             "SELECT missing_from_sqx_at FROM sqx_strategy_links WHERE strategy_id=?",
             (strategy_id,),
         ).fetchone()["missing_from_sqx_at"] is None
+
+
+def test_empty_sync_keeps_links_and_snapshots_unchanged(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "empty.db")
+    db.init_db()
+    monkeypatch.setattr(sqx_connector, "_run", lambda *args, **kwargs: [_item("Existing Bot", "XAUUSD")])
+    sqx_connector.sync("Retester", "Results")
+
+    monkeypatch.setattr(sqx_connector, "_run", lambda *args, **kwargs: [])
+    result = sqx_connector.sync("Retester", "Results")
+
+    assert result["skipped_empty"] is True
+    with db.session() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM sqx_strategy_links").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM sqx_analytics_snapshots").fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT missing_from_sqx_at FROM sqx_strategy_links"
+        ).fetchone()["missing_from_sqx_at"] is None
+
+
+def test_sync_preserves_valid_oos_and_analytics_when_sqx_returns_empty_oos(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "preserve.db")
+    db.init_db()
+    good = _item("Existing Bot", "XAUUSD")
+    monkeypatch.setattr(sqx_connector, "_run", lambda *args, **kwargs: [good])
+    sqx_connector.sync("Retester", "Results")
+
+    degraded = _item("Existing Bot", "XAUUSD")
+    degraded["stats"] = {**degraded["stats"], "oos": {"NumberOfTrades": 0}}
+    degraded["analytics"] = {
+        "edge": {"available": False, "reason": "Sin trades OOS"},
+        "egt": {"available": False, "reason": "Histórico no disponible"},
+    }
+    monkeypatch.setattr(sqx_connector, "_run", lambda *args, **kwargs: [degraded])
+    result = sqx_connector.sync("Retester", "Results")
+
+    assert result["preserved_analytics"] == 2
+    assert result["preserved_oos_baselines"] == 1
+    with db.session() as conn:
+        analytics = json.loads(conn.execute("SELECT analytics_json FROM sqx_analytics_snapshots").fetchone()["analytics_json"])
+        oos = json.loads(conn.execute("SELECT metrics_json FROM baseline_snapshots WHERE sample_type='oos'").fetchone()["metrics_json"])
+    assert analytics["edge"]["available"] is True
+    assert analytics["egt"]["available"] is True
+    assert oos["NumberOfTrades"] == 120
 
 
 def _parameter_snapshot(variables):

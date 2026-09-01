@@ -178,6 +178,39 @@ def test_catalog_reactivates_a_unique_retired_identity(tmp_path, monkeypatch):
     assert [tuple(row) for row in strategies] == [(strategy_id, 0, 2)]
 
 
+def test_catalog_ignores_archived_duplicate_aliases(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "archived-catalog-alias.db")
+    db.init_db()
+    now = db.utcnow()
+    with db.session() as conn:
+        active_id = conn.execute(
+            """INSERT INTO strategies(symbol,sqx_name,mql5_name,account_login,origin,created_at)
+               VALUES('NAQ','Active Bot','Bot MQL 3.3.15(1)','123','mt5',?)""",
+            (now,),
+        ).lastrowid
+        archived_id = conn.execute(
+            """INSERT INTO strategies(symbol,sqx_name,mql5_name,account_login,origin,archived_at,created_at)
+               VALUES('NAQ','Archived Bot','Bot MQL 3.3.15(1)','123','mt5',?,?)""",
+            (now, now),
+        ).lastrowid
+        strategy_identity.add_alias(conn, active_id, "Catalog Bot", "legacy")
+        strategy_identity.add_alias(conn, archived_id, "Catalog Bot", "legacy")
+    source = tmp_path / "catalog.xlsx"
+    _catalog(source, "Catalog Bot")
+
+    result = import_catalog(source)
+
+    assert result["ambiguous"] == 0
+    assert result["updated"] == 1
+    with db.session() as conn:
+        assert conn.execute(
+            "SELECT catalog_row FROM strategies WHERE id=?", (active_id,)
+        ).fetchone()[0] == 2
+        assert conn.execute(
+            "SELECT catalog_row FROM strategies WHERE id=?", (archived_id,)
+        ).fetchone()[0] is None
+
+
 def test_sqx_sync_matches_a_recorded_alias(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "sqx-alias.db")
     db.init_db()

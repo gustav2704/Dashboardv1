@@ -4,11 +4,11 @@ import { buildBotRankings } from './JournalAnalysis'
 import type { JournalTrade } from './journalTypes'
 import type { Strategy } from './types'
 
-function strategy(status: Strategy['strategy_status']): Strategy {
+function strategy(statuses: Strategy['strategy_statuses']): Strategy {
   return {
     id: 7,
     selection: false,
-    strategy_status: status,
+    strategy_statuses: statuses,
     display_name: 'Bot destacado',
     mql5_name: 'Bot destacado',
     sqx_name: 'Bot destacado',
@@ -35,16 +35,16 @@ describe('performance status indicators', () => {
   it('keeps Live and Candidata live through bot and MN ranking data', () => {
     const trades = Array.from({ length: 10 }, (_, index) => trade(index))
 
-    expect(buildPerformancePoints([strategy('live')])[0].strategyStatus).toBe('live')
-    expect(buildMagicNumberPerformancePoints(trades, { 7: 'candidate_live' })[0].strategyStatus).toBe('candidate_live')
+    expect(buildPerformancePoints([strategy(['live', 'axi_live'])])[0].strategyStatuses).toEqual(['live', 'axi_live'])
+    expect(buildMagicNumberPerformancePoints(trades, { 7: ['candidate_live'] })[0].strategyStatuses).toEqual(['candidate_live'])
     expect(buildBotRankings(trades, 'mn', { 7: 'live' })[0].strategyStatus).toBe('live')
   })
 
   it('keeps uncategorized bots without a performance indicator status', () => {
     const trades = Array.from({ length: 10 }, (_, index) => trade(index))
 
-    expect(buildPerformancePoints([strategy('')])[0].strategyStatus).toBe('')
-    expect(buildMagicNumberPerformancePoints(trades)[0].strategyStatus).toBe('')
+    expect(buildPerformancePoints([strategy([])])[0].strategyStatuses).toEqual([])
+    expect(buildMagicNumberPerformancePoints(trades)[0].strategyStatuses).toEqual([])
     expect(buildBotRankings(trades, 'mn')[0].strategyStatus).toBe('')
   })
 })

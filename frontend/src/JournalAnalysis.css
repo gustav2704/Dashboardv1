@@ -20,6 +20,24 @@
 .journal-chart-toggle:hover { border-color: #3a6379; color: #dce8ee; }
 .journal-chart-toggle span { display: block; font-size: 18px; line-height: 1; transition: transform .16s ease; }
 .journal-chart-toggle[aria-expanded="true"] span { transform: rotate(180deg); }
+.equity-view-toggle {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid #263f4e;
+  border-radius: 4px;
+}
+.equity-view-toggle button {
+  padding: 6px 9px;
+  border: 0;
+  border-right: 1px solid #263f4e;
+  background: #0c1b26;
+  color: #8ca1af;
+  cursor: pointer;
+  font-size: 11px;
+}
+.equity-view-toggle button:last-child { border-right: 0; }
+.equity-view-toggle button.active { background: #10332f; color: #c9fff6; }
+.equity-view-toggle button:hover { color: #dce8ee; }
 .journal-grid > .journal-calendar { grid-column: 1 / -1; }
 
 .account-analytics {
@@ -147,6 +165,9 @@
 }
 
 @media (max-width: 700px) {
+  .journal-chart-title:has(.equity-view-toggle) { align-items: flex-start; flex-direction: column; }
+  .equity-view-toggle { width: 100%; }
+  .equity-view-toggle button { flex: 1; }
   .account-analytics-heading,
   .temporal-analysis-head { align-items: flex-start; flex-direction: column; }
   .account-analytics-heading p { text-align: left; }

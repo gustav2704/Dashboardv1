@@ -27,6 +27,13 @@ def test_server_or_ex5_is_a_different_identity():
     assert identity(base) != identity(_mapping(3, 7, "US100", 11, expert="BotB"))
 
 
+def test_fp_markets_server_spellings_are_one_identity():
+    full = _mapping(1, 7, "EURUSD", 11, account="7396577", server="FirstPrudentialMarkets-Demo")
+    short = _mapping(2, 8, "EURUSD", 12, account="7396577", server="FPMarkets-Demo")
+
+    assert identity(full) == identity(short)
+
+
 def test_legacy_conflict_uses_primary_identity_only():
     strategy = {"symbol": "BTCUSD", "account_login": "300"}
     btc = _mapping(1, 7, "BTCUSD", 3, "100", "historical")

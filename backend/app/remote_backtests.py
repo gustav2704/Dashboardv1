@@ -362,6 +362,20 @@ $logTail=if($latestLog){{(Get-Content -LiteralPath $latestLog.FullName -Tail 100
 
 def setup_runner() -> dict[str, Any]:
     """Create the isolated portable terminal without altering the source."""
+    # A previously provisioned isolated runner already receives the exact EX5
+    # and input set for every individual run. Re-copying all terminal bases on
+    # every batch is both unnecessary and can keep the setup RPC busy for many
+    # minutes. The execution preflight still checks runner isolation and disk.
+    existing = status()
+    if existing["runner_exists"]:
+        return {
+            "runner_root": str(existing["runner_root"]),
+            "jobs_root": str(REMOTE_BACKTEST_TARGET["jobs_root"]),
+            "source_root": None,
+            "free_bytes": int(existing["free_bytes"]),
+            "reused_existing_runner": True,
+        }
+
     terminal = _target_terminal()
     bridge = SSHBridge(terminal)
     data_dir = str(terminal["remote_data_dir"])
@@ -387,25 +401,28 @@ $runner={_ps_literal(runner)}
 $jobs={_ps_literal(jobs)}
 $drive=Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
 if([int64]$drive.FreeSpace -lt {minimum}){{throw 'Insufficient free disk space for isolated MT5 runner'}}
-if(-not (Test-Path -LiteralPath (Join-Path $runner 'terminal64.exe') -PathType Leaf)){{
+${{runnerCreated}}=-not (Test-Path -LiteralPath (Join-Path $runner 'terminal64.exe') -PathType Leaf)
+if($runnerCreated){{
   New-Item -ItemType Directory -Path $runner -Force | Out-Null
   Copy-Item -Path (Join-Path $source '*') -Destination $runner -Recurse -Force
 }}
-foreach($folder in @('bases','config','MQL5','profiles')){{
-  $src=Join-Path $data $folder;$dst=Join-Path $runner $folder
-  if(Test-Path -LiteralPath $src){{
-    New-Item -ItemType Directory -Path $dst -Force | Out-Null
-    $arguments=@($src,$dst,'/E','/R:1','/W:1','/NFL','/NDL','/NJH','/NJS','/NP','/XF','*.log')
-    if($folder -eq 'bases'){{$arguments += @('2025.hcc','2026.hcc')}}
-    & robocopy.exe @arguments | Out-Null
-    if($LASTEXITCODE -gt 7){{throw "Robocopy failed for $folder with code $LASTEXITCODE"}}
+if($runnerCreated){{
+  foreach($folder in @('bases','config','MQL5','profiles')){{
+    $src=Join-Path $data $folder;$dst=Join-Path $runner $folder
+    if(Test-Path -LiteralPath $src){{
+      New-Item -ItemType Directory -Path $dst -Force | Out-Null
+      $arguments=@($src,$dst,'/E','/R:1','/W:1','/NFL','/NDL','/NJH','/NJS','/NP','/XF','*.log')
+      if($folder -eq 'bases'){{$arguments += @('2025.hcc','2026.hcc')}}
+      & robocopy.exe @arguments | Out-Null
+      if($LASTEXITCODE -gt 7){{throw "Robocopy failed for $folder with code $LASTEXITCODE"}}
+    }}
   }}
-}}
-foreach($historyData in @({history_dirs})){{
-  $src=Join-Path $historyData 'bases';$dst=Join-Path $runner 'bases'
-  if(Test-Path -LiteralPath $src){{
-    & robocopy.exe $src $dst /E /R:1 /W:1 /NFL /NDL /NJH /NJS /NP /XF '*.log' '2025.hcc' '2026.hcc' | Out-Null
-    if($LASTEXITCODE -gt 7){{throw "History copy failed for $historyData with code $LASTEXITCODE"}}
+  foreach($historyData in @({history_dirs})){{
+    $src=Join-Path $historyData 'bases';$dst=Join-Path $runner 'bases'
+    if(Test-Path -LiteralPath $src){{
+      & robocopy.exe $src $dst /E /R:1 /W:1 /NFL /NDL /NJH /NJS /NP /XF '*.log' '2025.hcc' '2026.hcc' | Out-Null
+      if($LASTEXITCODE -gt 7){{throw "History copy failed for $historyData with code $LASTEXITCODE"}}
+    }}
   }}
 }}
 New-Item -ItemType Directory -Path $jobs -Force | Out-Null
@@ -853,10 +870,6 @@ def create_rerun_batch(
         raise ValueError("Explicit authorization for the isolated Darwinex-Demo runner is required")
     if not strategy_ids:
         raise ValueError("No strategy ids were provided for the re-run batch")
-    audit = _audit_candidates_uncached(strategy_ids=set(strategy_ids), include_completed=True)
-    eligible = [candidate for candidate in audit["candidates"] if candidate["state"] == "eligible"]
-    eligible_by_id = {int(c["id"]): c for c in eligible}
-
     now = utcnow()
     cache = BACKTEST_DIR / "remote-experts"
 
@@ -890,9 +903,26 @@ def create_rerun_batch(
             },
         }
 
+    # Prefer an immutable, already-validated runner configuration. Avoid a
+    # full VPS profile audit when it cannot improve an exact prior run.
     configs: dict[int, dict[str, Any]] = {}
     with session() as conn:
-        # 1) audit-eligible
+        for sid in strategy_ids:
+            prior = _prior_run_config(conn, sid)
+            if prior:
+                configs[sid] = prior
+
+    unresolved = set(strategy_ids) - set(configs)
+    audit = (
+        _audit_candidates_uncached(strategy_ids=unresolved, include_completed=True)
+        if unresolved
+        else {"candidates": []}
+    )
+    eligible = [candidate for candidate in audit["candidates"] if candidate["state"] == "eligible"]
+    eligible_by_id = {int(c["id"]): c for c in eligible}
+
+    with session() as conn:
+        # Resolve only strategies without a reusable validated runner run.
         for candidate in eligible:
             bridge = _bridge_for_terminal(int(candidate["source_terminal_id"]))
             expert_path = cache / candidate["expert_hash"][:12] / PureWindowsPath(candidate["remote_expert_path"]).name
@@ -920,14 +950,6 @@ def create_rerun_batch(
                     "rerun_from_date": from_date, "rerun_to_date": to_date,
                 },
             }
-        # 2) fall back to prior completed SSH runs for the rest
-        for sid in strategy_ids:
-            if sid in configs:
-                continue
-            prior = _prior_run_config(conn, sid)
-            if prior:
-                configs[sid] = prior
-
     if not configs:
         return {"created": False, "reason": "No target strategies could be resolved for a remote re-run", "audit": audit}
 

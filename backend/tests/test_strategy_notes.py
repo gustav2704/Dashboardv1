@@ -82,6 +82,15 @@ def test_strategy_note_round_trip_and_dashboard_persistence(tmp_path, monkeypatc
                VALUES(?,?,?,?)""",
             ("US100", "Persistent note", "200", db.utcnow()),
         ).lastrowid
+        terminal_id = conn.execute(
+            "INSERT INTO terminals(name,data_dir,account_login,status,created_at) VALUES(?,?,?,?,?)",
+            ("VPS", str(tmp_path / "vps"), "200", "connected", db.utcnow()),
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO mappings(strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,confirmed,created_at)
+               VALUES(?,?,?,?,?,?,1,?)""",
+            (strategy_id, terminal_id, "200", "US100", 1, "Persistent note", db.utcnow()),
+        )
 
     client = TestClient(main.app)
     response = client.put(
@@ -186,6 +195,45 @@ def test_custom_display_names_are_scoped_persisted_and_used_by_journal(tmp_path,
             (strategy_ids[0],),
         ).fetchone()
     assert tuple(saved) == ("Oro principal", "manual_user")
+
+
+def test_custom_display_name_invalidates_warm_dashboard_cache(tmp_path, monkeypatch):
+    """Saving a name must not let the dashboard reload overwrite it with stale data."""
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "display-name-cache.db")
+    monkeypatch.setattr(main, "suggestions", lambda: [])
+    db.init_db()
+    now = db.utcnow()
+    with db.session() as conn:
+        terminal_id = conn.execute(
+            """INSERT INTO terminals(name,data_dir,account_login,status,created_at)
+               VALUES(?,?,?,?,?)""",
+            ("Fixture", str(tmp_path / "terminal"), "200", "connected", now),
+        ).lastrowid
+        strategy_id = conn.execute(
+            """INSERT INTO strategies(symbol,sqx_name,mql5_name,account_login,created_at)
+               VALUES(?,?,?,?,?)""",
+            ("XAUUSD", "Original name", "Original name", "200", now),
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO mappings(
+                 strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,role,confirmed,created_at
+               ) VALUES(?,?,?,?,?,?,?,?,?)""",
+            (strategy_id, terminal_id, "200", "XAUUSD", 101, "Original name", "live", 1, now),
+        )
+
+    client = TestClient(main.app)
+    initial = next(item for item in client.get("/api/dashboard").json()["strategies"] if item["id"] == strategy_id)
+    assert initial["display_name"] == "Original name"
+
+    response = client.put(
+        f"/api/strategies/{strategy_id}/display-name",
+        json={"display_name": "Nombre inmediato"},
+    )
+    assert response.status_code == 200
+
+    reloaded = next(item for item in client.get("/api/dashboard").json()["strategies"] if item["id"] == strategy_id)
+    assert reloaded["display_name"] == "Nombre inmediato"
+    assert reloaded["display_name_source"] == "manual_user"
 
 
 def test_custom_display_name_validation_and_registry_protection(tmp_path, monkeypatch):

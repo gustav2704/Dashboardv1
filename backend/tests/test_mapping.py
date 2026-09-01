@@ -1,6 +1,6 @@
 import json
 
-from app import db
+from app import db, main
 from app.mapping import (
     _candidate,
     _is_deterministic_suggestion,
@@ -29,6 +29,92 @@ def test_name_normalization_handles_sqx_punctuation():
     assert normalize("WF Matrix - NAQStrategy") == "wfmatrixnaqstrategy"
 
 
+def test_confirm_mapping_on_archived_terminal_is_historical(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "archived-mapping.db")
+    db.init_db()
+    now = db.utcnow()
+    with db.session() as conn:
+        terminal_id = conn.execute(
+            """INSERT INTO terminals(name,data_dir,account_login,status,created_at)
+               VALUES(?,?,?,?,?)""",
+            ("Archive", "archive://terminal/1/Broker/old", "old", "disconnected", now),
+        ).lastrowid
+        strategy_id = conn.execute(
+            """INSERT INTO strategies(symbol,sqx_name,mql5_name,origin,created_at)
+               VALUES(?,?,?,?,?)""",
+            ("XAUUSD", "Old bot", "Old bot", "sqx", now),
+        ).lastrowid
+
+    mapping = confirm_mapping({
+        "strategy_id": strategy_id, "terminal_id": terminal_id, "account_login": "old",
+        "symbol": "XAUUSD", "magic": 7, "comment_pattern": "Old bot",
+    })
+    assert mapping["role"] == "historical"
+
+
+def test_confirm_mapping_on_disconnected_current_terminal_stays_live(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "offline-current-mapping.db")
+    db.init_db()
+    now = db.utcnow()
+    with db.session() as conn:
+        terminal_id = conn.execute(
+            """INSERT INTO terminals(name,data_dir,account_login,status,created_at)
+               VALUES(?,?,?,?,?)""",
+            ("Current but offline", str(tmp_path / "terminal"), "7396577", "disconnected", now),
+        ).lastrowid
+        strategy_id = conn.execute(
+            """INSERT INTO strategies(symbol,sqx_name,mql5_name,origin,created_at)
+               VALUES(?,?,?,?,?)""",
+            ("XAUUSD", "Current bot", "Current bot", "mt5", now),
+        ).lastrowid
+
+    mapping = confirm_mapping({
+        "strategy_id": strategy_id, "terminal_id": terminal_id, "account_login": "7396577",
+        "symbol": "XAUUSD", "magic": 8, "comment_pattern": "Current bot",
+    })
+    assert mapping["role"] == "live"
+
+
+def test_confirm_mapping_reuses_same_magic_and_comment_when_broker_server_alias_changes(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "server-alias.db")
+    db.init_db()
+    now = db.utcnow()
+    with db.session() as conn:
+        archived_terminal = conn.execute(
+            """INSERT INTO terminals(name,data_dir,account_login,server,status,created_at)
+               VALUES(?,?,?,?,?,?)""",
+            ("Old FP", "archive://terminal/9/FirstPrudentialMarkets-Demo/7396577", "7396577",
+             "FirstPrudentialMarkets-Demo", "disconnected", now),
+        ).lastrowid
+        current_terminal = conn.execute(
+            """INSERT INTO terminals(name,data_dir,account_login,server,status,created_at)
+               VALUES(?,?,?,?,?,?)""",
+            ("FP alias", "ssh://fpmarkets/terminal", "7396577", "FPMarkets-Demo", "connected", now),
+        ).lastrowid
+        strategy_id = conn.execute(
+            """INSERT INTO strategies(symbol,sqx_name,mql5_name,account_login,origin,
+                                        identity_strategy_id,operational_server,operational_asset_key,
+                                        operational_expert_key,created_at)
+               VALUES(?,?,?,?,?,NULL,?,?,?,?)""",
+            ("XAUUSD", "XAU bot", "XAU bot", "7396577", "mt5",
+             "FirstPrudentialMarkets-Demo", "xauusd", "xaubot", now),
+        ).lastrowid
+        conn.execute("UPDATE strategies SET identity_strategy_id=id WHERE id=?", (strategy_id,))
+        conn.execute(
+            """INSERT INTO mappings(strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,role,confirmed,created_at)
+               VALUES(?,?,?,?,?,?, 'live',1,?)""",
+            (strategy_id, archived_terminal, "7396577", "XAUUSD", 3966, "XAU_Bot", now),
+        )
+
+    mapping = confirm_mapping({
+        "strategy_id": strategy_id, "terminal_id": current_terminal, "account_login": "7396577",
+        "symbol": "XAUUSD", "magic": 3966, "comment_pattern": "XAU_Bot",
+    })
+    assert mapping["strategy_id"] == strategy_id
+    with db.session() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM strategies").fetchone()[0] == 1
+
+
 def test_symbol_family_maps_broker_symbols_to_catalog_symbols():
     assert symbol_family("GER40") == "dax"
     assert symbol_family("DEUIDXEUR_clonedwnx") == "dax"
@@ -36,6 +122,33 @@ def test_symbol_family_maps_broker_symbols_to_catalog_symbols():
     assert symbol_family("USA30IDXUSD_clonedwnx") == "us30"
     assert symbol_family("WS30") == "us30"
     assert symbol_family("XAUUSD.cyr") == "xau"
+    assert symbol_family("CADJPY") == symbol_family("CADJPY_M1_DK_utc2") == "cadjpy"
+
+
+def test_sqx_analytics_are_available_to_an_identity_linked_deployment(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "identity-analytics.db")
+    db.init_db()
+    now = db.utcnow()
+    analytics = {"egt": {"available": True, "total": 2.71}}
+    with db.session() as conn:
+        deployment_id = conn.execute(
+            "INSERT INTO strategies(symbol,sqx_name,origin,created_at) VALUES(?,?,?,?)",
+            ("CADJPY", "WF_Matrix_Strategy_2_14_57", "mt5", now),
+        ).lastrowid
+        conn.execute("UPDATE strategies SET identity_strategy_id=id WHERE id=?", (deployment_id,))
+        source_id = conn.execute(
+            """INSERT INTO strategies(symbol,sqx_name,origin,identity_strategy_id,created_at)
+               VALUES(?,?,?,?,?)""",
+            ("CADJPY_M1_DK_utc2", "CADJPY_M30_short_Strategy 2.14.57", "sqx", deployment_id, now),
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO sqx_analytics_snapshots(
+                 strategy_id,project,databank,analytics_json,synced_at
+               ) VALUES(?,?,?,?,?)""",
+            (source_id, "Retester", "Results", json.dumps(analytics), now),
+        )
+
+        assert main._preload_sqx_analytics(conn)[deployment_id]["egt"] == analytics["egt"]
 
 
 def test_asset_key_normalizes_broker_aliases_suffixes_and_prefixes():
@@ -226,7 +339,7 @@ def _observed_pending_order(conn, terminal_id, comment, *, symbol="GER40", magic
     )
 
 
-def test_unique_magic_creates_operational_identity(
+def test_unique_magic_without_ex5_evidence_stays_unassigned(
     tmp_path, monkeypatch
 ):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "operational-identity.db")
@@ -242,15 +355,11 @@ def test_unique_magic_creates_operational_identity(
 
     result = ensure_mt5_strategies()
 
-    assert result["created"] == 1
+    assert result["created"] == 0
     assert ensure_mt5_strategies()["created"] == 0
     with db.session() as conn:
-        strategy = conn.execute("SELECT sqx_name,mql5_name FROM strategies").fetchone()
-        assert tuple(strategy) == ("US30v4 BUY", "US30v4 BUY")
-        mapped = conn.execute(
-            "SELECT strategy_id FROM mappings WHERE account_login='100121894' AND magic=857"
-        ).fetchone()
-        assert mapped is not None
+        assert conn.execute("SELECT COUNT(*) FROM strategies").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM mappings").fetchone()[0] == 0
 
 
 def test_exact_alias_links_observed_mt5_identity_without_creating_duplicate(
@@ -434,7 +543,7 @@ def test_archived_mapping_is_reused_when_the_active_terminal_observes_same_bot(t
         }
 
 
-def test_closed_deal_with_unique_magic_creates_identity(tmp_path, monkeypatch):
+def test_closed_deal_without_ex5_evidence_stays_unassigned(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "closed-unassigned.db")
     db.init_db()
     now = db.utcnow()
@@ -455,10 +564,10 @@ def test_closed_deal_with_unique_magic_creates_identity(tmp_path, monkeypatch):
 
     result = ensure_mt5_strategies()
 
-    assert result["created"] == 1
+    assert result["created"] == 0
     with db.session() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM strategies").fetchone()[0] == 1
-        assert conn.execute("SELECT COUNT(*) FROM mappings").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM strategies").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM mappings").fetchone()[0] == 0
 
 
 def test_shared_magic_requires_an_unambiguous_comment():

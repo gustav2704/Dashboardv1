@@ -1,10 +1,92 @@
 import json
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 from app import db
 from app import main
+from app.historical_account_repair import archive_archived_terminal_strategies
 from app.display_names import seed_manual_display_names
 from app.main import _overview_months, _latest_baselines, _monthly_net_profit, dashboard_data, get_strategy
+
+
+def test_archived_live_mapping_does_not_publish_a_broker_account_but_keeps_identity(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "archived-account.db")
+    monkeypatch.setattr(main, "suggestions", lambda: [])
+    db.init_db()
+    now = db.utcnow()
+    with db.session() as conn:
+        archived_terminal = conn.execute(
+            """INSERT INTO terminals(name,data_dir,account_login,status,created_at)
+               VALUES(?,?,?,?,?)""",
+            ("Archived", "archive://terminal/1/Broker/100121894", "100121894", "disconnected", now),
+        ).lastrowid
+        live_terminal = conn.execute(
+            """INSERT INTO terminals(name,data_dir,account_login,status,created_at)
+               VALUES(?,?,?,?,?)""",
+            ("Live", str(tmp_path / "live"), "3000097316", "connected", now),
+        ).lastrowid
+        archived_strategy = conn.execute(
+            """INSERT INTO strategies(symbol,sqx_name,mql5_name,account_login,origin,created_at)
+               VALUES(?,?,?,?,?,?)""",
+            ("NAS100", "Archived bot", "Archived bot", "100121894", "mt5", now),
+        ).lastrowid
+        live_strategy = conn.execute(
+            """INSERT INTO strategies(symbol,sqx_name,mql5_name,account_login,origin,created_at)
+               VALUES(?,?,?,?,?,?)""",
+            ("XAUUSD", "Live bot", "Live bot", "3000097316", "mt5", now),
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO mappings(strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,role,confirmed,created_at)
+               VALUES(?,?,?,?,?,?, 'live',1,?)""",
+            (archived_strategy, archived_terminal, "100121894", "NAS100", 1, "Archived bot", now),
+        )
+        conn.execute(
+            """INSERT INTO mappings(strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,role,confirmed,created_at)
+               VALUES(?,?,?,?,?,?, 'live',1,?)""",
+            (live_strategy, live_terminal, "3000097316", "XAUUSD", 2, "Live bot", now),
+        )
+
+    dashboard = dashboard_data()
+    assert dashboard["broker_accounts"] == ["3000097316"]
+    # An archive must not create an active-account picker option, but its
+    # verified Magic remains usable for historical terminal metrics.
+    assert next(item for item in dashboard["strategies"] if item["id"] == archived_strategy)["magic_numbers"] == [1]
+
+
+def test_repair_demotes_archived_terminal_mapping_without_hiding_strategy(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "repair.db")
+    db.init_db()
+    now = db.utcnow()
+    with db.session() as conn:
+        terminal_id = conn.execute(
+            """INSERT INTO terminals(name,data_dir,account_login,status,created_at)
+               VALUES(?,?,?,?,?)""",
+            ("Archived", "archive://terminal/7/Broker/old", "old", "disconnected", now),
+        ).lastrowid
+        strategy_id = conn.execute(
+            """INSERT INTO strategies(symbol,sqx_name,mql5_name,account_login,origin,created_at)
+               VALUES(?,?,?,?,?,?)""",
+            ("XAUUSD", "Old bot", "Old bot", "old", "mt5", now),
+        ).lastrowid
+        mapping_id = conn.execute(
+            """INSERT INTO mappings(strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,role,confirmed,created_at)
+               VALUES(?,?,?,?,?,?, 'live',1,?)""",
+            (strategy_id, terminal_id, "old", "XAUUSD", 9, "Old bot", now),
+        ).lastrowid
+
+    result = archive_archived_terminal_strategies([strategy_id])
+    assert result["repaired"] == [{"strategy_id": strategy_id, "mapping_ids": [mapping_id]}]
+    with db.session() as conn:
+        assert conn.execute("SELECT role FROM mappings WHERE id=?", (mapping_id,)).fetchone()[0] == "historical"
+        strategy = conn.execute("SELECT archived_at,archive_reason FROM strategies WHERE id=?", (strategy_id,)).fetchone()
+        assert strategy[0] is None
+        assert strategy[1] is None
+        assert conn.execute(
+            "SELECT COUNT(*) FROM identity_repair_audits WHERE mapping_id=? AND action='demoted_archived_terminal_mapping'",
+            (mapping_id,),
+        ).fetchone()[0] == 1
 
 
 def test_canonical_terminal_rows_prefers_ssh_for_the_same_broker_account() -> None:
@@ -17,6 +99,72 @@ def test_canonical_terminal_rows_prefers_ssh_for_the_same_broker_account() -> No
     result = main._canonical_terminal_rows(terminals)
 
     assert [terminal["id"] for terminal in result] == [210, 208]
+
+
+def test_dashboard_terminal_strip_excludes_guardian_sources(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "guardian-strip.db")
+    monkeypatch.setattr(main, "suggestions", lambda: [])
+    db.init_db()
+    now = db.utcnow()
+    with db.session() as conn:
+        broker_id = conn.execute(
+            """INSERT INTO terminals(name,data_dir,account_login,server,status,transport,created_at)
+               VALUES(?,?,?,?,?,?,?)""",
+            ("Broker VPS", "ssh://broker", "123", "Broker-Demo", "disconnected", "ssh", now),
+        ).lastrowid
+        guardian_id = conn.execute(
+            """INSERT INTO terminals(name,data_dir,account_login,status,transport,created_at)
+               VALUES(?,?,?,?,?,?)""",
+            ("Guardian VPS", "ssh://guardian", "123", "connected", "ssh", now),
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO guardian_sources(terminal_id,directory,account_login,created_at,updated_at)
+               VALUES(?,?,?,?,?)""",
+            (guardian_id, "MQL5\\Files\\GuardianCuenta", "123", now, now),
+        )
+
+    assert [terminal["id"] for terminal in dashboard_data()["terminals"]] == [broker_id]
+
+
+def test_archived_vps_inventory_remains_verified_terminal_evidence(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "archived-inventory-account.db")
+    monkeypatch.setattr(main, "suggestions", lambda: [])
+    db.init_db()
+    now = db.utcnow()
+    with db.session() as conn:
+        terminal_id = conn.execute(
+            """INSERT INTO terminals(name,data_dir,account_login,server,status,created_at)
+               VALUES(?,?,?,?,?,?)""",
+            ("Archived Infinox", "archive://terminal/59/Infinox/100121894", "100121894", "Infinox-Demo", "disconnected", now),
+        ).lastrowid
+        strategy_id = conn.execute(
+            """INSERT INTO strategies(symbol,sqx_name,account_login,origin,created_at)
+               VALUES(?,?,?,?,?)""",
+            ("GER40", "Old DAX", "100121894", "excel", now),
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO mappings(strategy_id,terminal_id,account_login,symbol,magic,role,confirmed,created_at)
+               VALUES(?,?,?,?,?,'historical',1,?)""",
+            (strategy_id, terminal_id, "100121894", "GER40", 1, now),
+        )
+        import_id = conn.execute(
+            """INSERT INTO bot_inventory_imports(source_path,source_hash,account_login,server,status,imported_at)
+               VALUES(?,?,?,?,?,?)""",
+            ("old.csv", "archived-infinox", "100121894", "Infinox-Demo", "imported", now),
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO bot_deployments(
+                 account_login,server,chart_id,symbol,ex5_name,normalized_ex5,strategy_id,confirmed,
+                 observed_at,source_import_id,created_at,updated_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            ("100121894", "Infinox-Demo", "1", "GER40", "Old DAX.ex5", "olddax", strategy_id, 1,
+             now, import_id, now, now),
+        )
+
+    dashboard = dashboard_data()
+
+    assert dashboard["broker_accounts"] == ["100121894"]
+    assert [item["id"] for item in dashboard["strategies"]] == [strategy_id]
 
 
 def test_unique_confirmed_magic_matches_a_trade_without_comment() -> None:
@@ -53,6 +201,38 @@ def test_shared_magic_without_a_stable_comment_stays_unassigned() -> None:
     assert main._matches(mapping, {"terminal_id": 113, "symbol": "WS30", "magic": 857, "comment": "[sl 54000]"}) is False
 
 
+def test_archived_strategy_mapping_does_not_make_visible_magic_ambiguous(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "archived-owner.db")
+    db.init_db()
+    now = db.utcnow()
+    with db.session() as conn:
+        terminal_id = conn.execute(
+            "INSERT INTO terminals(name,data_dir,account_login,status,created_at) VALUES(?,?,?,?,?)",
+            ("Terminal", str(tmp_path / "terminal"), "A1", "connected", now),
+        ).lastrowid
+        visible_id = conn.execute(
+            "INSERT INTO strategies(symbol,sqx_name,account_login,created_at) VALUES(?,?,?,?)",
+            ("XAUUSD", "Visible", "A1", now),
+        ).lastrowid
+        archived_id = conn.execute(
+            """INSERT INTO strategies(symbol,sqx_name,account_login,archived_at,created_at)
+               VALUES(?,?,?,?,?)""",
+            ("XAUUSD", "Archived duplicate", "A1", now, now),
+        ).lastrowid
+        conn.executemany(
+            """INSERT INTO mappings(strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,role,confirmed,created_at)
+               VALUES(?,?,?,?,?,?, 'live',1,?)""",
+            [
+                (visible_id, terminal_id, "A1", "XAUUSD", 10, "Visible", now),
+                (archived_id, terminal_id, "A1", "XAUUSD", 10, "Archived duplicate", now),
+            ],
+        )
+        mappings = main._dashboard_confirmed_mappings(conn)
+
+    assert archived_id not in mappings
+    assert mappings[visible_id][0]["magic_scope_strategy_count"] == 1
+
+
 def test_candidate_trades_use_mapping_identity_without_losing_fallback_mappings() -> None:
     trades = [
         {"terminal_id": 1, "magic": 10, "symbol": "XAUUSD", "deal_ticket": 1, "close_time_msc": 1},
@@ -82,14 +262,197 @@ def test_candidate_trades_use_mapping_identity_without_losing_fallback_mappings(
 
 def test_worker_cycle_runs_each_phase_and_releases_its_lock(monkeypatch) -> None:
     calls: list[str] = []
-    monkeypatch.setattr(main, "sync_all", lambda: calls.append("sync"))
-    monkeypatch.setattr(main.bot_inventory, "scan", lambda: calls.append("inventory"))
-    monkeypatch.setattr(main, "dashboard_data", lambda window: calls.append(window) or {"strategies": []})
+    monkeypatch.setattr(main.terminal_events, "sync_terminal_events", lambda: calls.append("terminal_events"))
+    monkeypatch.setattr(main.guardian_monitor, "sync_guardian_sources", lambda: calls.append("guardian"))
+    monkeypatch.setattr(main.bot_inventory, "scan", lambda: calls.append("inventory") or {"imported": 0})
+    monkeypatch.setattr(main, "ensure_mt5_strategies", lambda: calls.append("mapping"))
 
     assert main._run_worker_cycle() is True
-    assert calls == ["sync", "inventory", "all"]
+    assert calls == ["terminal_events", "guardian", "inventory", "mapping"]
     # A completed cycle must not prevent the next scheduled refresh.
     assert main._run_worker_cycle() is True
+
+
+def test_snapshot_cache_coalesces_identical_cold_requests(monkeypatch) -> None:
+    monkeypatch.setattr(main, "_api_snapshot_revision", 41)
+    monkeypatch.setattr(main, "_api_snapshot_generated_at", "2026-08-24T12:00:00+00:00")
+    monkeypatch.setattr(main, "_api_snapshot_generated_mono", time.monotonic())
+    main._api_response_cache.clear()
+    main._api_response_inflight.clear()
+    calls = 0
+    calls_lock = threading.Lock()
+
+    def build():
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+        time.sleep(0.05)
+        return {"strategies": [{"id": 1}]}
+
+    key = ("dashboard", "coalesced")
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        results = list(pool.map(lambda _: main._cached_api_payload(key, build), range(6)))
+
+    assert calls == 1
+    assert all(result["strategies"] == [{"id": 1}] for result in results)
+    assert all(result["snapshot"]["revision"] == "41" for result in results)
+    main._api_response_cache.clear()
+    main._api_response_inflight.clear()
+
+
+def test_snapshot_cache_is_bounded_and_publishes_atomically(monkeypatch) -> None:
+    monkeypatch.setattr(main, "_api_snapshot_revision", 0)
+    monkeypatch.setattr(main, "_api_snapshot_generated_at", "")
+    monkeypatch.setattr(main, "_api_snapshot_generated_mono", 0.0)
+    main._api_response_cache.clear()
+    main._api_response_inflight.clear()
+
+    meta = main._publish_api_snapshot(
+        {"generated_at": "dashboard", "strategies": []},
+        {"generated_at": "journal", "trades": []},
+    )
+    assert meta["revision"] == "1"
+    assert len(main._api_response_cache) == 3
+
+    now = time.monotonic()
+    with main._api_snapshot_lock:
+        for index in range(40):
+            main._store_api_cache_entry(
+                ("scope", index), {"value": index}, 1,
+                "2026-08-24T12:00:00+00:00", now,
+            )
+    assert len(main._api_response_cache) == main._API_RESPONSE_CACHE_MAX_ENTRIES
+    assert ("scope", 39) in main._api_response_cache
+    assert ("scope", 0) not in main._api_response_cache
+    main._api_response_cache.clear()
+
+
+def test_compact_dashboard_keeps_table_fields_and_drops_panel_collections() -> None:
+    payload = {
+        "generated_at": "now",
+        "strategies": [{
+            "id": 7,
+            "metrics": {"trades": 4},
+            "backtest": {"state": "validated"},
+            "deployments": [{"id": 1}],
+            "baselines": [{"source": "sqx"}],
+            "risk_guard": {"status": "green"},
+            "active_alerts": [{"id": 2}],
+        }],
+    }
+
+    compact = main._compact_dashboard_payload(payload)
+
+    assert compact["strategies"] == [{
+        "id": 7,
+        "metrics": {"trades": 4},
+        "backtest": {"state": "validated"},
+    }]
+    assert payload["strategies"][0]["deployments"] == [{"id": 1}]
+
+
+def test_snapshot_refresh_prewarms_each_broker_account(monkeypatch) -> None:
+    journal_scopes = []
+    dashboard_scopes = []
+    published = []
+
+    def journal(*_args, selected_accounts=None, **_kwargs):
+        journal_scopes.append(selected_accounts)
+        return {"generated_at": "journal", "trades": []}
+
+    def dashboard(*_args, selected_accounts=None, **_kwargs):
+        dashboard_scopes.append(selected_accounts)
+        return {
+            "generated_at": "dashboard",
+            "broker_accounts": ["A", "B"],
+            "strategies": [],
+        }
+
+    monkeypatch.setattr(main, "journal_analysis_data", journal)
+    monkeypatch.setattr(main, "dashboard_data", dashboard)
+    monkeypatch.setattr(
+        main,
+        "_publish_api_snapshot",
+        lambda dashboard, journal, scopes: published.append(scopes) or {"revision": "1"},
+    )
+
+    assert main._refresh_dashboard_snapshot(sync_alerts=False) == {"revision": "1"}
+    assert journal_scopes == [None, {"A"}, {"B"}]
+    assert dashboard_scopes == [None, {"A"}, {"B"}]
+    assert len(published[0]) == 6
+
+
+def test_sync_cycle_is_independent_and_releases_its_lock(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(main, "sync_all", lambda: calls.append("sync"))
+
+    assert main._run_sync_cycle() is True
+    assert main._run_sync_cycle() is True
+    assert calls == ["sync", "sync"]
+
+
+def test_sync_cycle_skips_when_previous_poll_is_running() -> None:
+    assert main._SYNC_CYCLE_LOCK.acquire(blocking=False)
+    try:
+        assert main._run_sync_cycle() is False
+    finally:
+        main._SYNC_CYCLE_LOCK.release()
+
+
+def test_user_dashboard_refresh_waits_for_mt5_before_publishing(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        main, "sync_all",
+        lambda **kwargs: calls.append(("sync", kwargs)) or {"requested": 5, "follow_up": {"sync": 5}},
+    )
+    monkeypatch.setattr(
+        main, "_refresh_dashboard_snapshot",
+        lambda **kwargs: calls.append(("snapshot", kwargs)) or {"revision": "new"},
+    )
+
+    result = main.refresh_dashboard_snapshot()
+
+    assert calls == [
+        ("sync", {"response_wait_seconds": main.SYNC_RESPONSE_WAIT_SECONDS}),
+        ("snapshot", {"sync_alerts": False}),
+    ]
+    assert result["snapshot"] == {"revision": "new"}
+    assert result["sync"] == {"requested": 5, "follow_up": {"sync": 5}}
+
+
+def test_terminal_list_is_read_only_and_does_not_repeat_ingestion(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "terminal-list.db")
+    monkeypatch.setattr(
+        main, "ingest_responses",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected ingestion")),
+    )
+    db.init_db()
+
+    assert main.get_terminals() == []
+
+
+def test_unchanged_inventory_keeps_candidate_scoring_cache_warm(monkeypatch) -> None:
+    invalidations = []
+    monkeypatch.setattr(main, "_invalidate_pending_candidate_cache", lambda: invalidations.append(True))
+    monkeypatch.setattr(main.bot_inventory, "scan", lambda: {"imported": 0, "skipped": 12, "failed": 0})
+
+    assert main._scan_inventory_and_invalidate_candidates()["skipped"] == 12
+    assert invalidations == []
+
+    monkeypatch.setattr(main.bot_inventory, "scan", lambda: {"imported": 1, "skipped": 12, "failed": 0})
+    assert main._scan_inventory_and_invalidate_candidates()["imported"] == 1
+    assert invalidations == [True]
+
+
+def test_interactive_dashboard_never_rebuilds_candidate_scoring(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(main, "_pending_candidate_cache", None)
+    monkeypatch.setattr(main, "suggestions", lambda: calls.append(True) or [])
+
+    assert main._pending_candidate_strategy_ids(refresh_if_stale=False) == set()
+    assert calls == []
+    assert main._pending_candidate_strategy_ids(refresh_if_stale=True) == set()
+    assert calls == [True]
 
 
 def test_worker_cycle_skips_when_another_cycle_owns_the_lock() -> None:
@@ -170,6 +533,7 @@ def test_dashboard_returns_sorted_unique_magic_numbers(tmp_path, monkeypatch):
             ).lastrowid)
 
         mappings = (
+            (strategy_ids[0], terminal_id, "XAUUSD", None, "no-magic"),
             (strategy_ids[1], terminal_id, "XAUUSD", 77, "single"),
             (strategy_ids[2], terminal_id, "XAUUSD", 900, "first"),
             (strategy_ids[2], terminal_id, "XAUUSD", 100, "second"),
@@ -188,7 +552,7 @@ def test_dashboard_returns_sorted_unique_magic_numbers(tmp_path, monkeypatch):
     assert strategies["One magic"]["magic_numbers"] == [77]
     assert strategies["One magic"]["primary_magic_number"] == 77
     assert strategies["Many magics"]["magic_numbers"] == [100, 900]
-    assert strategies["Many magics"]["primary_magic_number"] == 100
+    assert strategies["Many magics"]["primary_magic_number"] == 900
     assert [item["magic"] for item in strategies["Many magics"]["magic_number_details"]] == [100, 900]
 
 
@@ -290,10 +654,10 @@ def test_dashboard_uses_historical_magic_as_primary_when_no_live_mapping_exists(
 
     assert strategy["magic_numbers"] == []
     assert strategy["historical_magic_numbers"] == [71, 72]
-    assert strategy["primary_magic_number"] == 71
+    assert strategy["primary_magic_number"] == 72
 
 
-def test_dashboard_terminal_strip_shows_only_connected_non_imported_accounts(tmp_path, monkeypatch):
+def test_dashboard_terminal_strip_shows_current_connected_and_disconnected_accounts(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "terminals.db")
     monkeypatch.setattr(main, "suggestions", lambda: [])
     db.init_db()
@@ -301,18 +665,18 @@ def test_dashboard_terminal_strip_shows_only_connected_non_imported_accounts(tmp
 
     with db.session() as conn:
         conn.executemany(
-            """INSERT INTO terminals(name,data_dir,account_login,status,created_at)
-               VALUES(?,?,?,?,?)""",
+            """INSERT INTO terminals(name,data_dir,account_login,server,status,created_at)
+               VALUES(?,?,?,?,?,?)""",
             [
-                ("Active", str(tmp_path / "active"), "100121894", "connected", now),
-                ("Offline current", str(tmp_path / "offline"), "4000094894", "disconnected", now),
-                ("Imported history", "import://tradebuddy/FPM/7396582", "7396582", "disconnected", now),
+                ("Active", str(tmp_path / "active"), "100121894", "Broker", "connected", now),
+                ("Offline current", str(tmp_path / "offline"), "4000094894", "Broker", "disconnected", now),
+                ("Imported history", "import://tradebuddy/FPM/7396582", "7396582", "Broker", "disconnected", now),
             ],
         )
 
     terminals = dashboard_data()["terminals"]
 
-    assert [terminal["account_login"] for terminal in terminals] == ["100121894"]
+    assert [terminal["account_login"] for terminal in terminals] == ["100121894", "4000094894"]
 
 
 def test_dashboard_exposes_active_account_balance_and_bot_pl_percentage(tmp_path, monkeypatch):
@@ -355,15 +719,13 @@ def test_dashboard_exposes_active_account_balance_and_bot_pl_percentage(tmp_path
     strategies = {item["id"]: item for item in dashboard_data()["strategies"]}
 
     assert strategies[strategy_id]["account_balance"] == 1000
-    # A position without a confirmed comment/EX5 alias remains raw and does
-    # not contribute to bot-level account P/L.
-    assert strategies[strategy_id]["account_pl_percent"] == 0
+    # A unique confirmed Magic owns the position even when MT5 leaves its
+    # comment empty, matching the closed-trade attribution rule.
+    assert strategies[strategy_id]["account_pl_percent"] == 5
     assert strategies[strategy_id]["account_initial_capital"] == 1000
-    assert strategies[strategy_id]["initial_capital_pl_percent"] == 0
-    assert strategies[no_balance_id]["account_balance"] is None
-    assert strategies[no_balance_id]["account_pl_percent"] is None
-    assert strategies[no_balance_id]["account_initial_capital"] is None
-    assert strategies[no_balance_id]["initial_capital_pl_percent"] is None
+    assert strategies[strategy_id]["initial_capital_pl_percent"] == 5
+    # A stored strategy row without VPS evidence is not a dashboard bot.
+    assert no_balance_id not in strategies
 
 
 def test_dashboard_initial_capital_pl_uses_oldest_snapshot_and_current_account_only(tmp_path, monkeypatch):
@@ -427,7 +789,7 @@ def test_dashboard_initial_capital_pl_uses_oldest_snapshot_and_current_account_o
     strategy = next(item for item in dashboard_data()["strategies"] if item["id"] == strategy_id)
 
     assert strategy["account_initial_capital"] == 1000
-    assert strategy["initial_capital_pl_percent"] == 0
+    assert strategy["initial_capital_pl_percent"] == 5
 
 
 def test_dashboard_initial_capital_pl_is_unavailable_for_zero_initial_balance(tmp_path, monkeypatch):
@@ -445,6 +807,11 @@ def test_dashboard_initial_capital_pl_is_unavailable_for_zero_initial_balance(tm
             "INSERT INTO strategies(symbol,sqx_name,account_login,created_at) VALUES(?,?,?,?)",
             ("XAUUSD", "Zero capital", "ZERO", now),
         ).lastrowid
+        conn.execute(
+            """INSERT INTO mappings(strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,confirmed,created_at)
+               VALUES(?,?,?,?,?,?,1,?)""",
+            (strategy_id, terminal_id, "ZERO", "XAUUSD", None, "Zero capital", now),
+        )
         conn.execute(
             """INSERT INTO account_snapshots(terminal_id,captured_at,balance,equity,margin,free_margin,raw_json)
                VALUES(?,?,?,?,?,?,?)""",
@@ -470,6 +837,22 @@ def test_dashboard_filters_multiple_accounts_and_unassigned_strategies(tmp_path,
                 ("XAU", "Account A", "A", now),
                 ("NAS", "Account B", "B", now),
                 ("GER", "Unassigned", "", now),
+            ],
+        )
+        strategy_ids = [row[0] for row in conn.execute("SELECT id FROM strategies ORDER BY id")]
+        terminal_ids = []
+        for account in ("A", "B", ""):
+            terminal_ids.append(conn.execute(
+                "INSERT INTO terminals(name,data_dir,account_login,status,created_at) VALUES(?,?,?,?,?)",
+                (f"VPS {account or 'unassigned'}", str(tmp_path / f"vps-{account or 'none'}"), account, "connected", now),
+            ).lastrowid)
+        conn.executemany(
+            """INSERT INTO mappings(strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,confirmed,created_at)
+               VALUES(?,?,?,?,?,?,1,?)""",
+            [
+                (strategy_ids[0], terminal_ids[0], "A", "XAU", 1, "Account A", now),
+                (strategy_ids[1], terminal_ids[1], "B", "NAS", 2, "Account B", now),
+                (strategy_ids[2], terminal_ids[2], "", "GER", 3, "Unassigned", now),
             ],
         )
 
@@ -541,8 +924,8 @@ def test_dashboard_account_filter_uses_the_displayed_account(tmp_path, monkeypat
             (strategy_id, terminal_id, "B", "XAUUSD", 101, "Displayed on A", "live", 1, now),
         )
 
-    assert [item["id"] for item in dashboard_data(selected_accounts={"A"}, include_unassigned=False)["strategies"]] == [strategy_id]
-    assert dashboard_data(selected_accounts={"B"}, include_unassigned=False)["strategies"] == []
+    assert dashboard_data(selected_accounts={"A"}, include_unassigned=False)["strategies"] == []
+    assert [item["id"] for item in dashboard_data(selected_accounts={"B"}, include_unassigned=False)["strategies"]] == [strategy_id]
 
 
 def test_dashboard_filters_assets_and_exposes_normalized_options(tmp_path, monkeypatch):
@@ -555,15 +938,45 @@ def test_dashboard_filters_assets_and_exposes_normalized_options(tmp_path, monke
             "INSERT INTO strategies(symbol,sqx_name,account_login,created_at) VALUES(?,?,?,?)",
             [("DAX", "Dax bot", "A", now), ("GER40", "Ger bot", "B", now), ("EURUSD.r", "FX bot", "A", now)],
         )
+        terminal_id = conn.execute(
+            "INSERT INTO terminals(name,data_dir,status,created_at) VALUES(?,?,?,?)",
+            ("VPS", str(tmp_path / "vps"), "connected", now),
+        ).lastrowid
+        strategy_rows = conn.execute("SELECT id,symbol,sqx_name FROM strategies ORDER BY id").fetchall()
+        conn.executemany(
+            """INSERT INTO mappings(strategy_id,terminal_id,symbol,magic,comment_pattern,confirmed,created_at)
+               VALUES(?,?,?,?,?,1,?)""",
+            [(row["id"], terminal_id, row["symbol"], index, row["sqx_name"], now)
+             for index, row in enumerate(strategy_rows, start=1)],
+        )
 
     all_assets = main.dashboard_data()
     options = {item["key"]: item for item in all_assets["asset_options"]}
     assert options["dax"]["symbols"] == ["DAX", "GER40"]
     assert options["eurusd"]["label"] == "EURUSD"
 
+    candidate_symbols = []
+    original_candidates = main._candidate_trades_for_mappings
+    original_lineage = main._lineage_accounts
+    journal_strategy_ids = []
+
+    def tracked_candidates(mappings, *args):
+        candidate_symbols.extend(str(mapping["symbol"]) for mapping in mappings)
+        return original_candidates(mappings, *args)
+
+    def tracked_lineage(conn, strategy_id):
+        journal_strategy_ids.append(strategy_id)
+        return original_lineage(conn, strategy_id)
+
+    monkeypatch.setattr(main, "_candidate_trades_for_mappings", tracked_candidates)
+    monkeypatch.setattr(main, "_lineage_accounts", tracked_lineage)
     dax_only = main.dashboard_data(selected_assets={"dax"})
     assert {item["sqx_name"] for item in dax_only["strategies"]} == {"Dax bot", "Ger bot"}
     assert dax_only["totals"]["strategies"] == 2
+    assert "EURUSD.r" not in candidate_symbols
+    fx_strategy_id = next(int(row["id"]) for row in strategy_rows if row["symbol"] == "EURUSD.r")
+    assert fx_strategy_id not in journal_strategy_ids
+    assert {item["key"] for item in dax_only["asset_options"]} == {"dax", "eurusd"}
 
     no_assets = main.dashboard_data(selected_assets=set())
     assert no_assets["strategies"] == []
@@ -625,12 +1038,8 @@ def test_dashboard_derives_account_from_unique_confirmed_live_mapping(tmp_path, 
     assert strategies["Strategy 3.8.23(1)(1)"]["id"] == second_id
     assert strategies["Strategy 3.8.23(1)(1)"]["account_login"] == "7396577"
     assert strategies["Strategy 3.8.23(1)(1)"]["magic_numbers"] == [382311]
-    assert strategies["Canonical account"]["id"] == canonical_id
-    assert strategies["Canonical account"]["account_login"] == "100121894"
-    assert strategies["Ignored mappings"]["id"] == ignored_id
-    assert strategies["Ignored mappings"]["account_login"] == ""
-    assert strategies["Conflicting mappings"]["id"] == conflicting_id
-    assert strategies["Conflicting mappings"]["account_login"] == ""
+    # Mappings whose persisted account disagrees with the terminal are not VPS evidence.
+    assert set(strategies) == {"Strategy 3.8.23(1)", "Strategy 3.8.23(1)(1)"}
 
 
 def test_dashboard_keeps_historical_mapping_out_of_current_magic_and_metrics(tmp_path, monkeypatch):
@@ -938,24 +1347,57 @@ def test_dashboard_reports_sqx_mt5_integration_states(tmp_path, monkeypatch):
     result = dashboard_data()
     states = {item["sqx_name"]: item["link_state"] for item in result["strategies"]}
 
-    assert states == {
-        "Linked": "linked",
-        "Candidate": "candidate",
-        "Strategy 5.14.40": "sqx_catalog",
-        "SQX + Catalog data": "sqx_catalog",
-        "SQX + Catalog origin": "sqx_catalog",
-        "SQX only": "sqx_only",
-        "MT5 only": "mt5_only",
-        "Catalog only": "catalog_only",
-    }
+    # Only strategies backed by a confirmed terminal mapping are published.
+    assert states == {"Linked": "linked", "MT5 only": "mt5_only"}
     assert result["integration"] == {
         "linked": 1,
-        "candidate": 1,
-        "sqx_catalog": 3,
-        "sqx_only": 1,
+        "candidate": 0,
+        "sqx_catalog": 0,
+        "sqx_only": 0,
         "mt5_only": 1,
-        "catalog_only": 1,
+        "catalog_only": 0,
     }
+
+
+def test_excel_catalog_cannot_publish_a_bot_or_supply_its_health_baseline(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "excel-is-not-operational.db")
+    monkeypatch.setattr(main, "suggestions", lambda: [])
+    db.init_db()
+    now = db.utcnow()
+    with db.session() as conn:
+        terminal_id = conn.execute(
+            "INSERT INTO terminals(name,data_dir,status,created_at) VALUES(?,?,?,?)",
+            ("VPS", str(tmp_path / "vps"), "connected", now),
+        ).lastrowid
+        observed_id = conn.execute(
+            """INSERT INTO strategies(symbol,sqx_name,mql5_name,origin,catalog_row,catalog_json,created_at)
+               VALUES(?,?,?,?,?,?,?)""",
+            ("XAU", "Observed", "Observed.ex5", "mt5+excel", 10, '{"SQN":99}', now),
+        ).lastrowid
+        catalog_only_id = conn.execute(
+            """INSERT INTO strategies(symbol,sqx_name,mql5_name,origin,catalog_row,catalog_json,created_at)
+               VALUES(?,?,?,?,?,?,?)""",
+            ("DAX", "Catalog only", "Catalog.ex5", "excel", 11, '{"SQN":99}', now),
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO mappings(strategy_id,terminal_id,symbol,magic,comment_pattern,confirmed,created_at)
+               VALUES(?,?,?,?,?,1,?)""",
+            (observed_id, terminal_id, "XAUUSD", 7, "Observed", now),
+        )
+        conn.execute(
+            """INSERT INTO baseline_snapshots(strategy_id,source,sample_type,metrics_json,synced_at)
+               VALUES(?, 'excel', 'oos', ?, ?)""",
+            (observed_id, '{"SQN":99,"ProfitFactor":99}', now),
+        )
+
+    result = dashboard_data()
+
+    assert [item["id"] for item in result["strategies"]] == [observed_id]
+    assert catalog_only_id not in {item["id"] for item in result["strategies"]}
+    assert result["strategies"][0]["baseline"] is None
+    assert result["strategies"][0]["baselines"] == []
+    assert "/api/catalog/import" not in {route.path for route in main.app.routes}
+    assert "/api/catalog/export" not in {route.path for route in main.app.routes}
 
 
 def test_dashboard_exposes_latest_sqx_analytics_summary(tmp_path, monkeypatch):
@@ -974,6 +1416,15 @@ def test_dashboard_exposes_latest_sqx_analytics_summary(tmp_path, monkeypatch):
             "INSERT INTO strategies(symbol,sqx_name,origin,created_at) VALUES('NAQ','Analytics','sqx',?)",
             (now,),
         ).lastrowid
+        terminal_id = conn.execute(
+            "INSERT INTO terminals(name,data_dir,status,created_at) VALUES(?,?,?,?)",
+            ("VPS", str(tmp_path / "vps"), "connected", now),
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO mappings(strategy_id,terminal_id,symbol,magic,comment_pattern,confirmed,created_at)
+               VALUES(?,?,?,?,?,1,?)""",
+            (strategy_id, terminal_id, "US100", 1, "Analytics", now),
+        )
         conn.execute(
             """INSERT INTO sqx_analytics_snapshots(
                  strategy_id,project,databank,analytics_json,synced_at
@@ -1007,6 +1458,16 @@ def test_dashboard_reports_aggregated_backtest_states(tmp_path, monkeypatch):
             ).lastrowid
             for name in ("No backtest", "Running", "Failed", "Validated", "Missing metrics")
         }
+        terminal_id = conn.execute(
+            "INSERT INTO terminals(name,data_dir,status,created_at) VALUES(?,?,?,?)",
+            ("VPS", str(tmp_path / "vps"), "connected", now),
+        ).lastrowid
+        conn.executemany(
+            """INSERT INTO mappings(strategy_id,terminal_id,symbol,magic,comment_pattern,confirmed,created_at)
+               VALUES(?,?,?,?,?,1,?)""",
+            [(strategy_id, terminal_id, "XAUUSD", index, name, now)
+             for index, (name, strategy_id) in enumerate(strategy_ids.items(), start=1)],
+        )
 
         def add_run(name, status, requested_at, finished_at=None):
             return conn.execute(
@@ -1107,6 +1568,10 @@ def test_dashboard_exposes_latest_completed_backtest_risk_audit(tmp_path, monkey
         "No audit data": None,
     }
     with db.session() as conn:
+        terminal_id = conn.execute(
+            "INSERT INTO terminals(name,data_dir,status,created_at) VALUES(?,?,?,?)",
+            ("VPS", str(tmp_path / "vps"), "connected", now),
+        ).lastrowid
         def add_run(strategy_id, status, requested_at):
             return conn.execute(
                 """INSERT INTO backtest_runs(
@@ -1126,6 +1591,11 @@ def test_dashboard_exposes_latest_completed_backtest_risk_audit(tmp_path, monkey
                 "INSERT INTO strategies(symbol,sqx_name,origin,created_at) VALUES(?,?,?,?)",
                 ("XAU", name, "sqx", now),
             ).lastrowid
+            conn.execute(
+                """INSERT INTO mappings(strategy_id,terminal_id,symbol,magic,comment_pattern,confirmed,created_at)
+                   VALUES(?,?,?,?,?,1,?)""",
+                (strategy_id, terminal_id, "XAUUSD", index, name, now),
+            )
             run_id = add_run(strategy_id, "completed", f"2026-01-0{index}T01:00:00+00:00")
             metrics = {"profit_factor": 1.4}
             if audit_status:

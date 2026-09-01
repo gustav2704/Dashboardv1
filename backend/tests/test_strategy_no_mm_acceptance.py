@@ -13,6 +13,15 @@ def test_no_mm_acceptance_round_trip_and_dashboard_detail_persistence(tmp_path, 
                VALUES(?,?,?,?)""",
             ("GBPAUD", "Fixed-lot bot", "100", db.utcnow()),
         ).lastrowid
+        terminal_id = conn.execute(
+            "INSERT INTO terminals(name,data_dir,account_login,status,created_at) VALUES(?,?,?,?,?)",
+            ("VPS", str(tmp_path / "vps"), "100", "connected", db.utcnow()),
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO mappings(strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,confirmed,created_at)
+               VALUES(?,?,?,?,?,?,1,?)""",
+            (strategy_id, terminal_id, "100", "GBPAUD", 1, "Fixed-lot bot", db.utcnow()),
+        )
 
     client = TestClient(main.app)
     accepted = client.put(

@@ -33,7 +33,7 @@ def test_candidate_discovery_is_strict_and_excludes_unlinked_bots(tmp_path, monk
         _strategy(conn, "SQX Version 5.14.99")
         _strategy(conn, "Unlinked Bot", linked=False)
 
-    result = backtest_batches.discover_candidates()
+    result = backtest_batches.discover_candidates("FPM")
     states = {item["sqx_name"]: item["state"] for item in result["candidates"]}
 
     assert states["Exact Bot"] == "eligible"
@@ -62,7 +62,7 @@ def test_strict_identity_suffix_distinguishes_repeated_parentheses(tmp_path, mon
             sqx_symbol="USA30IDXUSD_clonedwnx", mql5_name="",
         )
 
-    result = backtest_batches.discover_candidates()
+    result = backtest_batches.discover_candidates("FPM")
     candidates = {item["sqx_name"]: item for item in result["candidates"]}
 
     assert candidates["Strategy 3.8.23(1)"]["resolution_method"] == "exact_identity_suffix"
@@ -83,7 +83,7 @@ def test_strict_identity_suffix_accepts_xau_wf_matrix_prefix(tmp_path, monkeypat
     with db.session() as conn:
         _strategy(conn, "XAU-Strategy 3.13.39dwnx", mql5_name="")
 
-    candidate = backtest_batches.discover_candidates()["candidates"][0]
+    candidate = backtest_batches.discover_candidates("FPM")["candidates"][0]
 
     assert candidate["state"] == "eligible"
     assert candidate["resolution_method"] == "exact_identity_suffix"
@@ -108,7 +108,7 @@ def test_strict_identity_suffix_blocks_distinct_hashes_for_same_identity(tmp_pat
             sqx_symbol="USA30IDXUSD_clonedwnx", mql5_name="",
         )
 
-    candidate = backtest_batches.discover_candidates()["candidates"][0]
+    candidate = backtest_batches.discover_candidates("FPM")["candidates"][0]
 
     assert candidate["state"] == "blocked"
     assert candidate["resolution_method"] == "ambiguous"
@@ -139,7 +139,7 @@ def test_full_rerun_batch_includes_validated_candidates(tmp_path, monkeypatch):
     monkeypatch.setattr(
         backtest_batches,
         "discover_candidates",
-        lambda: {
+        lambda *args, **kwargs: {
             "counts": {"eligible": 0, "resolvable": 0, "blocked": 0, "validated": 1},
             "candidates": [candidate],
             "expert_files": 1,
@@ -190,7 +190,7 @@ def test_maintenance_waits_for_positions_and_pending_orders(tmp_path, monkeypatc
     assert "pending order" in reason
 
 
-def test_dedicated_backtest_terminal_ignores_live_account_state(tmp_path, monkeypatch):
+def test_dedicated_backtest_terminal_does_not_override_live_account_safety(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "dedicated.db")
     data_dir = tmp_path / "terminal"
     monkeypatch.setattr(backtest_batches, "DEFAULT_TERMINAL", data_dir)
@@ -218,7 +218,9 @@ def test_dedicated_backtest_terminal_ignores_live_account_state(tmp_path, monkey
             (terminal_id, 2, "XAUUSD.cyr", "BUY_STOP", 1, 0.1, 1, 1, "", "{}"),
         )
 
-    assert backtest_batches._safe_for_maintenance() == (True, "")
+    safe, reason = backtest_batches._safe_for_maintenance()
+    assert safe is False
+    assert "open position" in reason
 
 
 def test_pause_requested_during_run_is_preserved(tmp_path, monkeypatch):

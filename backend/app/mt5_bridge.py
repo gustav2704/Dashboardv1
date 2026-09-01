@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -17,6 +19,7 @@ from .ssh_bridge import SSHBridge, SSHBridgeError
 
 BRIDGE_RELATIVE = Path("MQL5") / "Files" / "Dashboardv1"
 _latest_chart_response_ids: dict[int, str] = {}
+logger = logging.getLogger(__name__)
 
 
 def _identity(account: Any, server: Any) -> tuple[str, str]:
@@ -107,7 +110,7 @@ def _reuse_terminal_for_account(
                 (archive_id, terminal_id),
             )
         conn.execute(
-            """UPDATE mappings SET terminal_id=?
+            """UPDATE mappings SET terminal_id=?,role='historical'
                WHERE terminal_id=? AND account_login=?""",
             (archive_id, terminal_id, old_account),
         )
@@ -293,12 +296,26 @@ def _upsert_sync_response(conn: Any, terminal: Any, payload: dict[str, Any]) -> 
         raise ValueError("Connected MT5 response must include account_login and server")
     old_identity = _identity(terminal["account_login"], terminal["server"])
     new_identity = _identity(account, server)
-    if old_identity[0] and old_identity != new_identity:
+    # The login is the account identity for a configured terminal.  Brokers
+    # occasionally rename the MT5 server while keeping that same account
+    # session alive; that metadata change must not split its ledger.
+    if old_identity[0] and old_identity[0] != new_identity[0]:
         _reuse_terminal_for_account(
             conn, int(terminal["id"]), account, server, str(terminal["name"]),
             detected_at=str(generated_at), source="bridge_sync",
         )
         terminal = conn.execute("SELECT * FROM terminals WHERE id=?", (terminal["id"],)).fetchone()
+    elif old_identity[0] and old_identity[1] != new_identity[1]:
+        conn.execute(
+            """INSERT INTO terminal_identity_events(
+                 terminal_id,archive_terminal_id,old_account_login,old_server,
+                 new_account_login,new_server,detected_at,source,created_at
+               ) VALUES(?,NULL,?,?,?,?,?,?,?)""",
+            (
+                terminal["id"], old_identity[0], old_identity[1], new_identity[0],
+                new_identity[1], str(generated_at), "bridge_sync_server_metadata", utcnow(),
+            ),
+        )
     terminal_id = terminal["id"]
     canonical_id = canonical_ingestion_source(conn, account, server)
     if canonical_id is not None and canonical_id != terminal_id:
@@ -584,23 +601,46 @@ def latest_chart_response_id(terminal_id: int) -> str | None:
     return _latest_chart_response_ids.get(terminal_id)
 
 
-def ingest_responses(*, terminal_ids: set[int] | None = None) -> dict[str, int]:
+def ingest_responses(
+    *, terminal_ids: set[int] | None = None, discover_strategies: bool = True,
+    include_charts: bool = True,
+) -> dict[str, int]:
     sync_count = chart_count = errors = 0
+    transport_failed_terminal_ids: set[int] = set()
     with session() as conn:
+        # GuardianCuenta terminals are read exclusively through their CSV files
+        # over SFTP.  They never produce DashboardBridge responses, so including
+        # them here makes the stale-response check incorrectly mark a healthy
+        # Guardian source as disconnected.
+        guardian_terminal_ids = {
+            int(row["terminal_id"])
+            for row in conn.execute(
+                "SELECT terminal_id FROM guardian_sources WHERE enabled=1"
+            )
+        }
         if terminal_ids is None:
-            terminals = conn.execute("SELECT * FROM terminals").fetchall()
+            terminals = conn.execute(
+                """SELECT * FROM terminals
+                   WHERE id NOT IN (
+                     SELECT terminal_id FROM guardian_sources WHERE enabled=1
+                   )"""
+            ).fetchall()
         else:
-            selected_ids = sorted(terminal_ids)
+            selected_ids = sorted(set(terminal_ids) - guardian_terminal_ids)
             if not selected_ids:
                 return {"sync": 0, "charts": 0, "errors": 0, "strategies_created": 0, "strategies_linked": 0}
             placeholders = ",".join("?" for _ in selected_ids)
             terminals = conn.execute(
                 f"SELECT * FROM terminals WHERE id IN ({placeholders})", selected_ids
             ).fetchall()
+        processed_terminal_ids = [int(terminal["id"]) for terminal in terminals]
         for terminal in terminals:
             remote = _is_remote(terminal)
             root = Path(terminal["data_dir"]) / BRIDGE_RELATIVE / "Responses" if not remote else None
-            candidates = ("sync", "chart")
+            # A normal account poll has no reason to read chart responses.
+            # Those are collected by the chart request path, keeping a slow
+            # VPS from multiplying normal refresh latency.
+            candidates = ("sync", "chart") if include_charts else ("sync",)
             for kind in candidates:
                 try:
                     if remote:
@@ -631,6 +671,12 @@ def ingest_responses(*, terminal_ids: set[int] | None = None) -> dict[str, int]:
                         os.replace(path, archive / f"{kind}-{int(time.time() * 1000)}.json")
                 except Exception as exc:
                     errors += 1
+                    # A readable bridge folder with no new MT5 reply means the
+                    # terminal is still waiting for a heartbeat (especially
+                    # just after the dashboard starts).  Only an SSH transport
+                    # failure is evidence that the VPS itself is unreachable.
+                    if isinstance(exc, SSHBridgeError):
+                        transport_failed_terminal_ids.add(int(terminal["id"]))
                     conn.execute(
                         "UPDATE terminals SET last_error=? WHERE id=?", (str(exc)[:500], terminal["id"])
                     )
@@ -639,7 +685,13 @@ def ingest_responses(*, terminal_ids: set[int] | None = None) -> dict[str, int]:
         # use those stale row objects here: a successful sync may just have
         # updated last_seen, and marking that same terminal disconnected would
         # overwrite the connected status we have just established.
-        refreshed_terminals = conn.execute("SELECT id,last_seen FROM terminals").fetchall()
+        if not processed_terminal_ids:
+            refreshed_terminals = []
+        else:
+            placeholders = ",".join("?" for _ in processed_terminal_ids)
+            refreshed_terminals = conn.execute(
+                f"SELECT id,last_seen FROM terminals WHERE id IN ({placeholders})", processed_terminal_ids
+            ).fetchall()
         for terminal in refreshed_terminals:
             last_seen = terminal["last_seen"]
             stale = True
@@ -649,16 +701,28 @@ def ingest_responses(*, terminal_ids: set[int] | None = None) -> dict[str, int]:
                 except ValueError:
                     pass
             if stale:
-                conn.execute("UPDATE terminals SET status='disconnected' WHERE id=?", (terminal["id"],))
+                status = (
+                    "disconnected"
+                    if int(terminal["id"]) in transport_failed_terminal_ids
+                    else "connecting"
+                )
+                conn.execute("UPDATE terminals SET status=? WHERE id=?", (status, terminal["id"]))
     # Matching observed MT5 identities against the strategy catalog is much
     # more expensive than reading an already-written response file.  Only run
     # it when a new sync payload was actually ingested; polling the terminals
     # endpoint otherwise used to repeat the full discovery on every request.
     discovery = {"created": 0, "linked": 0, "safe_matches": 0}
-    if sync_count:
+    if sync_count and discover_strategies:
         from .mapping import ensure_mt5_strategies
 
-        discovery = ensure_mt5_strategies()
+        try:
+            discovery = ensure_mt5_strategies()
+        except Exception:
+            # A bad automatic mapping must not take down the dashboard or hide
+            # every broker account. The response was already ingested safely;
+            # preserve it and leave the mapping conflict for review.
+            errors += 1
+            logger.exception("MT5 discovery skipped after an identity conflict")
     return {
         "sync": sync_count,
         "charts": chart_count,
@@ -668,15 +732,72 @@ def ingest_responses(*, terminal_ids: set[int] | None = None) -> dict[str, int]:
     }
 
 
-def sync_all() -> dict[str, Any]:
-    ingested = ingest_responses()
-    requested = 0
+def _polling_terminal_ids(conn: Any) -> list[int]:
+    """Choose one current MT5 source per broker account for fast polling."""
+    candidates = conn.execute(
+        """SELECT * FROM terminals
+           WHERE id NOT IN (
+             SELECT terminal_id FROM guardian_sources WHERE enabled=1
+           )
+             AND data_dir NOT LIKE 'archive://%'
+             AND data_dir NOT LIKE 'import://%'
+             AND data_dir NOT LIKE 'inventory://%'"""
+    ).fetchall()
+    selected: dict[str, Any] = {}
+    for terminal in candidates:
+        account = str(terminal["account_login"] or "").strip()
+        key = account or f"terminal:{int(terminal['id'])}"
+        priority = (
+            bool(account and str(terminal["server"] or "").strip()),
+            str(terminal["transport"] or "local") == "ssh",
+            str(terminal["status"] or "") == "connected",
+            str(terminal["last_seen"] or ""),
+            int(terminal["id"]),
+        )
+        current = selected.get(key)
+        if current is None or priority > current[0]:
+            selected[key] = (priority, terminal)
+    return sorted(int(item[1]["id"]) for item in selected.values())
+
+
+def sync_all(*, response_wait_seconds: float = 0.0) -> dict[str, Any]:
+    """Request canonical MT5 sources and optionally collect their replies.
+
+    Scheduled polls keep the default immediate behaviour.  A user-initiated
+    Refresh uses a short, bounded response window so that one click includes
+    the snapshot it requested rather than only queuing it for a later cycle.
+    """
+    # Guardian sources are explicitly observer-only: they expose their own
+    # CSV files over SFTP and must never receive DashboardBridge requests.
+    # Keep them out of both response ingestion and request creation.
     with session() as conn:
-        terminal_ids = [row["id"] for row in conn.execute("SELECT id FROM terminals")]
-    for terminal_id in terminal_ids:
-        try:
-            request = request_sync(terminal_id)
-            requested += int(not request.get("skipped", False))
-        except Exception:
-            pass
-    return {"ingested": ingested, "requested": requested}
+        terminal_ids = _polling_terminal_ids(conn)
+    # Strategy discovery is CPU-heavy and unrelated to connectivity. The
+    # maintenance worker performs it separately so MT5 polling stays bounded.
+    ingested = ingest_responses(
+        terminal_ids=set(terminal_ids), discover_strategies=False,
+        include_charts=False,
+    )
+    # One slow VPS must not serially delay every other live account. Each
+    # request uses its own short-lived SSH/SFTP session and database context.
+    with ThreadPoolExecutor(max_workers=min(len(terminal_ids), 5)) as executor:
+        outcomes = executor.map(request_sync, terminal_ids)
+        requested = sum(
+            int(not request.get("skipped", False))
+            for request in outcomes
+            if isinstance(request, dict)
+        )
+    follow_up = {
+        "sync": 0, "charts": 0, "errors": 0,
+        "strategies_created": 0, "strategies_linked": 0,
+    }
+    wait_seconds = min(max(float(response_wait_seconds), 0.0), 20.0)
+    if requested and wait_seconds:
+        time.sleep(wait_seconds)
+        # Discovery is unrelated to current account data and can make the
+        # user-visible request slow.  Maintenance will do it separately.
+        follow_up = ingest_responses(
+            terminal_ids=set(terminal_ids), discover_strategies=False,
+            include_charts=False,
+        )
+    return {"ingested": ingested, "requested": requested, "follow_up": follow_up}

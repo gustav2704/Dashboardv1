@@ -54,7 +54,9 @@ def test_dashboard_timeframe_falls_back_to_sqx_or_null(tmp_path, monkeypatch):
     with db.session() as conn:
         sqx_strategy_id = _strategy(conn, "SQX timeframe")
         _sqx_link(conn, sqx_strategy_id, "M5")
+        _deployment(conn, sqx_strategy_id, "sqx", "")
         unknown_strategy_id = _strategy(conn, "Unknown timeframe")
+        _deployment(conn, unknown_strategy_id, "unknown", "")
 
     rows = {item["id"]: item for item in main.dashboard_data()["strategies"]}
     assert rows[sqx_strategy_id]["timeframe"] == "M5"

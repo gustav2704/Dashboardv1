@@ -3,7 +3,7 @@ from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
 
-from app import db
+from app import catalog_export, db
 from app.catalog import import_catalog
 from app.catalog_export import _build_records, export_catalog
 from app.main import dashboard_data
@@ -84,6 +84,20 @@ def test_export_preserves_source_and_builds_multisource_workbook(tmp_path, monke
     source = Path(__file__).resolve().parents[3] / "EA_track" / "Track_v1.xlsx"
     original_bytes = source.read_bytes()
     import_catalog(source)
+    with db.session() as conn:
+        now = db.utcnow()
+        for index, strategy in enumerate(conn.execute(
+            "SELECT id,symbol,sqx_name,COALESCE(account_login,'') account_login FROM strategies ORDER BY id"
+        ), start=1):
+            terminal_id = conn.execute(
+                "INSERT INTO terminals(name,data_dir,account_login,status,created_at) VALUES(?,?,?,?,?)",
+                (f"VPS {index}", str(tmp_path / f"vps-{index}"), strategy["account_login"], "connected", now),
+            ).lastrowid
+            conn.execute(
+                """INSERT INTO mappings(strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,confirmed,created_at)
+                   VALUES(?,?,?,?,?,?,1,?)""",
+                (strategy["id"], terminal_id, strategy["account_login"], strategy["symbol"], index, strategy["sqx_name"], now),
+            )
     strategies = dashboard_data()["strategies"]
     with db.session() as conn:
         catalog_json = {
@@ -139,6 +153,7 @@ def test_export_uses_latest_completed_backtest_and_keeps_latest_failure_status(
     tmp_path, monkeypatch
 ):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "backtest-export.db")
+    monkeypatch.setattr(catalog_export, "ACTIVE_BACKTEST_BROKER", "FPM")
     db.init_db()
     now = db.utcnow()
     with db.session() as conn:

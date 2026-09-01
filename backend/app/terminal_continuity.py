@@ -197,3 +197,158 @@ def repair(db_path: Path = DB_PATH, *, apply: bool = False) -> dict[str, Any]:
         "dry_run": False, "backup": str(backup), "applied": applied,
         "verified_audits": verified_audits, "post_audit": post,
     }
+
+
+def audit_same_login_server_archives(conn: Any, *, account_login: str | None = None) -> dict[str, Any]:
+    """Find archives created only because MT5 changed a server label.
+
+    Unlike ordinary archived sessions, these have an explicit identity event
+    whose old and new account logins match.  This makes the repair narrowly
+    scoped and prevents it from merging genuine account changes.
+    """
+    params: list[Any] = []
+    account_filter = ""
+    if account_login:
+        account_filter = " AND event.old_account_login=?"
+        params.append(str(account_login))
+    events = conn.execute(
+        """SELECT event.*,archive.data_dir AS archive_data_dir,
+                  archive.account_login AS archive_account_login,
+                  active.data_dir AS active_data_dir,
+                  active.account_login AS active_account_login
+           FROM terminal_identity_events event
+           JOIN terminals archive ON archive.id=event.archive_terminal_id
+           JOIN terminals active ON active.id=event.terminal_id
+           WHERE event.archive_terminal_id IS NOT NULL
+             AND event.old_account_login=event.new_account_login
+             AND event.old_server<>event.new_server
+             AND archive.data_dir LIKE 'archive://terminal/%'
+             AND active.data_dir NOT LIKE 'archive://%'
+             AND archive.account_login=event.old_account_login
+             AND active.account_login=event.new_account_login""" + account_filter + " ORDER BY event.id",
+        params,
+    ).fetchall()
+    archives = []
+    for event in events:
+        archive_id = int(event["archive_terminal_id"])
+        active_id = int(event["terminal_id"])
+        counts = {
+            table: int(conn.execute(f"SELECT COUNT(*) FROM {table} WHERE terminal_id=?", (archive_id,)).fetchone()[0])
+            for table in ("deals", "positions", "pending_orders", "account_snapshots", "mappings")
+        }
+        if not any(counts.values()):
+            continue
+        strategies = [
+            int(row[0]) for row in conn.execute(
+                "SELECT DISTINCT strategy_id FROM mappings WHERE terminal_id=? ORDER BY strategy_id", (archive_id,)
+            )
+        ]
+        archives.append({
+            "event_id": int(event["id"]), "archive_terminal_id": archive_id,
+            "active_terminal_id": active_id, "account_login": str(event["old_account_login"]),
+            "old_server": str(event["old_server"]), "new_server": str(event["new_server"]),
+            "counts": counts, "strategy_ids": strategies,
+        })
+    totals = {table: sum(item["counts"][table] for item in archives) for table in (
+        "deals", "positions", "pending_orders", "account_snapshots", "mappings"
+    )}
+    return {"archive_count": len(archives), "archives": archives, "totals": totals}
+
+
+def _move_same_login_archive_rows(conn: Any, archive_id: int, active_id: int) -> dict[str, int]:
+    moved: dict[str, int] = {}
+    statements = {
+        "deals": """INSERT OR IGNORE INTO deals(
+            terminal_id,ticket,position_id,time_msc,symbol,deal_type,entry_type,volume,price,
+            profit,commission,swap,magic,comment,raw_json)
+            SELECT ?,ticket,position_id,time_msc,symbol,deal_type,entry_type,volume,price,
+                   profit,commission,swap,magic,comment,raw_json FROM deals WHERE terminal_id=?""",
+        "positions": """INSERT OR IGNORE INTO positions(
+            terminal_id,ticket,position_id,symbol,direction,time_msc,volume,open_price,current_price,
+            profit,swap,magic,comment,raw_json)
+            SELECT ?,ticket,position_id,symbol,direction,time_msc,volume,open_price,current_price,
+                   profit,swap,magic,comment,raw_json FROM positions WHERE terminal_id=?""",
+        "pending_orders": """INSERT OR IGNORE INTO pending_orders(
+            terminal_id,ticket,symbol,order_type,time_msc,volume,price,magic,comment,raw_json)
+            SELECT ?,ticket,symbol,order_type,time_msc,volume,price,magic,comment,raw_json
+            FROM pending_orders WHERE terminal_id=?""",
+        "account_snapshots": """INSERT INTO account_snapshots(
+            terminal_id,captured_at,balance,equity,margin,free_margin,raw_json)
+            SELECT ?,source.captured_at,source.balance,source.equity,source.margin,
+                   source.free_margin,source.raw_json
+            FROM account_snapshots source
+            WHERE source.terminal_id=? AND NOT EXISTS (
+              SELECT 1 FROM account_snapshots target
+              WHERE target.terminal_id=? AND target.captured_at=source.captured_at
+            )""",
+    }
+    for table, statement in statements.items():
+        params = (active_id, archive_id, active_id) if table == "account_snapshots" else (active_id, archive_id)
+        moved[table] = max(0, int(conn.execute(statement, params).rowcount))
+        conn.execute(f"DELETE FROM {table} WHERE terminal_id=?", (archive_id,))
+    return moved
+
+
+def _move_same_login_archive_mappings(conn: Any, archive_id: int, active_id: int, now: str) -> tuple[int, list[dict[str, Any]]]:
+    mappings = conn.execute("SELECT * FROM mappings WHERE terminal_id=? ORDER BY id", (archive_id,)).fetchall()
+    audits: list[dict[str, Any]] = []
+    for mapping in mappings:
+        before = dict(mapping)
+        target = conn.execute(
+            """SELECT * FROM mappings WHERE strategy_id=? AND terminal_id=?
+               AND COALESCE(symbol,'')=COALESCE(?, '') AND COALESCE(magic,0)=COALESCE(?, 0)
+               AND COALESCE(comment_pattern,'')=COALESCE(?, '')""",
+            (mapping["strategy_id"], active_id, mapping["symbol"], mapping["magic"], mapping["comment_pattern"]),
+        ).fetchone()
+        if target:
+            conn.execute(
+                """UPDATE mappings SET account_login=?,role='live',confirmed=MAX(confirmed,?),
+                   confidence=MAX(confidence,?) WHERE id=?""",
+                (mapping["account_login"], mapping["confirmed"], mapping["confidence"], target["id"]),
+            )
+            conn.execute("DELETE FROM mappings WHERE id=?", (mapping["id"],))
+            target_id = int(target["id"])
+        else:
+            conn.execute("UPDATE mappings SET terminal_id=?,role='live' WHERE id=?", (active_id, mapping["id"]))
+            target_id = int(mapping["id"])
+        after = dict(conn.execute("SELECT * FROM mappings WHERE id=?", (target_id,)).fetchone())
+        conn.execute(
+            """INSERT INTO identity_repair_audits(
+                 action,strategy_id,mapping_id,before_json,after_json,reason,created_at
+               ) VALUES(?,?,?,?,?,?,?)""",
+            ("merged_false_server_archive", mapping["strategy_id"], target_id,
+             json.dumps(before, ensure_ascii=False, default=str), json.dumps(after, ensure_ascii=False, default=str),
+             "same login was archived solely after a server-label change", now),
+        )
+        audits.append(after)
+    return len(mappings), audits
+
+
+def repair_same_login_server_archives(
+    db_path: Path = DB_PATH, *, account_login: str | None = None, apply: bool = False,
+) -> dict[str, Any]:
+    """Merge false same-login server-change archives back into their live terminal."""
+    if not apply:
+        with session(db_path) as conn:
+            return {"dry_run": True, "audit": audit_same_login_server_archives(conn, account_login=account_login)}
+    init_db(db_path)
+    backup = _backup(db_path)
+    with session(db_path) as conn:
+        before = audit_same_login_server_archives(conn, account_login=account_login)
+        merged = []
+        for item in before["archives"]:
+            now = utcnow()
+            moved = _move_same_login_archive_rows(
+                conn, item["archive_terminal_id"], item["active_terminal_id"]
+            )
+            mapping_count, _ = _move_same_login_archive_mappings(
+                conn, item["archive_terminal_id"], item["active_terminal_id"], now
+            )
+            conn.execute(
+                """UPDATE terminals SET status='disconnected',last_error=? WHERE id=?""",
+                (f"Merged false server-change archive into terminal {item['active_terminal_id']} at {now}",
+                 item["archive_terminal_id"]),
+            )
+            merged.append({**item, "moved": moved, "mappings_merged": mapping_count})
+        after = audit_same_login_server_archives(conn, account_login=account_login)
+    return {"dry_run": False, "backup": str(backup), "merged": merged, "post_audit": after}

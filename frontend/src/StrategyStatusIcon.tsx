@@ -2,7 +2,7 @@ import { Frown, Smile } from 'lucide-react'
 import type { StrategyStatus } from './strategyStatusFilter'
 
 export const strategyStatusLabels: Record<StrategyStatus, string> = {
-  '': 'Sin categoria',
+  '': 'Sin categoría',
   live: 'Darwinex live',
   monitor: 'Revisar',
   candidate_live: 'Candidata live',
@@ -21,4 +21,8 @@ export function PositiveStrategyStatusIcon({ status, size = 14 }: { status: Stra
   return status === 'live' || status === 'candidate_live' || status === 'axi_live'
     ? <StrategyStatusIcon status={status} size={size} />
     : null
+}
+
+export function StrategyStatusIcons({ statuses, size = 16, positiveOnly = false }: { statuses: StrategyStatus[]; size?: number; positiveOnly?: boolean }) {
+  return <span className="strategy-status-icons">{statuses.map(status => positiveOnly && status === 'monitor' ? null : <span className={`strategy-status-indicator ${status}`} key={status}><StrategyStatusIcon status={status} size={size} /></span>)}</span>
 }

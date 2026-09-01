@@ -30,6 +30,135 @@ def test_fresh_sync_does_not_get_overwritten_by_stale_pre_sync_snapshot(tmp_path
     assert tuple(row) == ("connected", generated_at)
 
 
+def test_guardian_source_is_never_marked_stale_by_bridge_ingestion(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "guardian-bridge-status.db")
+    db.init_db()
+    data_dir = tmp_path / "guardian"
+    (data_dir / "MQL5").mkdir(parents=True)
+    (data_dir / "origin.txt").write_text("C:\\MT5", encoding="utf-8")
+    terminal = register_terminal("Guardian", str(data_dir))
+    stale_seen = (datetime.now(timezone.utc) - timedelta(seconds=mt5_bridge.STALE_SECONDS + 1)).isoformat()
+    with db.session() as conn:
+        conn.execute(
+            "UPDATE terminals SET status='connected',last_seen=? WHERE id=?",
+            (stale_seen, terminal["id"]),
+        )
+        conn.execute(
+            "INSERT INTO guardian_sources(terminal_id,directory,account_login,created_at,updated_at) VALUES(?,?,?,?,?)",
+            (terminal["id"], "MQL5\\Files\\GuardianCuenta", "123", stale_seen, stale_seen),
+        )
+
+    assert ingest_responses()["sync"] == 0
+    with db.session() as conn:
+        row = conn.execute("SELECT status,last_seen FROM terminals WHERE id=?", (terminal["id"],)).fetchone()
+    assert tuple(row) == ("connected", stale_seen)
+
+
+def test_stale_bridge_without_a_transport_failure_is_connecting_not_disconnected(tmp_path, monkeypatch):
+    """A dashboard restart must not show a broker outage while MT5 is replying."""
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "startup-bridge-status.db")
+    db.init_db()
+    data_dir = tmp_path / "terminal"
+    (data_dir / "MQL5").mkdir(parents=True)
+    (data_dir / "origin.txt").write_text("C:\\MT5", encoding="utf-8")
+    terminal = register_terminal("Fixture", str(data_dir))
+    stale_seen = (datetime.now(timezone.utc) - timedelta(seconds=mt5_bridge.STALE_SECONDS + 1)).isoformat()
+    with db.session() as conn:
+        conn.execute("UPDATE terminals SET status='connected',last_seen=? WHERE id=?", (stale_seen, terminal["id"]))
+
+    assert ingest_responses(terminal_ids={terminal["id"]})["sync"] == 0
+    with db.session() as conn:
+        row = conn.execute("SELECT status,last_seen FROM terminals WHERE id=?", (terminal["id"],)).fetchone()
+    assert tuple(row) == ("connecting", stale_seen)
+
+
+def test_mapping_conflict_does_not_abort_response_ingestion(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "mapping-conflict.db")
+    db.init_db()
+    data_dir = tmp_path / "terminal"
+    (data_dir / "MQL5").mkdir(parents=True)
+    (data_dir / "origin.txt").write_text("C:\\MT5", encoding="utf-8")
+    terminal = register_terminal("Fixture", str(data_dir))
+    response_dir = data_dir / BRIDGE_RELATIVE / "Responses"
+    response_dir.mkdir(parents=True)
+    generated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    (response_dir / "sync.response.json").write_text(json.dumps({
+        "status": "ok", "terminal_connected": True, "generated_at": generated_at,
+        "account_login": "123", "server": "Demo", "account": {}, "deals": [], "positions": [], "orders": [],
+    }), encoding="utf-8")
+    monkeypatch.setattr(mapping, "ensure_mt5_strategies", lambda: (_ for _ in ()).throw(ValueError("identity conflict")))
+
+    result = ingest_responses()
+
+    assert result["sync"] == 1
+    assert result["errors"] == 1
+    with db.session() as conn:
+        assert conn.execute("SELECT status FROM terminals WHERE id=?", (terminal["id"],)).fetchone()[0] == "connected"
+
+
+def test_sync_all_polls_one_current_terminal_per_account_without_discovery(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "bounded-sync.db")
+    db.init_db()
+    now = db.utcnow()
+    with db.session() as conn:
+        local_id = conn.execute(
+            """INSERT INTO terminals(name,data_dir,account_login,server,status,transport,created_at)
+               VALUES(?,?,?,?,?,?,?)""",
+            ("Local mirror", str(tmp_path / "local"), "123", "Demo", "disconnected", "local", now),
+        ).lastrowid
+        remote_id = conn.execute(
+            """INSERT INTO terminals(name,data_dir,account_login,server,status,transport,last_seen,created_at)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            ("VPS", "ssh://vps/current", "123", "Demo", "connected", "ssh", now, now),
+        ).lastrowid
+        archive_id = conn.execute(
+            """INSERT INTO terminals(name,data_dir,account_login,server,status,transport,created_at)
+               VALUES(?,?,?,?,?,?,?)""",
+            ("Archive", "archive://terminal/1", "456", "Old", "disconnected", "local", now),
+        ).lastrowid
+
+    captured = {}
+    monkeypatch.setattr(mt5_bridge, "ingest_responses", lambda **kwargs: captured.update(kwargs) or {"sync": 0})
+    requested = []
+    monkeypatch.setattr(mt5_bridge, "request_sync", lambda terminal_id: requested.append(terminal_id) or {})
+
+    result = mt5_bridge.sync_all()
+
+    assert local_id not in requested
+    assert archive_id not in requested
+    assert requested == [remote_id]
+    assert captured == {
+        "terminal_ids": {remote_id}, "discover_strategies": False,
+        "include_charts": False,
+    }
+    assert result["requested"] == 1
+
+
+def test_sync_all_collects_a_user_requested_reply_without_discovery(monkeypatch):
+    calls = []
+    monkeypatch.setattr(mt5_bridge, "_polling_terminal_ids", lambda _conn: [21, 34])
+    monkeypatch.setattr(
+        mt5_bridge,
+        "ingest_responses",
+        lambda **kwargs: calls.append(("ingest", kwargs)) or {"sync": 2},
+    )
+    monkeypatch.setattr(mt5_bridge, "request_sync", lambda terminal_id: calls.append(("request", terminal_id)) or {})
+    monkeypatch.setattr(mt5_bridge.time, "sleep", lambda seconds: calls.append(("sleep", seconds)))
+
+    result = mt5_bridge.sync_all(response_wait_seconds=8)
+
+    assert calls[0] == (
+        "ingest",
+        {"terminal_ids": {21, 34}, "discover_strategies": False, "include_charts": False},
+    )
+    assert sorted(call for call in calls if call[0] == "request") == [("request", 21), ("request", 34)]
+    assert calls[-2:] == [
+        ("sleep", 8.0),
+        ("ingest", {"terminal_ids": {21, 34}, "discover_strategies": False, "include_charts": False}),
+    ]
+    assert result == {"ingested": {"sync": 2}, "requested": 2, "follow_up": {"sync": 2}}
+
+
 def test_canonical_source_rejects_a_mirror_payload(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "canonical-source.db")
     monkeypatch.setattr(mapping, "ensure_mt5_strategies", lambda: {"created": 0, "linked": 0, "safe_matches": 0})

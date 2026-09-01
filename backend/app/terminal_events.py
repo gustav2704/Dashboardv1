@@ -23,6 +23,18 @@ WARNING_RE = re.compile(
     r"no connection|disabled|stopped)\b",
     re.IGNORECASE,
 )
+# Spanish/strategy-signal lines the English ERROR_RE misses.  They surface the
+# operational mistakes the strategy-diagnosis view is built to catch: trades
+# opened without money management and entries denied by too-tight stops.
+NOMM_RE = re.compile(
+    r"\b(?:no\s*mm|sin\s*mm|no\s+money\s+management|sin\s+gesti[oó]n\s+de\s+riesgo)\b",
+    re.IGNORECASE,
+)
+DENIED_ENTRY_RE = re.compile(
+    r"\b(?:denegad\w*|rechazad\w*|entrada\s+negada|invalid\s+(?:price|stops?)|"
+    r"min\s+distance|stop\s+muy\s+ceñido|ceñid[oa])\b",
+    re.IGNORECASE,
+)
 DATE_TIME_RE = re.compile(r"(\d{4}[.\-/]\d{2}[.\-/]\d{2})\D+(\d{2}:\d{2}:\d{2})")
 TIME_RE = re.compile(r"\b(\d{2}:\d{2}:\d{2})\b")
 IGNORED_EA_RE = re.compile(r"ea[_\s-]*algotap", re.IGNORECASE)
@@ -44,7 +56,7 @@ DARWINEX_DEMO_COMPANIONS = (
 
 def classify_line(line: str) -> str | None:
     """Return the most severe known signal for an MT5 log line."""
-    if ERROR_RE.search(line):
+    if ERROR_RE.search(line) or NOMM_RE.search(line) or DENIED_ENTRY_RE.search(line):
         return "error"
     if WARNING_RE.search(line):
         return "warning"
@@ -83,7 +95,16 @@ def _source_dir(terminal: dict[str, Any]) -> str:
 
 
 def ensure_log_sources(db_path: Path | None = None) -> int:
-    """Create normal sources plus the known peer copies for Darwinex Demo."""
+    """Create normal sources plus known companion directories on the same VPS.
+
+    An MT5 terminal on a VPS shares its ``MetaQuotes\\Terminal`` parent with
+    sibling DataDirs for other accounts.  Register them automatically so the
+    VPS audit can discover their chart profiles and EX5 files without requiring
+    the user to manually add each ``terminal_log_sources`` row.
+
+    The legacy per-account approach (hardcoded for ``3000097316``) is expanded
+    to any Darwinex SSH terminal that has one of the known companion folders.
+    """
     created = 0
     with session(db_path) as conn:
         conn.execute(
@@ -98,19 +119,35 @@ def ensure_log_sources(db_path: Path | None = None) -> int:
                WHERE data_dir NOT LIKE 'archive://%' AND data_dir NOT LIKE 'import://%'
                  AND data_dir NOT LIKE 'inventory://%'"""
         ))
+        # Collect all known companion folder names from the existing
+        # Darwinex Demo terminal's source registration.
+        known_companions: set[str] = set()
+        for terminal in terminals:
+            base = _source_dir(terminal)
+            folder = PureWindowsPath(base).name.upper()
+            if (
+                terminal.get("transport") == "ssh"
+                and folder in {f.upper() for f in DARWINEX_DEMO_COMPANIONS}
+            ):
+                root = PureWindowsPath(base).parent
+                known_companions.update(
+                    str(root / companion) for companion in DARWINEX_DEMO_COMPANIONS
+                )
         for terminal in terminals:
             base = _source_dir(terminal)
             candidates = [(base, str(terminal["name"]))]
-            if (
-                str(terminal.get("account_login") or "") == "3000097316"
-                and terminal.get("transport") == "ssh"
-                and PureWindowsPath(base).name.upper() == "6C3C6A11D1C3791DD4DBF45421BF8028"
-            ):
+            # If this terminal's parent hosts known companion DataDirs,
+            # register them all as additional sources so the remote VPS
+            # audit does not fail with "No SSH inventory source" for any
+            # Darwinex account.
+            if terminal.get("transport") == "ssh":
                 root = PureWindowsPath(base).parent
-                candidates.extend(
-                    (str(root / folder), f"Darwinex Demo - {folder[:8]}")
-                    for folder in DARWINEX_DEMO_COMPANIONS
-                )
+                for companion_path in known_companions:
+                    candidate_path = str(companion_path)
+                    if candidate_path.casefold() != base.casefold():
+                        folder_name = PureWindowsPath(companion_path).name
+                        label = f"VPS Sibling - {folder_name[:8]}"
+                        candidates.append((candidate_path, label))
             for data_dir, label in candidates:
                 before = conn.execute(
                     "SELECT id FROM terminal_log_sources WHERE terminal_id=? AND data_dir=?",
@@ -299,6 +336,106 @@ def purge_ignored_events(conn: Any) -> int:
     return int(conn.execute("SELECT changes()").fetchone()[0])
 
 
+def _ea_search_tokens(name: str, *, include_stem: bool = True) -> list[str]:
+    """Turn an EA display name into searchable context tokens.
+
+    MT5 Expert log lines carry the EA display name verbatim, e.g.
+    'CADJPY_M30_Long_Strategy 1.5.52 (CADJPY,M30)'.  The full name and its
+    stem matches an older version when it remains the same EA.
+    """
+    cleaned = (name or "").strip()
+    if not cleaned:
+        return []
+    tokens: list[str] = []
+    full = cleaned.lower()
+    if len(full) >= 5:
+        tokens.append(full)
+    # Strip a trailing *whitespace-separated* version (e.g. ' 1.5.52') so older
+    # logs keep matching, but never a digit glued to the name (e.g. the '5' in
+    # 'DosVelas_NAQ_m5' is part of the EA name, not a version).
+    stem = re.sub(r"\s+\(?\d[\d.]*\)?\s*$", "", cleaned).strip().lower()
+    if include_stem and stem and len(stem) >= 5 and stem != full:
+        tokens.append(stem)
+    return tokens
+
+
+def strategy_event_scope(conn: Any, strategy_id: int) -> dict[str, Any] | None:
+    """Resolve the account scope and context tokens that identify one strategy
+    inside the MT5 log events.
+
+    Account attribution uses the assigned login plus the full account lineage
+    (``strategy_account_lineage``), so migrated strategies keep matching their
+    old terminals. Context attribution uses the strategy names plus deployed
+    EX5 and mapping aliases. Journal lines have no EA identity, so the trading
+    symbol remains their fallback.
+    """
+    row = conn.execute(
+        """SELECT id, account_login, mql5_name, sqx_name, symbol
+           FROM strategies WHERE id=?""",
+        (strategy_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    accounts = {value for value in (row["account_login"],) if value}
+    accounts.update(
+        value
+        for (value,) in conn.execute(
+            """SELECT account_login FROM strategy_account_lineage
+               WHERE strategy_id=?""",
+            (strategy_id,),
+        )
+        if value
+    )
+    ea_tokens = _ea_search_tokens(row["mql5_name"] or "")
+    ea_tokens.extend(_ea_search_tokens(row["sqx_name"] or ""))
+    aliases = [
+        value[0]
+        for value in conn.execute(
+            """SELECT ex5_name FROM bot_deployments
+               WHERE strategy_id=? AND ex5_name IS NOT NULL AND ex5_name<>''
+               UNION
+               SELECT comment_pattern FROM mappings
+               WHERE strategy_id=? AND comment_pattern IS NOT NULL AND comment_pattern<>''""",
+            (strategy_id, strategy_id),
+        )
+        if value[0]
+    ]
+    for alias in aliases:
+        # MT5 emits the Expert display name without the EX5 extension. Aliases
+        # remain full-name matches to avoid including a similarly named sibling.
+        without_extension = re.sub(r"\.ex5$", "", str(alias), flags=re.IGNORECASE)
+        ea_tokens.extend(_ea_search_tokens(without_extension, include_stem=False))
+    symbol = (row["symbol"] or "").strip()
+    sym_lower = symbol.lower()
+    # The instrument word appears in every sibling EA name on the shared symbol
+    # (e.g. 'CADJPY' inside 'CADJPY_M30_short_2.14.57'), so it must not be used
+    # to attribute Expert lines to one strategy.  It stays as the Journal
+    # fallback via symbol_token instead.
+    ea_tokens = [token for token in ea_tokens if token and token != sym_lower]
+    return {
+        "id": row["id"],
+        "name": row["mql5_name"] or row["sqx_name"] or f"Strategy {row['id']}",
+        "account_login": row["account_login"],
+        "symbol": symbol,
+        "accounts": sorted(accounts),
+        "ea_tokens": sorted({token for token in ea_tokens if token}),
+        "symbol_token": sym_lower if len(sym_lower) >= 3 else None,
+    }
+
+
+def rescan_terminal_events(db_path: Path | None = None) -> dict[str, Any]:
+    """Drop every log cursor and re-read the retained log tails.
+
+    Re-reading re-classifies each line with the current classifier, so newly
+    added patterns (e.g. noMM) retroactively cover the retention window
+    without duplicating existing rows: ``INSERT OR IGNORE`` keeps the rows
+    already captured at the same byte offsets.
+    """
+    with session(db_path) as conn:
+        conn.execute("DELETE FROM terminal_log_cursors")
+    return sync_terminal_events(db_path)
+
+
 def sync_terminal_events(db_path: Path | None = None) -> dict[str, Any]:
     """Ingest recent log tails. It never writes to MT5 or executes remote commands."""
     sources_created = ensure_log_sources(db_path)
@@ -328,6 +465,8 @@ def events_data(
     *, accounts: set[str] | None = None, severity: str = "all", source_id: int | None = None,
     log_kind: str = "all", search: str = "", start: str | None = None, end: str | None = None,
     limit: int = 200, offset: int = 0, vps_only: bool = True, db_path: Path | None = None,
+    ea_tokens: list[str] | None = None, symbol_token: str | None = None,
+    strategy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     where: list[str] = ["LOWER(e.context) NOT LIKE ?"]
     parameters: list[Any] = ["%order with these parameters already exists%"]
@@ -350,6 +489,27 @@ def events_data(
     if search.strip():
         where.append("LOWER(e.context) LIKE ?")
         parameters.append(f"%{search.lower().strip()}%")
+    if ea_tokens or symbol_token:
+        ea = [token for token in (ea_tokens or []) if token and token.strip()]
+        sym = (symbol_token or "").strip().lower()
+        if ea and sym:
+            ea_like = " OR ".join("LOWER(e.context) LIKE ?" for _ in ea)
+            # Expert lines carry the EA name, so they are attributed to the
+            # strategy precisely.  Journal lines never name the EA, so they fall
+            # back to the symbol (plus the EA name, if it happens to appear).
+            where.append(
+                f"( (e.log_kind='experts' AND ({ea_like}))"
+                f" OR (e.log_kind='journal' AND ({ea_like} OR LOWER(e.context) LIKE ?)) )"
+            )
+            parameters.extend(f"%{token.lower().strip()}%" for token in ea)
+            parameters.extend(f"%{token.lower().strip()}%" for token in ea)
+            parameters.append(f"%{sym}%")
+        elif ea:
+            where.append("(" + " OR ".join("LOWER(e.context) LIKE ?" for _ in ea) + ")")
+            parameters.extend(f"%{token.lower().strip()}%" for token in ea)
+        elif sym:
+            where.append("LOWER(e.context) LIKE ?")
+            parameters.append(f"%{sym}%")
     if start:
         where.append("COALESCE(e.occurred_at,e.captured_at)>=?")
         parameters.append(start)
@@ -373,6 +533,13 @@ def events_data(
                 LIMIT ? OFFSET ?""",
             [*parameters, limit, offset],
         ))
+        event_kinds = {
+            row["log_kind"]: int(row["count"])
+            for row in conn.execute(
+                f"SELECT e.log_kind,COUNT(*) AS count {event_from} {clause} GROUP BY e.log_kind",
+                parameters,
+            ).fetchall()
+        }
         source_clause = "WHERE s.enabled=1"
         source_parameters: list[Any] = []
         if vps_only:
@@ -386,8 +553,20 @@ def events_data(
                 {source_clause} ORDER BY s.label""",
             source_parameters,
         ))
+    attribution_summary = None
+    if strategy is not None:
+        # Expert rows are already restricted to a strategy alias above. Journal
+        # rows are intentionally a weaker account-and-symbol association.
+        for event in events:
+            event["attribution"] = (
+                "expert_alias" if event["log_kind"] == "experts" else "journal_symbol"
+            )
+        attribution_summary = {
+            "expert_alias": int(event_kinds.get("experts", 0)),
+            "journal_symbol": int(event_kinds.get("journal", 0)),
+        }
     return {
         "generated_at": utcnow(), "events": events, "total": total, "limit": limit, "offset": offset,
         "summary": {"errors": int(counts.get("error", 0)), "warnings": int(counts.get("warning", 0))},
-        "sources": sources,
+        "sources": sources, "strategy": strategy, "attribution_summary": attribution_summary,
     }

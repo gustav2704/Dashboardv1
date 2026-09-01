@@ -5,6 +5,19 @@ from fastapi.testclient import TestClient
 from app import db, main
 
 
+def _add_vps_evidence(conn, strategy_id, suffix: str) -> None:
+    now = db.utcnow()
+    terminal_id = conn.execute(
+        "INSERT INTO terminals(name,data_dir,status,created_at) VALUES(?,?,?,?)",
+        (f"VPS {suffix}", f"C:/vps/{suffix}", "connected", now),
+    ).lastrowid
+    conn.execute(
+        """INSERT INTO mappings(strategy_id,terminal_id,symbol,magic,comment_pattern,confirmed,created_at)
+           VALUES(?,?,?,?,?,1,?)""",
+        (strategy_id, terminal_id, "XAUUSD", strategy_id, suffix, now),
+    )
+
+
 def _completed_risk_alert_run(conn, strategy_id, report_path, requested_at):
     run_id = conn.execute(
         """INSERT INTO backtest_runs(
@@ -39,6 +52,7 @@ def test_manual_risk_acceptance_is_run_scoped_and_report_is_served(tmp_path, mon
             "INSERT INTO strategies(symbol,sqx_name,created_at) VALUES(?,?,?)",
             ("XAU", "Risk bot", db.utcnow()),
         ).lastrowid
+        _add_vps_evidence(conn, strategy_id, "risk-bot")
         first_run_id = _completed_risk_alert_run(
             conn, strategy_id, report_path, "2026-01-01T00:00:00+00:00"
         )
@@ -102,6 +116,7 @@ def test_manual_risk_acceptance_allows_identity_backtest_from_display_strategy(t
                VALUES(?,?,?,?)""",
             ("DAX", "Visible bot", identity_id, db.utcnow()),
         ).lastrowid
+        _add_vps_evidence(conn, display_id, "visible-bot")
         run_id = _completed_risk_alert_run(
             conn, identity_id, report_path, "2026-01-01T00:00:00+00:00"
         )

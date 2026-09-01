@@ -33,6 +33,12 @@ def symbol_family(value: str) -> str:
     for family, prefixes in families.items():
         if symbol.startswith(prefixes):
             return family
+    # Keep FX symbols in the same family when SQX decorates the six-letter
+    # pair with its M1/history suffix (for example CADJPY_M1_DK_utc2).
+    # Without this, a live CADJPY deployment cannot inherit its verified SQX
+    # analytics even when the version signature is an exact match.
+    if len(symbol) >= 6 and symbol[:6].isalpha():
+        return symbol[:6]
     return symbol
 
 
@@ -617,10 +623,12 @@ def ensure_mt5_strategies(
     allow_auto_confirm: bool = True,
     allow_manual_accounts: bool = False,
 ) -> dict[str, int]:
-    """Create or link one strategy for each unambiguous MT5 identity.
+    """Link observations to known strategies without inventing identities.
 
     ``allowed_scopes`` is used only by the repair utility to constrain a
-    historical backfill. Normal syncs discover every newly observed safe bot.
+    historical backfill. A normal terminal sync may extend a confirmed mapping
+    or link an exact known alias, but raw Magic/comment data is not EX5 identity
+    evidence and must never create a new dashboard bot.
     """
     safe_matches = auto_confirm_suggestions()["confirmed"] if allow_auto_confirm else 0
     created = linked = 0
@@ -758,6 +766,12 @@ def ensure_mt5_strategies(
                 # Leave the observation unmapped for manual review.
                 continue
             else:
+                # Unknown observations remain visible to Suggestions until an
+                # EX5-backed inventory/deployment or an explicit repair scope
+                # establishes the bot identity. Creating from a comment here
+                # produced duplicate rows whenever broker/server aliases varied.
+                if allowed_scopes is None:
+                    continue
                 strategy_id = _create_mt5_strategy(conn, item, observed_name, now)
                 strategies = conn.execute("SELECT * FROM strategies WHERE retired=0").fetchall()
                 aliases = _aliases_by_strategy(conn)
@@ -906,6 +920,36 @@ def _deployment_for_mapping(
             if any(same_identity(mapping, enriched_candidate) for mapping in mappings):
                 deployment = family_strategy
                 break
+    if deployment is None:
+        # Broker migrations and archive re-imports can label the same broker
+        # account with a different server alias (for example FPMarkets versus
+        # FirstPrudentialMarkets).  Server spelling alone must not create a
+        # second dashboard row when the confirmed EA evidence is otherwise
+        # identical.  Magic plus the stable opening comment is the guard that
+        # keeps this fallback narrower than a name-only match.
+        observed_key = normalize(stable_comment(observed_name))
+        for family_strategy in family_strategies:
+            mappings = load_mappings(conn, int(family_strategy["id"]), confirmed_only=True, role="live")
+            if any(
+                str(mapping.get("account_login") or "") == str(account_login or "")
+                and asset_key(str(mapping.get("symbol") or "")) == operational_asset
+                and int(mapping.get("magic") or 0) == int(magic or 0)
+                and observed_key
+                and normalize(stable_comment(str(mapping.get("comment_pattern") or ""))) == observed_key
+                for mapping in mappings
+            ):
+                deployment = family_strategy
+                # Preserve the established server spelling for the identity
+                # compatibility check. The new terminal still owns its mapping.
+                matched = next(
+                    mapping for mapping in mappings
+                    if str(mapping.get("account_login") or "") == str(account_login or "")
+                    and asset_key(str(mapping.get("symbol") or "")) == operational_asset
+                    and int(mapping.get("magic") or 0) == int(magic or 0)
+                    and normalize(stable_comment(str(mapping.get("comment_pattern") or ""))) == observed_key
+                )
+                candidate["operational_server"] = str(matched.get("terminal_server") or operational_server)
+                break
     if deployment:
         deployment_id = int(deployment["id"])
     elif not conn.execute(
@@ -983,7 +1027,10 @@ def _deployment_for_mapping(
 def confirm_mapping(payload: dict[str, Any]) -> dict[str, Any]:
     with session() as conn:
         now = utcnow()
-        terminal = conn.execute("SELECT account_login FROM terminals WHERE id=?", (int(payload["terminal_id"]),)).fetchone()
+        terminal = conn.execute(
+            "SELECT account_login,data_dir,status FROM terminals WHERE id=?",
+            (int(payload["terminal_id"]),),
+        ).fetchone()
         if not terminal:
             raise KeyError(f"Terminal {payload['terminal_id']} not found")
         terminal_account = str(terminal["account_login"] or "").strip()
@@ -994,6 +1041,16 @@ def confirm_mapping(payload: dict[str, Any]) -> dict[str, Any]:
             )
         if terminal_account:
             payload = {**payload, "account_login": terminal_account}
+        terminal_data_dir = str(terminal["data_dir"] or "")
+        # Connection state is transient transport health, not historical
+        # identity.  A current terminal can be disconnected while its mapping
+        # is confirmed; demoting it here would make its terminal history vanish
+        # from the live strategy on the next dashboard refresh.
+        role = (
+            "historical"
+            if terminal_data_dir.startswith(("archive://", "import://"))
+            else "live"
+        )
         observed_name = str(payload.get("comment_pattern", ""))
         deployment_id, canonical_id = _deployment_for_mapping(
             conn,
@@ -1008,7 +1065,7 @@ def confirm_mapping(payload: dict[str, Any]) -> dict[str, Any]:
         conn.execute(
             """INSERT INTO mappings(strategy_id,terminal_id,account_login,symbol,magic,comment_pattern,role,confidence,confirmed,created_at)
                VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(strategy_id,terminal_id,symbol,magic,comment_pattern)
-               DO UPDATE SET role='live',confidence=excluded.confidence,confirmed=1""",
+               DO UPDATE SET role=excluded.role,confidence=excluded.confidence,confirmed=1""",
             (
                 deployment_id,
                 int(payload["terminal_id"]),
@@ -1016,7 +1073,7 @@ def confirm_mapping(payload: dict[str, Any]) -> dict[str, Any]:
                 str(payload.get("symbol", "")),
                 int(payload.get("magic", 0)),
                 observed_name,
-                "live",
+                role,
                 float(payload.get("confidence", 1.0)),
                 1,
                 now,

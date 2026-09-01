@@ -178,6 +178,15 @@ def test_dashboard_detects_latest_failed_backtest_across_brokers(tmp_path, monke
     init_db()
     with session() as conn:
         strategy_id = _strategy(conn)
+        terminal_id = conn.execute(
+            "INSERT INTO terminals(name,data_dir,status,created_at) VALUES(?,?,?,?)",
+            ("VPS", str(tmp_path / "vps"), "connected", utcnow()),
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO mappings(strategy_id,terminal_id,symbol,magic,comment_pattern,confirmed,created_at)
+               VALUES(?,?,?,?,?,1,?)""",
+            (strategy_id, terminal_id, "XAUUSD", 1, "Alert strategy", utcnow()),
+        )
         conn.execute(
             """INSERT INTO backtest_runs(
                  strategy_id,broker,expert_path,expert_hash,symbol,timeframe,

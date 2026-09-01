@@ -34,18 +34,38 @@ def terminal_session_id(mapping: Any) -> int:
     return int(_value(mapping, "terminal_id", 0) or 0)
 
 
+def is_operational_terminal(mapping: Any) -> bool:
+    """Return whether a mapping is backed by a current MT5 terminal.
+
+    Archive/import sessions remain valuable provenance, but must never act as
+    evidence that an account is operational. A disconnected terminal likewise
+    cannot supply current monitoring evidence.
+    """
+    data_dir = str(_value(mapping, "terminal_data_dir", "") or "")
+    return (
+        str(_value(mapping, "terminal_status", "") or "") == "connected"
+        and not data_dir.startswith(("archive://", "import://"))
+    )
+
+
 def _asset_key(symbol: str) -> str:
     from .mapping import asset_key
     return asset_key(symbol)
 
 
+def normalize_server(value: object) -> str:
+    """Canonical broker-server key, including known spelling aliases."""
+    key = re.sub(r"[^a-z0-9]+", "", str(value or "").strip().casefold())
+    return key.replace("firstprudentialmarkets", "fpmarkets")
+
+
 def server_key(mapping: Any) -> str:
-    return str(
+    return normalize_server(
         _value(mapping, "operational_server")
         or _value(mapping, "terminal_server")
         or _value(mapping, "server")
         or ""
-    ).strip().casefold()
+    )
 
 
 def expert_key(mapping: Any) -> str:
@@ -157,7 +177,7 @@ def primary_mapping(strategy: Any, mappings: Iterable[Any]) -> Any | None:
     strategy_asset = str(_value(strategy, "operational_asset_key", "") or "") or _asset_key(str(_value(strategy, "symbol", "") or ""))
     strategy_account = str(_value(strategy, "account_login", "") or "").strip()
     strategy_expert = expert_key(strategy)
-    strategy_server = str(_value(strategy, "operational_server", "") or "").strip().casefold()
+    strategy_server = normalize_server(_value(strategy, "operational_server", ""))
     candidates.sort(key=lambda mapping: (
         0 if _asset_key(str(_value(mapping, "symbol", "") or "")) == strategy_asset else 1,
         0 if str(_value(mapping, "account_login", "") or "").strip() == strategy_account else 1,

@@ -174,8 +174,8 @@ def test_widen_strategy_status_check_migrates_old_db(tmp_path, monkeypatch):
         """
     )
     conn.execute(
-        "INSERT INTO strategies(symbol,sqx_name,mql5_name,account_login,origin,created_at) VALUES(?,?,?,?,?,?)",
-        ("US100", "Axi EA", "Axi EA", "200", "mt5", db.utcnow()),
+        "INSERT INTO strategies(symbol,sqx_name,mql5_name,account_login,origin,strategy_status,created_at) VALUES(?,?,?,?,?,?,?)",
+        ("US100", "Axi EA", "Axi EA", "200", "mt5", "live", db.utcnow()),
     )
     conn.commit()
     conn.close()
@@ -190,6 +190,10 @@ def test_widen_strategy_status_check_migrates_old_db(tmp_path, monkeypatch):
         ).fetchone()
         assert row["strategy_status"] == "axi_live"
         assert "operational_server" in row.keys()
+        categories = conn.execute(
+            "SELECT category FROM strategy_categories WHERE strategy_id=?", (row["id"],)
+        ).fetchall()
+        assert [category["category"] for category in categories] == ["live"]
         # The reference from another table still resolves after the rebuild.
         conn.execute(
             "INSERT INTO strategy_account_lineage(strategy_id,account_login,role,created_at) VALUES(?,?,?,?)",

@@ -92,6 +92,55 @@ ON terminal_events(captured_at DESC, severity);
 CREATE INDEX IF NOT EXISTS idx_terminal_events_account
 ON terminal_events(account_login, captured_at DESC);
 
+-- Read-only GuardianCuenta monitoring sources and parsed CSV observations.
+CREATE TABLE IF NOT EXISTS guardian_sources (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  terminal_id INTEGER NOT NULL UNIQUE REFERENCES terminals(id) ON DELETE CASCADE,
+  directory TEXT NOT NULL DEFAULT 'MQL5\\Files\\GuardianCuenta',
+  account_login TEXT,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS guardian_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_id INTEGER NOT NULL REFERENCES guardian_sources(id) ON DELETE CASCADE,
+  event_key TEXT NOT NULL UNIQUE,
+  occurred_at TEXT,
+  session_id TEXT,
+  event_type TEXT,
+  intervention_id TEXT,
+  position_id TEXT,
+  ticket TEXT,
+  deal TEXT,
+  symbol TEXT,
+  magic TEXT,
+  side TEXT,
+  volume REAL,
+  balance REAL,
+  net_profit REAL,
+  net_pct REAL,
+  reason TEXT,
+  capture_pct REAL,
+  detail TEXT,
+  raw_json TEXT NOT NULL,
+  captured_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_guardian_events_source_time
+ON guardian_events(source_id, occurred_at DESC, id DESC);
+
+CREATE TABLE IF NOT EXISTS guardian_current_state (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_id INTEGER NOT NULL REFERENCES guardian_sources(id) ON DELETE CASCADE,
+  state_kind TEXT NOT NULL CHECK(state_kind IN ('position','virtual')),
+  state_key TEXT NOT NULL,
+  data_json TEXT NOT NULL,
+  captured_at TEXT NOT NULL,
+  UNIQUE(source_id, state_kind, state_key)
+);
+
 CREATE TABLE IF NOT EXISTS strategies (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   identity_strategy_id INTEGER REFERENCES strategies(id) ON DELETE SET NULL,
@@ -122,6 +171,20 @@ CREATE TABLE IF NOT EXISTS strategies (
   created_at TEXT NOT NULL,
   UNIQUE(sqx_name, account_login)
 );
+
+CREATE TABLE IF NOT EXISTS strategy_categories (
+  strategy_id INTEGER NOT NULL REFERENCES strategies(id) ON DELETE CASCADE,
+  category TEXT NOT NULL CHECK(category IN ('live', 'monitor', 'candidate_live', 'axi_live')),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(strategy_id, category)
+);
+
+CREATE TRIGGER IF NOT EXISTS limit_strategy_categories
+BEFORE INSERT ON strategy_categories
+WHEN (SELECT COUNT(*) FROM strategy_categories WHERE strategy_id = NEW.strategy_id) >= 2
+BEGIN
+  SELECT RAISE(ABORT, 'A strategy can have at most two categories');
+END;
 
 CREATE TABLE IF NOT EXISTS strategy_account_lineage (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -648,6 +711,19 @@ def _widen_strategy_status_check(conn: sqlite3.Connection) -> None:
         conn.execute("PRAGMA foreign_keys=ON")
 
 
+def _migrate_strategy_statuses_to_categories(conn: sqlite3.Connection) -> None:
+    """Seed the multi-category relation from the former single status field."""
+    conn.execute(
+        """INSERT OR IGNORE INTO strategy_categories(strategy_id, category, created_at)
+           SELECT id, strategy_status, ? FROM strategies
+           WHERE strategy_status <> ''""",
+        (utcnow(),),
+    )
+    # Clear the retired column after seeding so a category intentionally removed
+    # through the new API is not resurrected on a later application restart.
+    conn.execute("UPDATE strategies SET strategy_status='' WHERE strategy_status <> ''")
+
+
 def init_db(path: Path | None = None) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     EGT_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
@@ -717,6 +793,7 @@ def init_db(path: Path | None = None) -> None:
                    ADD COLUMN paired_strategy_ids TEXT NOT NULL DEFAULT ''"""
             )
         _widen_strategy_status_check(conn)
+        _migrate_strategy_statuses_to_categories(conn)
         conn.execute(
             """CREATE UNIQUE INDEX IF NOT EXISTS idx_strategy_operational_identity
                ON strategies(LOWER(operational_server), account_login,

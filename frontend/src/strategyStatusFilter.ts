@@ -1,12 +1,12 @@
 export type StrategyStatus = '' | 'live' | 'monitor' | 'candidate_live' | 'axi_live'
-export type StrategyStatusFilter = 'all' | StrategyStatus
+export type StrategyStatusFilter = 'all' | StrategyStatus | ''
 
-type StatusStrategy = { strategy_status: StrategyStatus }
+type StatusStrategy = { strategy_statuses: readonly StrategyStatus[] }
 
 export function matchesStrategyStatus<T extends StatusStrategy>(strategy: T, filter: StrategyStatusFilter) {
-  return filter === 'all' || strategy.strategy_status === filter
+  return filter === 'all' || (filter === '' ? strategy.strategy_statuses.length === 0 : strategy.strategy_statuses.includes(filter))
 }
 
-export function withStrategyStatus<T extends { id: number; strategy_status: StrategyStatus }>(strategies: T[], strategyId: number, status: StrategyStatus) {
-  return strategies.map(strategy => strategy.id === strategyId ? { ...strategy, strategy_status: status } : strategy)
+export function withStrategyStatuses<T extends { id: number; strategy_statuses: readonly StrategyStatus[] }>(strategies: T[], strategyId: number, statuses: StrategyStatus[]) {
+  return strategies.map(strategy => strategy.id === strategyId ? { ...strategy, strategy_statuses: statuses } : strategy)
 }
