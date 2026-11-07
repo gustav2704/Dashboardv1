@@ -6,6 +6,7 @@ from app.dashboard_analytics import (
     build_calendar_profit,
     build_historical_exposure,
     build_live_exposure,
+    build_realized_period_profit,
     build_strategy_analytics,
 )
 from app import db, main
@@ -67,6 +68,19 @@ def test_calendar_profit_uses_broker_month_and_net_profit():
     result = build_calendar_profit(trades)
 
     assert result == [{"year": 2026, "months": [10.0, *([0.0] * 11)], "total": 10.0}]
+
+
+def test_realized_period_profit_uses_broker_week_month_and_year_boundaries():
+    now = datetime(2026, 3, 18, 12, tzinfo=timezone.utc)
+    trades = [
+        {"close_time_msc": msc("2026-03-16T00:30:00"), "net_profit": 10},
+        {"close_time_msc": msc("2026-03-10T12:00:00"), "net_profit": 20},
+        {"close_time_msc": msc("2026-02-28T23:30:00"), "net_profit": 30},
+        {"close_time_msc": msc("2025-12-31T23:30:00"), "net_profit": 40},
+    ]
+
+    # 23:30 UTC belongs to the following broker-calendar day (UTC+02:00).
+    assert build_realized_period_profit(trades, now) == {"week": 10.0, "month": 60.0, "year": 100.0}
 
 
 def test_strategy_analytics_builds_temporal_buckets_and_drawdown_episodes():
@@ -180,3 +194,56 @@ def test_dashboard_and_strategy_analytics_contracts_use_filtered_live_data(tmp_p
     assert strategy["trade_count"] == 1
     assert strategy["temporal"]["hours"][13]["count"] == 1
     assert strategy["drawdown"]["percentage_available"] is True
+
+
+def test_journal_equity_curve_places_mt5_deposits_at_their_real_time(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "capital.db")
+    db.init_db()
+    created = db.utcnow()
+    funded = msc("2026-08-16T09:00:00")
+    first_open, first_close = msc("2026-08-17T10:00:00"), msc("2026-08-17T11:00:00")
+    deposited = msc("2026-08-19T15:05:00")
+    second_open, second_close = msc("2026-08-20T10:00:00"), msc("2026-08-20T11:00:00")
+    with db.session() as conn:
+        terminal = conn.execute(
+            "INSERT INTO terminals(name,data_dir,account_login,server,status,created_at,last_seen) VALUES(?,?,?,?,?,?,?)",
+            ("Live", str(tmp_path / "live"), "A1", "Broker", "connected", created, created),
+        ).lastrowid
+        conn.execute(
+            "INSERT INTO strategies(symbol,sqx_name,account_login,created_at) VALUES(?,?,?,?)",
+            ("NAS100", "Bot", "A1", created),
+        )
+        conn.executemany(
+            """INSERT INTO deals(terminal_id,ticket,position_id,time_msc,symbol,deal_type,entry_type,volume,price,profit,commission,swap,magic,comment,raw_json)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            [
+                (terminal, 10, 10, first_open, "NAS100", "BUY", "IN", 1, 1, 0, 0, 0, 5, "", "{}"),
+                (terminal, 11, 10, first_close, "NAS100", "SELL", "OUT", 1, 1, -100, 0, 0, 5, "", "{}"),
+                (terminal, 12, 12, second_open, "NAS100", "BUY", "IN", 1, 1, 0, 0, 0, 5, "", "{}"),
+                (terminal, 13, 12, second_close, "NAS100", "SELL", "OUT", 1, 1, -50, 0, 0, 5, "", "{}"),
+            ],
+        )
+        conn.executemany(
+            """INSERT INTO capital_movements(account_login,terminal_id,ticket,time_msc,deal_type,amount,comment,raw_json)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            [
+                ("A1", terminal, 1, funded, "BALANCE", 1000, "Initial", "{}"),
+                ("A1", terminal, 2, deposited, "BALANCE", 500, "Deposit", "{}"),
+                ("A1", terminal, 3, deposited, "CREDIT", 300, "Bonus credit", "{}"),
+            ],
+        )
+        conn.execute(
+            "INSERT INTO account_snapshots(terminal_id,captured_at,balance,equity,margin,free_margin,raw_json) VALUES(?,?,?,?,?,?,?)",
+            (terminal, "2026-08-21T00:00:00+00:00", 1350, 1350, 0, 1350, "{}"),
+        )
+
+    journal = main.journal_analysis_data("all", account="A1")
+    assert journal["initial_capitals"] == {"A1": 1000}
+    assert journal["initial_capital_sources"] == {"A1": "mt5"}
+    assert [(item["time_msc"], item["amount"]) for item in journal["capital_movements"]] == [(deposited, 500)]
+    curve = [(point["time_msc"], point["type"], point["equity"]) for point in journal["real_equity_curve"]]
+    assert curve == [
+        (first_close, "trade", 900),
+        (deposited, "capital", 1400),
+        (second_close, "trade", 1350),
+    ]

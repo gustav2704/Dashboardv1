@@ -58,6 +58,7 @@ def test_strategy_selection_round_trip_and_dashboard_persistence(
 ):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "selection.db")
     monkeypatch.setattr(main, "suggestions", lambda: [])
+    main._invalidate_api_snapshot()
     db.init_db()
     with db.session() as conn:
         strategy_id = conn.execute(
@@ -76,6 +77,11 @@ def test_strategy_selection_round_trip_and_dashboard_persistence(
         )
 
     client = TestClient(main.app)
+    # Prime the API snapshot first.  The selection endpoint must invalidate
+    # this cached response so a subsequent filter/dashboard request sees the
+    # newly stopped state immediately.
+    assert client.get("/api/dashboard").json()["strategies"][0]["selection"] is False
+
     checked = client.put(
         f"/api/strategies/{strategy_id}/selection", json={"selection": True}
     )
@@ -83,6 +89,7 @@ def test_strategy_selection_round_trip_and_dashboard_persistence(
     assert checked.status_code == 200
     assert checked.json() == {"strategy_id": strategy_id, "selection": True}
     assert main.dashboard_data()["strategies"][0]["selection"] is True
+    assert client.get("/api/dashboard").json()["strategies"][0]["selection"] is True
     assert main.get_strategy(strategy_id)["selection"] is True
 
     unchecked = client.put(

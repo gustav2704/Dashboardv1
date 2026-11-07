@@ -97,7 +97,7 @@ def test_manual_risk_acceptance_is_run_scoped_and_report_is_served(tmp_path, mon
     assert tuple(stored) == (None, None)
 
 
-def test_manual_risk_acceptance_allows_identity_backtest_from_display_strategy(tmp_path, monkeypatch):
+def test_manual_risk_acceptance_is_scoped_to_the_display_strategy_own_backtest(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "risk-acceptance-identity.db")
     monkeypatch.setattr(main, "ACTIVE_BACKTEST_BROKER", "FPM")
     monkeypatch.setattr(main, "BACKTEST_DIR", tmp_path / "backtests")
@@ -118,10 +118,21 @@ def test_manual_risk_acceptance_allows_identity_backtest_from_display_strategy(t
         ).lastrowid
         _add_vps_evidence(conn, display_id, "visible-bot")
         run_id = _completed_risk_alert_run(
-            conn, identity_id, report_path, "2026-01-01T00:00:00+00:00"
+            conn, display_id, report_path, "2026-01-01T00:00:00+00:00"
+        )
+        # A newer run of the identity strategy must neither be shown on nor
+        # block acceptance of the display strategy's own latest run.
+        identity_run_id = _completed_risk_alert_run(
+            conn, identity_id, report_path, "2026-02-01T00:00:00+00:00"
         )
 
-    accepted = TestClient(main.app).put(
+    client = TestClient(main.app)
+    inherited = client.put(
+        f"/api/strategies/{display_id}/backtest-risk-acceptance",
+        json={"accepted": True, "run_id": identity_run_id},
+    )
+    assert inherited.status_code == 422
+    accepted = client.put(
         f"/api/strategies/{display_id}/backtest-risk-acceptance",
         json={"accepted": True, "run_id": run_id},
     )

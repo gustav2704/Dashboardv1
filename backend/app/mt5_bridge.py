@@ -18,6 +18,8 @@ from .ssh_bridge import SSHBridge, SSHBridgeError
 
 
 BRIDGE_RELATIVE = Path("MQL5") / "Files" / "Dashboardv1"
+# Re-read a week of balance deals each sync so late broker postings are kept.
+CAPITAL_CURSOR_OVERLAP_MSC = 7 * 24 * 3600 * 1000
 _latest_chart_response_ids: dict[int, str] = {}
 logger = logging.getLogger(__name__)
 
@@ -230,6 +232,9 @@ def request_sync(terminal_id: int) -> dict[str, Any]:
             "request_id": f"sync-{terminal_id}-{int(time.time())}",
             "command": "sync",
             "since_msc": int(terminal["cursor_msc"] or 0),
+            "capital_since_msc": max(
+                0, int(terminal["capital_cursor_msc"] or 0) - CAPITAL_CURSOR_OVERLAP_MSC
+            ),
             "requested_at": utcnow(),
         }
         if _is_remote(terminal):
@@ -354,6 +359,29 @@ def _upsert_sync_response(conn: Any, terminal: Any, payload: dict[str, Any]) -> 
                 json.dumps(deal, ensure_ascii=False),
             ),
         )
+    capital_cursor = int(terminal["capital_cursor_msc"] or 0)
+    if "capital_movements" in payload:
+        # Only bridges that report balance deals advance this cursor; older
+        # bridges keep it at zero so an upgrade backfills the full history.
+        capital_cursor = max(capital_cursor, max_cursor)
+        for movement in payload.get("capital_movements") or []:
+            time_msc = int(movement.get("time_msc", 0))
+            capital_cursor = max(capital_cursor, time_msc)
+            conn.execute(
+                """INSERT OR IGNORE INTO capital_movements(
+                     account_login,terminal_id,ticket,time_msc,deal_type,amount,comment,raw_json
+                   ) VALUES(?,?,?,?,?,?,?,?)""",
+                (
+                    account,
+                    terminal_id,
+                    int(movement.get("ticket", 0)),
+                    time_msc,
+                    str(movement.get("deal_type", "")),
+                    float(movement.get("amount", 0)),
+                    str(movement.get("comment", "")),
+                    json.dumps(movement, ensure_ascii=False),
+                ),
+            )
     conn.execute("DELETE FROM positions WHERE terminal_id=?", (terminal_id,))
     for position in payload.get("positions", []):
         conn.execute(
@@ -413,8 +441,8 @@ def _upsert_sync_response(conn: Any, terminal: Any, payload: dict[str, Any]) -> 
     )
     conn.execute(
         """UPDATE terminals SET account_login=?,server=?,status='connected',last_seen=?,last_sync=?,
-           cursor_msc=?,last_error=NULL WHERE id=?""",
-        (account, server, generated_at, utcnow(), max_cursor, terminal_id),
+           cursor_msc=?,capital_cursor_msc=?,last_error=NULL WHERE id=?""",
+        (account, server, generated_at, utcnow(), max_cursor, capital_cursor, terminal_id),
     )
 
 
@@ -608,21 +636,21 @@ def ingest_responses(
     sync_count = chart_count = errors = 0
     transport_failed_terminal_ids: set[int] = set()
     with session() as conn:
-        # GuardianCuenta terminals are read exclusively through their CSV files
-        # over SFTP.  They never produce DashboardBridge responses, so including
-        # them here makes the stale-response check incorrectly mark a healthy
-        # Guardian source as disconnected.
+        # Dedicated GuardianCuenta terminals are read exclusively through their
+        # CSV files over SFTP. Shared sources still run DashboardBridge and must
+        # remain eligible for normal account monitoring.
         guardian_terminal_ids = {
             int(row["terminal_id"])
             for row in conn.execute(
-                "SELECT terminal_id FROM guardian_sources WHERE enabled=1"
+                "SELECT terminal_id FROM guardian_sources WHERE enabled=1 AND bridge_excluded=1"
             )
         }
         if terminal_ids is None:
             terminals = conn.execute(
                 """SELECT * FROM terminals
                    WHERE id NOT IN (
-                     SELECT terminal_id FROM guardian_sources WHERE enabled=1
+                     SELECT terminal_id FROM guardian_sources
+                     WHERE enabled=1 AND bridge_excluded=1
                    )"""
             ).fetchall()
         else:
@@ -634,13 +662,30 @@ def ingest_responses(
                 f"SELECT * FROM terminals WHERE id IN ({placeholders})", selected_ids
             ).fetchall()
         processed_terminal_ids = [int(terminal["id"]) for terminal in terminals]
-        for terminal in terminals:
+        # A normal account poll has no reason to read chart responses.
+        # Those are collected by the chart request path, keeping a slow
+        # VPS from multiplying normal refresh latency.
+        candidates = ("sync", "chart") if include_charts else ("sync",)
+
+        def record_error(terminal: Any, exc: Exception) -> None:
+            nonlocal errors
+            errors += 1
+            # A readable bridge folder with no new MT5 reply means the
+            # terminal is still waiting for a heartbeat (especially
+            # just after the dashboard starts).  Only an SSH transport
+            # failure is evidence that the VPS itself is unreachable.
+            if isinstance(exc, SSHBridgeError):
+                transport_failed_terminal_ids.add(int(terminal["id"]))
+            conn.execute(
+                "UPDATE terminals SET last_error=? WHERE id=?", (str(exc)[:500], terminal["id"])
+            )
+
+        def read_responses(terminal: Any) -> list[tuple[str, Any, Exception | None]]:
+            # Only file/SSH I/O happens here so VPS round trips can overlap;
+            # every database write stays on this thread's connection below.
             remote = _is_remote(terminal)
             root = Path(terminal["data_dir"]) / BRIDGE_RELATIVE / "Responses" if not remote else None
-            # A normal account poll has no reason to read chart responses.
-            # Those are collected by the chart request path, keeping a slow
-            # VPS from multiplying normal refresh latency.
-            candidates = ("sync", "chart") if include_charts else ("sync",)
+            replies: list[tuple[str, Any, Exception | None]] = []
             for kind in candidates:
                 try:
                     if remote:
@@ -654,6 +699,22 @@ def ingest_responses(
                         if not path.is_file():
                             continue
                         payload = json.loads(path.read_text(encoding="utf-8-sig"))
+                    replies.append((kind, payload, None))
+                except Exception as exc:
+                    replies.append((kind, None, exc))
+            return replies
+
+        # One slow VPS must not serially delay every other account's reply.
+        with ThreadPoolExecutor(max_workers=max(1, min(len(terminals), 5))) as executor:
+            fetched = list(executor.map(read_responses, terminals))
+
+        remote_archives: list[tuple[Any, str]] = []
+        for terminal, replies in zip(terminals, fetched):
+            remote = _is_remote(terminal)
+            for kind, payload, read_error in replies:
+                try:
+                    if read_error is not None:
+                        raise read_error
                     if payload.get("status", "ok") != "ok":
                         raise ValueError(str(payload.get("message", "MT5 response returned an error")))
                     if kind == "sync":
@@ -663,23 +724,31 @@ def ingest_responses(
                         _upsert_chart_response(conn, terminal["id"], payload)
                         chart_count += 1
                     if remote:
-                        SSHBridge(terminal).archive_response(kind)
+                        remote_archives.append((terminal, kind))
                     else:
-                        assert root is not None
+                        root = Path(terminal["data_dir"]) / BRIDGE_RELATIVE / "Responses"
                         archive = root / "Archive"
                         archive.mkdir(parents=True, exist_ok=True)
-                        os.replace(path, archive / f"{kind}-{int(time.time() * 1000)}.json")
+                        os.replace(
+                            root / f"{kind}.response.json",
+                            archive / f"{kind}-{int(time.time() * 1000)}.json",
+                        )
                 except Exception as exc:
-                    errors += 1
-                    # A readable bridge folder with no new MT5 reply means the
-                    # terminal is still waiting for a heartbeat (especially
-                    # just after the dashboard starts).  Only an SSH transport
-                    # failure is evidence that the VPS itself is unreachable.
-                    if isinstance(exc, SSHBridgeError):
-                        transport_failed_terminal_ids.add(int(terminal["id"]))
-                    conn.execute(
-                        "UPDATE terminals SET last_error=? WHERE id=?", (str(exc)[:500], terminal["id"])
-                    )
+                    record_error(terminal, exc)
+
+        def archive_remote(item: tuple[Any, str]) -> Exception | None:
+            try:
+                SSHBridge(item[0]).archive_response(item[1])
+            except Exception as exc:
+                return exc
+            return None
+
+        if remote_archives:
+            with ThreadPoolExecutor(max_workers=min(len(remote_archives), 5)) as executor:
+                archive_errors = list(executor.map(archive_remote, remote_archives))
+            for (terminal, _kind), archive_error in zip(remote_archives, archive_errors):
+                if archive_error is not None:
+                    record_error(terminal, archive_error)
         now = datetime.now(timezone.utc).timestamp()
         # `terminals` was read before processing the response files.  Do not
         # use those stale row objects here: a successful sync may just have
@@ -737,7 +806,8 @@ def _polling_terminal_ids(conn: Any) -> list[int]:
     candidates = conn.execute(
         """SELECT * FROM terminals
            WHERE id NOT IN (
-             SELECT terminal_id FROM guardian_sources WHERE enabled=1
+             SELECT terminal_id FROM guardian_sources
+             WHERE enabled=1 AND bridge_excluded=1
            )
              AND data_dir NOT LIKE 'archive://%'
              AND data_dir NOT LIKE 'import://%'
@@ -767,9 +837,8 @@ def sync_all(*, response_wait_seconds: float = 0.0) -> dict[str, Any]:
     Refresh uses a short, bounded response window so that one click includes
     the snapshot it requested rather than only queuing it for a later cycle.
     """
-    # Guardian sources are explicitly observer-only: they expose their own
-    # CSV files over SFTP and must never receive DashboardBridge requests.
-    # Keep them out of both response ingestion and request creation.
+    # Only dedicated Guardian sources are observer-only. Shared sources expose
+    # Guardian CSVs over SFTP and continue to receive DashboardBridge polls.
     with session() as conn:
         terminal_ids = _polling_terminal_ids(conn)
     # Strategy discovery is CPU-heavy and unrelated to connectivity. The

@@ -33,7 +33,7 @@
   background: #0c1b26;
   color: #8ca1af;
   cursor: pointer;
-  font-size: 11px;
+  font-size: 13px;
 }
 .equity-view-toggle button:last-child { border-right: 0; }
 .equity-view-toggle button.active { background: #10332f; color: #c9fff6; }
@@ -91,7 +91,7 @@
 .account-panel-title { align-items: center; margin-bottom: 16px; }
 .account-panel-title > span { color: #dceaf1; font-weight: 700; }
 .distribution-list { display: grid; max-height: 330px; gap: 12px; overflow-y: auto; padding-right: 6px; }
-.distribution-list > div > div { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 5px; font-size: 12px; }
+.distribution-list > div > div { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 5px; font-size: 14px; }
 .distribution-list span { color: #8297a5; }
 .distribution-track { display: block; height: 5px; overflow: hidden; border-radius: 999px; background: #172b38; }
 .distribution-track i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #0ea5e9, #2dd4bf); }
@@ -118,15 +118,15 @@
   border-radius: 999px;
   background: #0e202b;
   color: #b8cbd5;
-  font-size: 11px;
+  font-size: 13px;
   white-space: nowrap;
 }
-.temporal-badge b { display: grid; width: 15px; height: 15px; place-items: center; border-radius: 50%; font-size: 11px; }
+.temporal-badge b { display: grid; width: 15px; height: 15px; place-items: center; border-radius: 50%; font-size: 13px; }
 .temporal-badge.best { border-color: #1f685d; color: #a5f3e2; }
 .temporal-badge.best b { background: #124c45; color: #5eead4; }
 .temporal-badge.worst { border-color: #74404b; color: #fecdd3; }
 .temporal-badge.worst b { background: #512630; color: #fda4af; }
-.temporal-legend { display: inline-flex; align-items: center; gap: 7px; color: #8fa4b0; font-size: 10px; white-space: nowrap; }
+.temporal-legend { display: inline-flex; align-items: center; gap: 7px; color: #8fa4b0; font-size: 12px; white-space: nowrap; }
 .temporal-legend > span { color: #c5d7df; }
 .temporal-legend i { width: 62px; height: 6px; border-radius: 99px; }
 .temporal-legend i.positive { background: linear-gradient(90deg, rgba(45,212,191,.25), #2dd4bf); }
@@ -141,21 +141,26 @@
 .temporal-hours .temporal-bar-values { grid-template-columns: repeat(24, minmax(32px, 1fr)); }
 .temporal-bar-values > div { min-width: 0; padding: 3px 1px; text-align: center; }
 .temporal-bar-values span,
-.temporal-bar-values small { display: block; overflow: hidden; color: #718895; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
-.temporal-bar-values strong { display: block; margin: 2px 0; overflow: hidden; color: #d8e8ef; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.temporal-bar-values small { display: block; overflow: hidden; color: #718895; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.temporal-bar-values strong { display: block; margin: 2px 0; overflow: hidden; color: #d8e8ef; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .temporal-bar-values .low-sample strong,
 .temporal-bar-values .low-sample small { color: #d9b955; }
 .temporal-chart-tooltip { min-width: 150px; }
 .temporal-chart-tooltip > strong { display: block; margin-bottom: 6px; color: #e4f4fb; }
-.temporal-chart-tooltip > div { display: flex; justify-content: space-between; gap: 16px; color: #8fa4b0; font-size: 11px; }
+.temporal-chart-tooltip > div { display: flex; justify-content: space-between; gap: 16px; color: #8fa4b0; font-size: 13px; }
 .temporal-chart-tooltip b { color: #d9e8ee; }
 
 .drawdown-episodes { min-width: 0; }
 .drawdown-episodes table { width: 100%; border-collapse: collapse; }
 .drawdown-episodes th,
 .drawdown-episodes td { padding: 10px 12px; border-bottom: 1px solid #1d303d; text-align: left; white-space: nowrap; }
-.drawdown-episodes th { color: #738a98; font-size: 10px; text-transform: uppercase; }
+.drawdown-episodes th { color: #738a98; font-size: 12px; text-transform: uppercase; }
 .drawdown-ongoing { color: #fbbf24; font-weight: 700; }
+.overview-advanced-analytics { margin-top: 10px; }
+.overview-advanced-tabs { display: flex; gap: 3px; margin: 16px 0; padding: 3px; overflow-x: auto; border: 1px solid var(--line); border-radius: 7px; background: #08141d; }
+.overview-advanced-tabs button { flex: 0 0 auto; padding: 7px 12px; border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; }
+.overview-advanced-tabs button.active { background: #263c48; color: #e5f3f8; }
+.overview-trade-statistics { margin-top: 0; }
 
 @media (max-width: 1250px) {
   .account-kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }

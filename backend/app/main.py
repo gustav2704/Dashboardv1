@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import re
 import subprocess
 import sys
@@ -24,8 +25,8 @@ from .config import (
     ACTIVE_BACKTEST_BROKER, BACKTEST_DIR, DEFAULT_TERMINAL, FRONTEND_DIST,
     REFRESH_SECONDS, SYNC_RESPONSE_WAIT_SECONDS,
 )
-from .db import DB_PATH, DEFAULT_ALERTS, init_db, rows, session, utcnow
-from .dashboard_analytics import build_calendar_profit, build_historical_exposure, build_live_exposure, build_strategy_analytics
+from .db import DB_PATH, DEFAULT_ACCOUNT_INITIAL_CAPITALS, DEFAULT_ALERTS, init_db, rows, session, utcnow
+from .dashboard_analytics import build_calendar_profit, build_historical_exposure, build_live_exposure, build_realized_period_profit, build_strategy_analytics
 from .history_import import import_tradebuddy_history, imported_history_index, imported_history_trades
 from .identity_audit import audit as identity_audit
 from .expert_identity_migration import audit as expert_identity_audit
@@ -151,6 +152,16 @@ class AccountAliases(BaseModel):
     aliases: dict[str, str] = Field(default_factory=dict)
 
 
+class AccountInitialCapitals(BaseModel):
+    capitals: dict[str, float] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_capitals(self) -> "AccountInitialCapitals":
+        if any(not str(account).strip() or not math.isfinite(value) or value <= 0 for account, value in self.capitals.items()):
+            raise ValueError("Each initial capital must be a positive finite amount")
+        return self
+
+
 class BacktestCreate(BaseModel):
     strategy_id: int
     profile: str = Field(default="reference", pattern="^(reference|sqx|darwinex|live)$")
@@ -201,12 +212,14 @@ class StrategySelectionUpdate(BaseModel):
 
 
 class StrategyStatusUpdate(BaseModel):
-    statuses: list[Literal["live", "monitor", "candidate_live", "axi_live"]] = Field(max_length=2)
+    statuses: list[Literal["live", "monitor", "candidate_live", "axi_live", "favorite", "to_modify"]] = Field(max_length=4)
 
     @model_validator(mode="after")
     def statuses_must_be_unique(self) -> "StrategyStatusUpdate":
         if len(set(self.statuses)) != len(self.statuses):
             raise ValueError("Strategy categories must be unique")
+        if len([s for s in self.statuses if s not in ("favorite", "to_modify")]) > 2:
+            raise ValueError("A strategy can have at most two categories")
         return self
 
 
@@ -797,19 +810,26 @@ def _build_real_equity_curve(
     accounts: list[str],
     trades: list[dict[str, Any]],
     balances: dict[str, float],
+    initial_capitals: dict[str, float] | None = None,
+    capital_movements: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Build a trade-by-trade equity curve starting from real initial capital.
+    """Build a trade-by-trade equity curve from configured account capital.
 
-    The starting balance is derived from the earliest available snapshot minus
-    trade P/L before that snapshot, so the curve accurately begins at the real
-    initial capital. Trades are applied sequentially and any remaining gap to
-    the latest real balance (e.g. from deposits/withdrawals) is added as a
-    single closing capital adjustment point.
+    A configured deposit is authoritative.  Accounts without one retain the
+    legacy snapshot-derived fallback so historical/live accounts remain usable,
+    but that fallback is deliberately not used for configured demo accounts.
+    Deposits and withdrawals reported by MT5 after the starting capital are
+    plotted at their real time.
     """
     if not trades and not accounts:
         return []
 
-    start_balance = 0.0
+    configured = initial_capitals or {}
+    start_balance = sum(
+        float(configured[account])
+        for account in accounts
+        if account in configured and float(configured[account]) > 0
+    )
     if accounts:
         placeholders = ",".join("?" for _ in accounts)
         snapshots = rows(conn.execute(
@@ -829,8 +849,10 @@ def _build_real_equity_curve(
                 "balance": float(s["balance"] or 0),
             })
 
-        # Derive initial capital: first snapshot balance minus trade P/L before it
+        # Only accounts without an explicit deposit use the legacy fallback.
         for acc, acc_snaps in by_account.items():
+            if acc in configured and float(configured[acc]) > 0:
+                continue
             if acc_snaps:
                 first = acc_snaps[0]
                 pnl_before_first = sum(
@@ -843,14 +865,23 @@ def _build_real_equity_curve(
     if start_balance < 0:
         start_balance = 0.0
 
-    # Build events: only trades, no interleaved capital events (they are handled
-    # as a single closing adjustment instead)
+    # Trades plus MT5 capital movements; any residual mismatch against the
+    # live balance is still reported as a single closing adjustment.
     all_events: list[dict[str, Any]] = []
     for t in trades:
         all_events.append({
             "time_msc": int(t.get("close_time_msc") or 0),
             "net_profit": float(t.get("net_profit") or 0),
             "label": str(t.get("symbol") or t.get("strategy_name") or ""),
+            "type": "trade",
+        })
+    for movement in capital_movements or []:
+        amount = float(movement["amount"])
+        all_events.append({
+            "time_msc": int(movement["time_msc"]),
+            "net_profit": amount,
+            "label": "Depósito" if amount >= 0 else "Retiro",
+            "type": "capital",
         })
     all_events.sort(key=lambda x: x["time_msc"])
 
@@ -865,12 +896,12 @@ def _build_real_equity_curve(
             "time_msc": e["time_msc"],
             "equity": round(current_equity, 2),
             "net_profit": e["net_profit"],
-            "type": "trade",
+            "type": e["type"],
             "label": e["label"],
         })
 
     # If the final calculated equity does not match the real current balance,
-    # add a single closing adjustment for net capital movements.
+    # add a single closing adjustment for capital movements MT5 did not report.
     latest_total = sum(balances.get(acc, 0.0) for acc in accounts) if balances else 0.0
     if curve and latest_total > 0 and abs(curve[-1]["equity"] - latest_total) >= 1.0:
         adjustment = round(latest_total - curve[-1]["equity"], 2)
@@ -917,6 +948,28 @@ def _canonical_terminal_rows(terminals: list[dict[str, Any]]) -> list[dict[str, 
         if candidate_rank > current_rank:
             selected[key] = terminal
     return sorted(selected.values(), key=lambda terminal: str(terminal.get("name") or ""))
+
+
+def _account_capital_movements(conn: Any, accounts: list[str]) -> dict[str, list[dict[str, Any]]]:
+    """Return MT5 deposits/withdrawals (BALANCE deals) per account, oldest first."""
+    if not accounts:
+        return {}
+    placeholders = ",".join("?" for _ in accounts)
+    result: dict[str, list[dict[str, Any]]] = {}
+    for row in conn.execute(
+        f"""SELECT account_login,ticket,time_msc,amount,comment FROM capital_movements
+             WHERE account_login IN ({placeholders}) AND deal_type='BALANCE' AND amount<>0
+             ORDER BY time_msc,ticket""",
+        accounts,
+    ):
+        result.setdefault(str(row["account_login"]), []).append({
+            "account": str(row["account_login"]),
+            "ticket": int(row["ticket"]),
+            "time_msc": int(row["time_msc"]),
+            "amount": float(row["amount"]),
+            "comment": str(row["comment"] or ""),
+        })
+    return result
 
 
 def _journal_balance_series(
@@ -1000,7 +1053,7 @@ def _journal_balance_series(
 
 
 def _overview_months(now: datetime | None = None) -> list[dict[str, Any]]:
-    """Return the current UTC month followed by the three preceding months."""
+    """Return the current UTC month followed by the five preceding months."""
     now = now or datetime.now(timezone.utc)
     year, month = now.year, now.month
     labels = ("Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic")
@@ -1012,7 +1065,7 @@ def _overview_months(now: datetime | None = None) -> list[dict[str, Any]]:
         "start_msc": int(start.timestamp() * 1000),
         "end_msc": int(next_month.timestamp() * 1000) - 1,
     }]
-    for _ in range(3):
+    for _ in range(5):
         month -= 1
         if month == 0:
             year -= 1
@@ -1651,7 +1704,7 @@ def dashboard_data(
         guardian_terminal_ids = {
             int(row["terminal_id"])
             for row in conn.execute(
-                "SELECT terminal_id FROM guardian_sources WHERE enabled=1"
+                "SELECT terminal_id FROM guardian_sources WHERE enabled=1 AND bridge_excluded=1"
             )
         }
         broker_terminal_rows = [
@@ -1677,7 +1730,8 @@ def dashboard_data(
             """SELECT strategy_id, category FROM strategy_categories
                ORDER BY strategy_id,
                  CASE category WHEN 'live' THEN 1 WHEN 'monitor' THEN 2
-                 WHEN 'candidate_live' THEN 3 WHEN 'axi_live' THEN 4 END"""
+                 WHEN 'candidate_live' THEN 3 WHEN 'axi_live' THEN 4
+                 WHEN 'favorite' THEN 5 WHEN 'to_modify' THEN 6 END"""
         ).fetchall():
             strategy_statuses_by_id.setdefault(int(row["strategy_id"]), []).append(row["category"])
         mappings_by_strategy = _dashboard_confirmed_mappings(conn)
@@ -1739,6 +1793,12 @@ def dashboard_data(
                     str(deployment["timeframe"]).strip().upper()
                 )
         account_balances, account_initial_capitals = _cached_account_snapshot_maps(conn)
+        # Explicit deposits override the oldest local snapshot, which may have
+        # been collected after the account had already traded.
+        account_initial_capitals = {
+            **account_initial_capitals,
+            **_account_initial_capitals(conn),
+        }
         output = []
         overview_calendar_trades: list[dict[str, Any]] = []
         overview_calendar_seen: set[tuple[Any, ...]] = set()
@@ -2122,6 +2182,8 @@ def dashboard_data(
                     else "attached_inactive" if "attached_inactive" in deployment_states
                     else "observed"
                 )
+            elif vps_mappings and (trades or positions):
+                deployment_state = "trade_observed"
             known_deployment_magic = (
                 any(item["magic"] is not None for item in deployments)
                 or any(mapping["magic"] not in (None, 0) for mapping in live_mappings)
@@ -2137,7 +2199,8 @@ def dashboard_data(
                 for item in deployments
             )
             activity_state = (
-                "not_deployed" if not deployments
+                "observed_by_trade" if not deployments and (trades or positions)
+                else "not_deployed" if not deployments
                 else "undetermined" if not known_deployment_magic
                 else "with_recent_trades" if trades or positions or inventory_recent_trade
                 else "without_recent_trades" if inventory_activity_known or live_mappings
@@ -2281,6 +2344,7 @@ def dashboard_data(
             ),
         },
         "calendar_profit": overview_calendar_profit,
+        "realized_period_profit": build_realized_period_profit(overview_calendar_trades),
     }
     totals = {
         "strategies": len(output),
@@ -2515,6 +2579,8 @@ def journal_analysis_data(
                     "magic_number": int(trade.get("magic") or 0),
                     "open_time_msc": int(trade.get("open_time_msc") or close_msc),
                     "close_time_msc": close_msc, "direction": str(trade.get("direction") or ""),
+                    "open_price": float(trade.get("open_price") or 0),
+                    "close_price": float(trade.get("close_price") or 0),
                     "volume": float(trade.get("volume") or 0), "profit": float(trade.get("profit") or 0),
                     "commission": float(trade.get("commission") or 0), "swap": float(trade.get("swap") or 0),
                     "net_profit": float(trade.get("net_profit") or 0),
@@ -2554,20 +2620,60 @@ def journal_analysis_data(
                 "magic_number": int(trade.get("magic") or 0),
                 "open_time_msc": int(trade.get("open_time_msc") or close_msc),
                 "close_time_msc": close_msc, "direction": str(trade.get("direction") or ""),
+                "open_price": float(trade.get("open_price") or 0),
+                "close_price": float(trade.get("close_price") or 0),
                 "volume": float(trade.get("volume") or 0), "profit": float(trade.get("profit") or 0),
                 "commission": float(trade.get("commission") or 0), "swap": float(trade.get("swap") or 0),
                 "net_profit": float(trade.get("net_profit") or 0),
             })
+        def snapshot_filtered_floating(raw_json: str) -> float | None:
+            try:
+                payload = json.loads(raw_json or "{}")
+                positions = payload.get("positions", [])
+                values = [
+                    float(position.get("profit") or 0) + float(position.get("swap") or 0)
+                    for position in positions
+                    if selected_assets is None
+                    or asset_key(str(position.get("symbol") or "")) in selected_assets
+                ]
+                return sum(values)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return None
+
+        # Fetch only the preferred latest observation per account.  Pulling the
+        # complete snapshot table here made a cold Performance request transfer
+        # tens of thousands of large raw_json values before discarding all but
+        # one row per account.  The preferred row is always some terminal's
+        # latest snapshot, so rank only those (index lookup per terminal)
+        # instead of window-sorting every snapshot and its raw_json.
         balance_rows = conn.execute(
-            """SELECT t.account_login,s.balance,t.data_dir,t.status,s.captured_at,s.id
-               FROM account_snapshots s JOIN terminals t ON t.id=s.terminal_id
-               WHERE t.account_login IS NOT NULL AND t.account_login<>''
-               ORDER BY t.account_login,
-                        CASE WHEN t.data_dir LIKE 'archive://%' OR t.data_dir LIKE 'import://%' THEN 1 ELSE 0 END,
-                        CASE WHEN t.status='connected' THEN 0 ELSE 1 END,
-                        s.captured_at DESC,s.id DESC"""
+            """WITH latest AS (
+                   SELECT t.account_login,t.data_dir,t.status,
+                          (SELECT s.id FROM account_snapshots s
+                            WHERE s.terminal_id=t.id
+                            ORDER BY s.captured_at DESC,s.id DESC LIMIT 1) AS snapshot_id
+                     FROM terminals t
+                    WHERE t.account_login IS NOT NULL AND t.account_login<>''
+               ),
+               ranked AS (
+                   SELECT l.account_login,s.balance,s.equity,s.margin,s.free_margin,s.raw_json,
+                          l.data_dir,l.status,s.captured_at,s.id,
+                          ROW_NUMBER() OVER (
+                              PARTITION BY l.account_login
+                              ORDER BY CASE WHEN l.data_dir LIKE 'archive://%' OR l.data_dir LIKE 'import://%' THEN 1 ELSE 0 END,
+                                       CASE WHEN l.status='connected' THEN 0 ELSE 1 END,
+                                       s.captured_at DESC,s.id DESC
+                          ) AS preferred_row
+                     FROM latest l JOIN account_snapshots s ON s.id=l.snapshot_id
+               )
+               SELECT account_login,balance,equity,margin,free_margin,raw_json,
+                      data_dir,status,captured_at,id
+                 FROM ranked
+                WHERE preferred_row=1
+                ORDER BY account_login"""
         ).fetchall()
         balances: dict[str, float] = {}
+        account_snapshots: dict[str, dict[str, Any]] = {}
         analysis_accounts = {
             str(trade.get("account") or "") for trade in result
             if str(trade.get("account") or "")
@@ -2581,6 +2687,18 @@ def journal_analysis_data(
                 and (strategy_id_filter is None or login in analysis_accounts)
             ):
                 balances[login] = float(row["balance"] or 0)
+                account_snapshots[login] = {
+                    "captured_at": str(row["captured_at"]),
+                    "balance": float(row["balance"] or 0),
+                    "equity": None if row["equity"] is None else float(row["equity"]),
+                    "margin": None if row["margin"] is None else float(row["margin"]),
+                    "free_margin": None if row["free_margin"] is None else float(row["free_margin"]),
+                    "filtered_floating_profit": (
+                        snapshot_filtered_floating(str(row["raw_json"] or "{}"))
+                        if selected_assets is not None
+                        else float(row["equity"] or row["balance"] or 0) - float(row["balance"] or 0)
+                    ),
+                }
         now_msc = int(datetime.now(timezone.utc).timestamp() * 1000)
         effective_end_msc = min(end_msc, now_msc)
         trade_start_msc = min(
@@ -2594,12 +2712,102 @@ def journal_analysis_data(
             effective_start_msc,
             effective_end_msc,
         )
+        configured_initial_capitals = _account_initial_capitals(conn)
+        applied_initial_capitals: dict[str, float] = {}
+        initial_capital_sources: dict[str, str] = {}
+        capital_movements: list[dict[str, Any]] = []
+        movements_by_account = _account_capital_movements(conn, sorted(balances))
+        for account in sorted(balances):
+            # Movements up to the account's first trade in view form its
+            # starting capital; later ones are dated deposits/withdrawals.
+            anchor_msc = min(
+                (
+                    int(trade.get("open_time_msc") or trade["close_time_msc"])
+                    for trade in result if trade["account"] == account
+                ),
+                default=effective_end_msc,
+            )
+            movements = movements_by_account.get(account, [])
+            opening = [item for item in movements if item["time_msc"] <= anchor_msc]
+            capital_movements.extend(
+                item for item in movements
+                if anchor_msc < item["time_msc"] <= effective_end_msc
+            )
+            opening_capital = sum(item["amount"] for item in opening)
+            if opening and opening_capital > 0:
+                applied_initial_capitals[account] = round(opening_capital, 2)
+                initial_capital_sources[account] = "mt5"
+            elif account in configured_initial_capitals:
+                applied_initial_capitals[account] = configured_initial_capitals[account]
+                initial_capital_sources[account] = "configured"
+            else:
+                initial_capital_sources[account] = "estimated"
+        capital_movements.sort(key=lambda item: (item["time_msc"], item["ticket"]))
         real_equity_curve = _build_real_equity_curve(
             conn,
             sorted(balances),
             result,
             balances,
+            applied_initial_capitals,
+            capital_movements,
         )
+        account_snapshot_history: dict[str, list[dict[str, Any]]] = {}
+        if balances:
+            placeholders = ",".join("?" for _ in balances)
+            span_msc = max(1, effective_end_msc - effective_start_msc)
+            bucket_msc = max(60_000, math.ceil(span_msc / 600))
+            history_rows = rows(conn.execute(
+                f"""WITH candidates AS (
+                         SELECT t.account_login,s.captured_at,s.balance,s.equity,s.margin,
+                                s.free_margin,s.raw_json,t.data_dir,t.status,s.id,
+                                CAST(((julianday(s.captured_at)-2440587.5)*86400000-?)/? AS INTEGER) AS time_bucket,
+                                CASE WHEN t.data_dir LIKE 'archive://%' OR t.data_dir LIKE 'import://%' THEN 1 ELSE 0 END AS archive_rank,
+                                CASE WHEN t.status='connected' THEN 0 ELSE 1 END AS status_rank
+                           FROM account_snapshots s JOIN terminals t ON t.id=s.terminal_id
+                          WHERE t.account_login IN ({placeholders})
+                            AND julianday(s.captured_at)>=julianday(?)
+                            AND julianday(s.captured_at)<=julianday(?)
+                     ), ranked AS (
+                         SELECT *,ROW_NUMBER() OVER (
+                             PARTITION BY account_login,time_bucket
+                             ORDER BY archive_rank,status_rank,captured_at DESC,id DESC
+                         ) AS bucket_row
+                           FROM candidates
+                     )
+                     SELECT account_login,captured_at,balance,equity,margin,free_margin,
+                            raw_json,data_dir,status,id,time_bucket
+                       FROM ranked
+                      WHERE bucket_row=1
+                      ORDER BY account_login,captured_at,id""",
+                (effective_start_msc, bucket_msc, *sorted(balances),
+                 datetime.fromtimestamp(effective_start_msc / 1000, timezone.utc).isoformat(),
+                 datetime.fromtimestamp(effective_end_msc / 1000, timezone.utc).isoformat()),
+            ))
+            # Keep one observation per account/time bucket.  The bucket width is
+            # chosen dynamically so even multi-year views stay comfortably below
+            # the chart payload target while preserving intraday detail in short
+            # windows.
+            bucketed: dict[str, dict[int, dict[str, Any]]] = {}
+            for row in history_rows:
+                login = str(row["account_login"])
+                time_msc = _timestamp_msc(str(row["captured_at"]))
+                bucket = int(row["time_bucket"])
+                bucketed.setdefault(login, {})[bucket] = {
+                    "time_msc": time_msc,
+                    "balance": None if row["balance"] is None else float(row["balance"]),
+                    "equity": None if row["equity"] is None else float(row["equity"]),
+                    "margin": None if row["margin"] is None else float(row["margin"]),
+                    "free_margin": None if row["free_margin"] is None else float(row["free_margin"]),
+                    "filtered_floating_profit": (
+                        snapshot_filtered_floating(str(row["raw_json"] or "{}"))
+                        if selected_assets is not None
+                        else float(row["equity"] or row["balance"] or 0) - float(row["balance"] or 0)
+                    ),
+                }
+            account_snapshot_history = {
+                login: [values[key] for key in sorted(values)]
+                for login, values in bucketed.items()
+            }
     result.sort(key=lambda trade: (trade["close_time_msc"], trade["strategy_id"]))
     attributed_count = sum(trade["source_role"] != "unassigned" for trade in result)
     unassigned_count = sum(trade["source_role"] == "unassigned" for trade in result)
@@ -2608,7 +2816,12 @@ def journal_analysis_data(
     return {
         "generated_at": utcnow(), "window": window, "account": selected_account or None,
         "range_start_msc": effective_start_msc, "range_end_msc": effective_end_msc,
-        "balances": balances, "daily_balances": daily_balances,
+        "balances": balances, "account_snapshots": account_snapshots,
+        "initial_capitals": applied_initial_capitals,
+        "initial_capital_sources": initial_capital_sources,
+        "capital_movements": capital_movements,
+        "account_snapshot_history": account_snapshot_history,
+        "daily_balances": daily_balances,
         "capital_coverage": capital_coverage, "trades": result,
         "unassigned_groups": unassigned_groups,
         "real_equity_curve": real_equity_curve,
@@ -2850,39 +3063,47 @@ def _publish_api_snapshot(
 
 def _refresh_dashboard_snapshot(*, sync_alerts: bool) -> dict[str, Any]:
     """Build a complete revision off-lock, then publish it atomically."""
-    with _api_snapshot_refresh_lock:
+    # The build semaphore is taken per builder, not across the whole rebuild.
+    # Holding it for the full multi-second pass queued every cold user filter
+    # (e.g. a multi-account selection) behind the periodic refresh, pushing it
+    # past the frontend's request budget.  Interleaving bounds that wait to a
+    # single builder.
+    def build(builder: Any, *args: Any, **kwargs: Any) -> dict[str, Any]:
         with _api_snapshot_build_semaphore:
-            journal = journal_analysis_data("all")
-            dashboard = dashboard_data("all", sync_alerts=sync_alerts)
-            scoped_payloads: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
-            # Account selection is the most common and most expensive burst.
-            # Pre-render the small, finite set while the previous revision is
-            # still live so every account is instant immediately after publish.
-            for account in dashboard.get("broker_accounts", []):
-                selected_accounts = {str(account)}
-                scoped_journal = journal_analysis_data(
-                    "all", selected_accounts=selected_accounts,
-                    include_unassigned=False,
-                )
-                scoped_dashboard = dashboard_data(
-                    "all", selected_accounts=selected_accounts,
-                    include_unassigned=False, sync_alerts=False,
-                )
-                base_key = _api_scope_key(
-                    "dashboard", "all", None, None, selected_accounts,
-                    False, None,
-                )
-                scoped_payloads.extend((
-                    (base_key + (False,), scoped_dashboard),
-                    (base_key + (True,), _compact_dashboard_payload(scoped_dashboard)),
-                    (
-                        _api_scope_key(
-                            "journal", "all", None, None,
-                            selected_accounts, False, None,
-                        ) + ("",),
-                        scoped_journal,
-                    ),
-                ))
+            return builder(*args, **kwargs)
+
+    with _api_snapshot_refresh_lock:
+        journal = build(journal_analysis_data, "all")
+        dashboard = build(dashboard_data, "all", sync_alerts=sync_alerts)
+        scoped_payloads: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        # Account selection is the most common and most expensive burst.
+        # Pre-render the small, finite set while the previous revision is
+        # still live so every account is instant immediately after publish.
+        for account in dashboard.get("broker_accounts", []):
+            selected_accounts = {str(account)}
+            scoped_journal = build(
+                journal_analysis_data, "all",
+                selected_accounts=selected_accounts, include_unassigned=False,
+            )
+            scoped_dashboard = build(
+                dashboard_data, "all", selected_accounts=selected_accounts,
+                include_unassigned=False, sync_alerts=False,
+            )
+            base_key = _api_scope_key(
+                "dashboard", "all", None, None, selected_accounts,
+                False, None,
+            )
+            scoped_payloads.extend((
+                (base_key + (False,), scoped_dashboard),
+                (base_key + (True,), _compact_dashboard_payload(scoped_dashboard)),
+                (
+                    _api_scope_key(
+                        "journal", "all", None, None,
+                        selected_accounts, False, None,
+                    ) + ("",),
+                    scoped_journal,
+                ),
+            ))
         return _publish_api_snapshot(dashboard, journal, scoped_payloads)
 
 
@@ -3643,6 +3864,10 @@ def put_strategy_selection(
         )
         if result.rowcount == 0:
             raise HTTPException(404, "Strategy not found")
+    # The overview is served from an immutable snapshot.  Without invalidating
+    # it here, changing any dashboard filter can restore the cached row and
+    # make a just-stopped bot appear active until the next periodic refresh.
+    _invalidate_api_snapshot()
     return {
         "strategy_id": strategy_id,
         "selection": payload.selection,
@@ -3798,36 +4023,32 @@ def put_strategy_backtest_risk_acceptance(
     accepted_at = utcnow() if payload.accepted else None
     with session() as conn:
         strategy = conn.execute(
-            "SELECT id,identity_strategy_id FROM strategies WHERE id=? AND archived_at IS NULL",
+            "SELECT id FROM strategies WHERE id=? AND archived_at IS NULL",
             (strategy_id,),
         ).fetchone()
         if not strategy:
             raise HTTPException(404, "Strategy not found")
-        identity_id = _identity_strategy_id(strategy)
         if payload.accepted:
+            # Match the dashboard summary: backtests belong to the strategy
+            # that ran them and are never inherited through identity_strategy_id,
+            # so only this strategy's own latest completed run can be accepted.
             run = conn.execute(
                 """SELECT r.id,m.metrics_json
                    FROM backtest_runs r
                    JOIN backtest_metrics m ON m.run_id=r.id
-                   WHERE (r.strategy_id=? OR r.strategy_id IN (
-                            SELECT id FROM strategies WHERE identity_strategy_id=?
-                         ))
-                     AND r.id=? AND r.broker=? AND r.status='completed'
-                   ORDER BY COALESCE(r.finished_at,r.requested_at) DESC,r.id DESC
-                   LIMIT 1""",
-                (identity_id, identity_id, payload.run_id, ACTIVE_BACKTEST_BROKER),
+                   WHERE r.strategy_id=?
+                     AND r.id=? AND r.broker=? AND r.status='completed'""",
+                (strategy_id, payload.run_id, ACTIVE_BACKTEST_BROKER),
             ).fetchone()
             latest = conn.execute(
                 """SELECT r.id
                    FROM backtest_runs r
                    JOIN backtest_metrics m ON m.run_id=r.id
-                   WHERE (r.strategy_id=? OR r.strategy_id IN (
-                            SELECT id FROM strategies WHERE identity_strategy_id=?
-                         ))
+                   WHERE r.strategy_id=?
                      AND r.broker=? AND r.status='completed'
                    ORDER BY COALESCE(r.finished_at,r.requested_at) DESC,r.id DESC
                    LIMIT 1""",
-                (identity_id, identity_id, ACTIVE_BACKTEST_BROKER),
+                (strategy_id, ACTIVE_BACKTEST_BROKER),
             ).fetchone()
             if not run or not latest or int(latest["id"]) != payload.run_id:
                 raise HTTPException(422, "Only the latest completed backtest can be validated")
@@ -4825,6 +5046,30 @@ def _account_aliases(conn: Any) -> dict[str, str]:
     }
 
 
+def _account_initial_capitals(conn: Any) -> dict[str, float]:
+    """Read manually configured account deposits, never snapshot estimates."""
+    row = conn.execute(
+        "SELECT value_json FROM settings WHERE key='account_initial_capitals'"
+    ).fetchone()
+    if not row:
+        return DEFAULT_ACCOUNT_INITIAL_CAPITALS.copy()
+    try:
+        stored = json.loads(row["value_json"])
+    except (TypeError, json.JSONDecodeError):
+        stored = {}
+    if not isinstance(stored, dict):
+        stored = {}
+    capitals: dict[str, float] = {}
+    for account, value in stored.items():
+        try:
+            amount = float(value)
+        except (TypeError, ValueError):
+            continue
+        if str(account).strip() and math.isfinite(amount) and amount > 0:
+            capitals[str(account).strip()] = amount
+    return capitals
+
+
 def _known_accounts(conn: Any, aliases: dict[str, str]) -> list[str]:
     queries = (
         "SELECT account_login AS account FROM terminals",
@@ -4864,6 +5109,36 @@ def put_account_aliases(payload: AccountAliases) -> dict[str, Any]:
             ("account_aliases", json.dumps(aliases), utcnow()),
         )
         return {"accounts": _known_accounts(conn, aliases), "aliases": aliases}
+
+
+@app.get("/api/settings/account-initial-capitals")
+def get_account_initial_capitals() -> dict[str, Any]:
+    with session() as conn:
+        aliases = _account_aliases(conn)
+        return {
+            "accounts": _known_accounts(conn, aliases),
+            "capitals": _account_initial_capitals(conn),
+        }
+
+
+@app.put("/api/settings/account-initial-capitals")
+def put_account_initial_capitals(payload: AccountInitialCapitals) -> dict[str, Any]:
+    capitals = {
+        str(account).strip(): float(amount)
+        for account, amount in payload.capitals.items()
+        if str(account).strip() and math.isfinite(float(amount)) and float(amount) > 0
+    }
+    with session() as conn:
+        conn.execute(
+            """INSERT INTO settings(key,value_json,updated_at) VALUES(?,?,?)
+               ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at""",
+            ("account_initial_capitals", json.dumps(capitals), utcnow()),
+        )
+        aliases = _account_aliases(conn)
+        response = {"accounts": _known_accounts(conn, aliases), "capitals": capitals}
+    _invalidate_dashboard_lookups_cache()
+    _invalidate_api_snapshot()
+    return response
 
 
 @app.get("/api/chart/{strategy_id}")

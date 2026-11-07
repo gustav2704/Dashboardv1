@@ -99,6 +99,9 @@ CREATE TABLE IF NOT EXISTS guardian_sources (
   directory TEXT NOT NULL DEFAULT 'MQL5\\Files\\GuardianCuenta',
   account_login TEXT,
   enabled INTEGER NOT NULL DEFAULT 1,
+  -- Dedicated Guardian terminals do not run DashboardBridge. Shared sources
+  -- may be polled normally while their Guardian CSVs are read over SFTP.
+  bridge_excluded INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -174,14 +177,16 @@ CREATE TABLE IF NOT EXISTS strategies (
 
 CREATE TABLE IF NOT EXISTS strategy_categories (
   strategy_id INTEGER NOT NULL REFERENCES strategies(id) ON DELETE CASCADE,
-  category TEXT NOT NULL CHECK(category IN ('live', 'monitor', 'candidate_live', 'axi_live')),
+  category TEXT NOT NULL CHECK(category IN ('live', 'monitor', 'candidate_live', 'axi_live', 'favorite', 'to_modify')),
   created_at TEXT NOT NULL,
   PRIMARY KEY(strategy_id, category)
 );
 
 CREATE TRIGGER IF NOT EXISTS limit_strategy_categories
 BEFORE INSERT ON strategy_categories
-WHEN (SELECT COUNT(*) FROM strategy_categories WHERE strategy_id = NEW.strategy_id) >= 2
+WHEN NEW.category IN ('live', 'monitor', 'candidate_live', 'axi_live')
+  AND (SELECT COUNT(*) FROM strategy_categories WHERE strategy_id = NEW.strategy_id
+       AND category IN ('live', 'monitor', 'candidate_live', 'axi_live')) >= 2
 BEGIN
   SELECT RAISE(ABORT, 'A strategy can have at most two categories');
 END;
@@ -382,6 +387,23 @@ CREATE TABLE IF NOT EXISTS deals (
   UNIQUE(terminal_id, ticket)
 );
 
+-- Non-trade balance deals reported by DashboardBridge (deposits, withdrawals,
+-- credits, charges).  Keyed by broker account so mirrors never duplicate them.
+CREATE TABLE IF NOT EXISTS capital_movements (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_login TEXT NOT NULL,
+  terminal_id INTEGER,
+  ticket INTEGER NOT NULL,
+  time_msc INTEGER NOT NULL,
+  deal_type TEXT NOT NULL,
+  amount REAL NOT NULL,
+  comment TEXT NOT NULL DEFAULT '',
+  raw_json TEXT NOT NULL,
+  UNIQUE(account_login, ticket)
+);
+CREATE INDEX IF NOT EXISTS idx_capital_movements_account_time
+  ON capital_movements(account_login, time_msc);
+
 CREATE TABLE IF NOT EXISTS positions (
   terminal_id INTEGER NOT NULL REFERENCES terminals(id) ON DELETE CASCADE,
   ticket INTEGER NOT NULL,
@@ -461,6 +483,7 @@ CREATE TABLE IF NOT EXISTS sqx_analytics_snapshots (
   UNIQUE(strategy_id, project, databank)
 );
 
+CREATE INDEX IF NOT EXISTS idx_account_snapshots_terminal_time ON account_snapshots(terminal_id, captured_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_baseline_strategy ON baseline_snapshots(strategy_id, sample_type, synced_at DESC);
 CREATE INDEX IF NOT EXISTS idx_deals_position ON deals(terminal_id, position_id, time_msc);
 CREATE INDEX IF NOT EXISTS idx_deals_magic ON deals(terminal_id, magic, symbol);
@@ -643,6 +666,17 @@ DEFAULT_ACCOUNT_ALIASES = {
     "3000097316": "dwnx demo",
 }
 
+# Demo accounts are funded outside of the terminal history we ingest.  Their
+# first local snapshot can therefore already include realised P/L and must not
+# be used as the deposit basis for account-level performance metrics.
+DEFAULT_ACCOUNT_INITIAL_CAPITALS = {
+    "7396577": 100000.0,
+    "100121894": 100000.0,
+    "10025867": 100000.0,
+    "3000097316": 100000.0,
+    "60366027": 2000.0,
+}
+
 
 def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -703,6 +737,47 @@ def _widen_strategy_status_check(conn: sqlite3.Connection) -> None:
         conn.execute("DROP TABLE strategies")
         conn.execute("ALTER TABLE strategies_new RENAME TO strategies")
         conn.execute("PRAGMA foreign_key_check")
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
+
+
+def _widen_strategy_categories(conn: sqlite3.Connection) -> None:
+    """Allow 'favorite' / 'to_modify' in strategy_categories and make the
+    two-category limit apply only to the original four categories."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='strategy_categories'"
+    ).fetchone()
+    if row is None or "to_modify" in (row["sql"] or ""):
+        return
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute("BEGIN")
+        conn.execute("DROP TRIGGER IF EXISTS limit_strategy_categories")
+        conn.execute("ALTER TABLE strategy_categories RENAME TO strategy_categories_old")
+        conn.execute(
+            """CREATE TABLE strategy_categories (
+  strategy_id INTEGER NOT NULL REFERENCES strategies(id) ON DELETE CASCADE,
+  category TEXT NOT NULL CHECK(category IN ('live', 'monitor', 'candidate_live', 'axi_live', 'favorite', 'to_modify')),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(strategy_id, category)
+)"""
+        )
+        conn.execute("INSERT INTO strategy_categories SELECT * FROM strategy_categories_old")
+        conn.execute("DROP TABLE strategy_categories_old")
+        conn.execute(
+            """CREATE TRIGGER limit_strategy_categories
+BEFORE INSERT ON strategy_categories
+WHEN NEW.category IN ('live', 'monitor', 'candidate_live', 'axi_live')
+  AND (SELECT COUNT(*) FROM strategy_categories WHERE strategy_id = NEW.strategy_id
+       AND category IN ('live', 'monitor', 'candidate_live', 'axi_live')) >= 2
+BEGIN
+  SELECT RAISE(ABORT, 'A strategy can have at most two categories');
+END"""
+        )
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
@@ -793,6 +868,7 @@ def init_db(path: Path | None = None) -> None:
                    ADD COLUMN paired_strategy_ids TEXT NOT NULL DEFAULT ''"""
             )
         _widen_strategy_status_check(conn)
+        _widen_strategy_categories(conn)
         _migrate_strategy_statuses_to_categories(conn)
         conn.execute(
             """CREATE UNIQUE INDEX IF NOT EXISTS idx_strategy_operational_identity
@@ -837,10 +913,20 @@ def init_db(path: Path | None = None) -> None:
             "ssh_key_path": "TEXT",
             "ssh_host_fingerprint": "TEXT",
             "remote_data_dir": "TEXT",
+            "capital_cursor_msc": "INTEGER NOT NULL DEFAULT 0",
         }
         for column, definition in terminal_additions.items():
             if column not in terminal_columns:
                 conn.execute(f"ALTER TABLE terminals ADD COLUMN {column} {definition}")
+        guardian_source_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(guardian_sources)").fetchall()
+        }
+        if "bridge_excluded" not in guardian_source_columns:
+            # Existing sources were registered as Guardian-only terminals, so
+            # keep their established behaviour until explicitly migrated.
+            conn.execute(
+                "ALTER TABLE guardian_sources ADD COLUMN bridge_excluded INTEGER NOT NULL DEFAULT 1"
+            )
         deployment_columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(bot_deployments)").fetchall()
         }
@@ -920,6 +1006,27 @@ def init_db(path: Path | None = None) -> None:
             "INSERT OR IGNORE INTO settings(key,value_json,updated_at) VALUES(?,?,?)",
             ("account_aliases", json.dumps(DEFAULT_ACCOUNT_ALIASES), utcnow()),
         )
+        conn.execute(
+            "INSERT OR IGNORE INTO settings(key,value_json,updated_at) VALUES(?,?,?)",
+            ("account_initial_capitals", json.dumps(DEFAULT_ACCOUNT_INITIAL_CAPITALS), utcnow()),
+        )
+        # Add newly known accounts without overwriting an amount previously
+        # confirmed by the operator.
+        capitals_row = conn.execute(
+            "SELECT value_json FROM settings WHERE key='account_initial_capitals'"
+        ).fetchone()
+        try:
+            stored_capitals = json.loads(capitals_row["value_json"] or "{}") if capitals_row else {}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            stored_capitals = {}
+        if not isinstance(stored_capitals, dict):
+            stored_capitals = {}
+        merged_capitals = {**DEFAULT_ACCOUNT_INITIAL_CAPITALS, **stored_capitals}
+        if merged_capitals != stored_capitals:
+            conn.execute(
+                "UPDATE settings SET value_json=?,updated_at=? WHERE key='account_initial_capitals'",
+                (json.dumps(merged_capitals), utcnow()),
+            )
         from .display_names import seed_manual_display_names
 
         seed_manual_display_names(conn, utcnow())

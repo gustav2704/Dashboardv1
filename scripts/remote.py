@@ -5,7 +5,7 @@ import sys
 import paramiko
 
 HOSTS = {
-    "145": {"host": "145.63.135.196", "user": "Administrator", "termroot": "C:/Users/Administrator/AppData/Roaming/MetaQuotes/Terminal"},
+    "145": {"host": "145.63.130.53", "user": "Administrator", "termroot": "C:/Users/Administrator/AppData/Roaming/MetaQuotes/Terminal"},
     "100": {"host": "100.107.77.50", "user": "Administrador", "termroot": "C:/Users/Administrador/AppData/Roaming/MetaQuotes/Terminal"},
 }
 KEY = os.path.join(os.path.dirname(__file__), "..", "ssh_access", "codex_vps_ed25519")

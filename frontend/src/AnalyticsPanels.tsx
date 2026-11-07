@@ -64,6 +64,7 @@ export function OverviewAnalyticsPanel({ analytics }: { analytics: OverviewAnaly
   const exposureTotal = isLiveExposure ? liveExposure?.total_lots : historicalExposure?.total_trades
   const exposureUnit = isLiveExposure ? 'lotes' : 'operaciones'
   const exposureDataKey = isLiveExposure ? 'lots' : 'trades'
+  const realizedPeriods = analytics?.realized_period_profit
 
   return <div className="overview-analytics-grid">
     <section className="summary-analytics-card exposure-card">
@@ -84,9 +85,14 @@ export function OverviewAnalyticsPanel({ analytics }: { analytics: OverviewAnaly
         {selected.months.map((value, index) => <div key={MONTHS[index]}><span>{MONTHS[index]}</span><strong className={value > 0 ? 'positive' : value < 0 ? 'negative' : ''} style={{ backgroundColor: monthlyProfitColor(value, maxMonth) }}>{money(value)}</strong></div>)}
         <div className="calendar-total"><span>{selected.year === currentYear ? 'YTD' : 'TOTAL'}</span><strong className={total > 0 ? 'positive' : total < 0 ? 'negative' : ''} style={{ backgroundColor: monthlyProfitColor(total, Math.max(maxMonth, Math.abs(total))) }}>{money(total)}</strong></div>
       </div> : <div className="analytics-empty">No hay operaciones cerradas para construir el resumen anual.</div>}
+      {realizedPeriods && <div className="realized-period-profit"><div><span>Esta semana</span><strong className={realizedPeriods.week >= 0 ? 'positive' : 'negative'}>{money(realizedPeriods.week)}</strong></div><div><span>Este mes</span><strong className={realizedPeriods.month >= 0 ? 'positive' : 'negative'}>{money(realizedPeriods.month)}</strong></div><div><span>Este año</span><strong className={realizedPeriods.year >= 0 ? 'positive' : 'negative'}>{money(realizedPeriods.year)}</strong></div></div>}
       <p className="analytics-footnote">P/L neto cerrado · hora broker UTC+2 · independiente del rango 30d/90d.</p>
     </section>
   </div>
+}
+
+function axisNumber(value: number) {
+  return new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: Math.abs(value) < 10 ? 1 : 0 }).format(value)
 }
 
 function metricLabel(metric: StrategyTemporalMetric) {
@@ -95,6 +101,7 @@ function metricLabel(metric: StrategyTemporalMetric) {
 
 function metricFormat(value: number | null, metric: StrategyTemporalMetric) {
   if (value == null) return '—'
+  if (value === Infinity) return '∞ sin pérdidas'
   return metric === 'win_rate' ? `${value.toFixed(1)}%` : money(value)
 }
 
@@ -111,11 +118,17 @@ function TemporalTooltip({ active, payload, metric }: { active?: boolean; payloa
 }
 
 function TemporalChart({ title, rows, metric, id }: { title: string; rows: StrategyTemporalBucket[]; metric: StrategyTemporalMetric; id: string }) {
-  const data = rows.map(row => ({ ...row, value: temporalMetricValue(row, metric) ?? 0 }))
-  const values = data.filter(row => row.count).map(row => row.value)
-  const extent = Math.max(1, ...values.map(Math.abs))
-  const domain: [number, number] = metric === 'win_rate' ? [0, 100] : metric === 'expectancy' ? [-extent, extent] : [0, Math.max(2, ...values)]
-  return <div className={`strategy-temporal-chart ${id === 'hours' ? 'wide' : ''}`}><h4>{title}</h4><div className="strategy-temporal-canvas"><ResponsiveContainer width="100%" height="100%"><BarChart data={data} margin={{ top: 8, right: 8, left: -18, bottom: 0 }}><defs><pattern id={`low-${id}`} width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="#223844"/><line x1="0" y1="0" x2="0" y2="6" stroke="#607887" strokeWidth="2"/></pattern></defs><CartesianGrid stroke="#1c303d" vertical={false} strokeDasharray="3 3"/><XAxis dataKey="label" tick={{ fill: '#78909f', fontSize: 11 }} axisLine={false} tickLine={false}/><YAxis domain={domain} tick={{ fill: '#78909f', fontSize: 11 }} axisLine={false} tickLine={false}/>{metric === 'expectancy' && <ReferenceLine y={0} stroke="#64748b"/>}<Tooltip content={<TemporalTooltip metric={metric}/>} /><Bar dataKey="value" radius={[5, 5, 2, 2]}>{data.map(row => <Cell key={row.key} fill={row.count === 0 ? '#162630' : row.low_sample ? `url(#low-${id})` : metricColor(row.value, metric)} />)}</Bar></BarChart></ResponsiveContainer></div></div>
+  // A 0% win rate (or PF 0) with trades would draw no bar; give it a visible red stub.
+  const raw = rows.map(row => ({ ...row, value: temporalMetricValue(row, metric) ?? 0 }))
+  const values = raw.filter(row => row.count && Number.isFinite(row.value)).map(row => row.value)
+  const extent = Math.ceil(Math.max(1, ...values.map(Math.abs)))
+  const pfTop = Math.ceil(Math.max(2, ...values))
+  const domain: [number, number] = metric === 'win_rate' ? [0, 100] : metric === 'expectancy' ? [-extent, extent] : [0, pfTop]
+  // A 0% win rate (or PF 0) with trades would draw no bar; give it a visible red stub.
+  // An unbounded PF (no losses) is drawn full height.
+  const stub = metric === 'win_rate' ? 2 : metric === 'profit_factor' ? pfTop * .02 : 0
+  const data = raw.map(row => ({ ...row, bar: row.value === Infinity ? pfTop : row.count > 0 && stub && row.value < stub ? stub : row.value }))
+  return <div className={`strategy-temporal-chart ${id === 'hours' ? 'wide' : ''}`}><h4>{title}</h4><div className="strategy-temporal-canvas"><ResponsiveContainer width="100%" height="100%"><BarChart data={data} margin={{ top: 8, right: 8, left: -18, bottom: 0 }}><defs><pattern id={`low-pos-${id}`} width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="#34d39959"/><line x1="0" y1="0" x2="0" y2="6" stroke="#34d399" strokeWidth="2.5"/></pattern><pattern id={`low-neg-${id}`} width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="#fb718559"/><line x1="0" y1="0" x2="0" y2="6" stroke="#fb7185" strokeWidth="2.5"/></pattern></defs><CartesianGrid stroke="#1c303d" vertical={false} strokeDasharray="3 3"/><XAxis dataKey="label" tick={{ fill: '#78909f', fontSize: 11 }} axisLine={false} tickLine={false}/><YAxis domain={domain} ticks={metric === 'expectancy' ? [-extent, -extent / 2, 0, extent / 2, extent] : undefined} tickFormatter={axisNumber} width={52} tick={{ fill: '#78909f', fontSize: 11 }} axisLine={false} tickLine={false}/>{metric === 'expectancy' && <ReferenceLine y={0} stroke="#64748b"/>}<Tooltip cursor={{ fill: '#ffffff0d' }} content={<TemporalTooltip metric={metric}/>} /><Bar dataKey="bar" radius={[5, 5, 2, 2]}>{data.map(row => <Cell key={row.key} fill={row.count === 0 ? '#162630' : row.low_sample ? `url(#low-${metricColor(row.value, metric) === '#34d399' ? 'pos' : 'neg'}-${id})` : metricColor(row.value, metric)} />)}</Bar></BarChart></ResponsiveContainer></div></div>
 }
 
 function Insight({ label, row, metric, tone }: { label: string; row: StrategyTemporalBucket | null; metric: StrategyTemporalMetric; tone: 'best' | 'worst' }) {
@@ -159,6 +172,7 @@ export function StrategyAnalyticsPanel({ strategyId, query }: { strategyId: numb
       <div className="strategy-analytics-heading"><div><span className="eyebrow">COMPORTAMIENTO TEMPORAL</span><h2>Rendimiento por hora, día y mes</h2><p>{data.trade_count} operaciones · hora broker {data.timezone}</p></div><div className="temporal-metric-switch">{(['win_rate','expectancy','profit_factor'] as StrategyTemporalMetric[]).map(value => <button type="button" key={value} className={metric === value ? 'active' : ''} onClick={() => setMetric(value)}>{metricLabel(value)}</button>)}</div></div>
       {insights && <div className="strategy-insights"><Insight label="Mejor hora" row={insights.hours.best} metric={metric} tone="best"/><Insight label="Peor hora" row={insights.hours.worst} metric={metric} tone="worst"/><Insight label="Mejor día" row={insights.weekdays.best} metric={metric} tone="best"/><Insight label="Peor día" row={insights.weekdays.worst} metric={metric} tone="worst"/><Insight label="Mejor mes" row={insights.months.best} metric={metric} tone="best"/><Insight label="Peor mes" row={insights.months.worst} metric={metric} tone="worst"/></div>}
       <div className="strategy-temporal-grid"><TemporalChart title="Horas" rows={data.temporal.hours} metric={metric} id="hours"/><TemporalChart title="Días" rows={data.temporal.weekdays} metric={metric} id="days"/><TemporalChart title="Meses" rows={data.temporal.months} metric={metric} id="months"/></div>
+      <div className="temporal-legend"><span><i className="pos" />{metric === 'win_rate' ? 'Win rate ≥ 50%' : metric === 'profit_factor' ? 'PF ≥ 1' : 'Ganancia'}</span><span><i className="neg" />{metric === 'win_rate' ? 'Win rate < 50%' : metric === 'profit_factor' ? 'PF < 1' : 'Pérdida'}</span><span><i className="pos hatch" /><i className="neg hatch" />Rayado = muestra baja (&lt; 10 operaciones)</span></div>
     </section>
     <section className="panel strategy-analytics-section drawdown-strategy-panel">
       <div className="strategy-analytics-heading"><div><span className="eyebrow">RIESGO REALIZADO</span><h2>Análisis de drawdown</h2><p>Retroceso de la curva acumulada respecto a su máximo anterior.</p></div><span className={data.drawdown.percentage_available ? 'percentage-basis available' : 'percentage-basis'} title={data.drawdown.percentage_reason}>{data.drawdown.percentage_available ? `% sobre balance ${money(data.drawdown.balance_basis)}` : '% no disponible'}</span></div>

@@ -1,7 +1,7 @@
 <#
 Exporta evidencia de configuracion MT5 sin modificar ninguna terminal.
 
-Ejemplo en la VPS 145.63.135.196:
+Ejemplo en la VPS 145.63.130.53:
   powershell.exe -ExecutionPolicy Bypass -File .\export-mt5-bot-sets.ps1 `
     -TerminalRoot 'C:\Users\Administrator\AppData\Roaming\MetaQuotes\Terminal'
 

@@ -228,12 +228,21 @@ def _observed(conn: Any) -> list[Any]:
              SELECT d.terminal_id,t.account_login,t.server AS terminal_server,t.data_dir AS terminal_data_dir,d.symbol,d.magic,d.comment,1 deal_count,0 position_count,0 order_count
              FROM deals d JOIN terminals t ON t.id=d.terminal_id
              WHERE UPPER(d.entry_type) IN ('IN','INOUT')
+               AND t.data_dir NOT LIKE 'archive://%'
+               AND t.data_dir NOT LIKE 'import://%'
+               AND t.data_dir NOT LIKE 'inventory://%'
            UNION ALL
               SELECT p.terminal_id,t.account_login,t.server AS terminal_server,t.data_dir AS terminal_data_dir,p.symbol,p.magic,p.comment,0 deal_count,1 position_count,0 order_count
-             FROM positions p JOIN terminals t ON t.id=p.terminal_id
+              FROM positions p JOIN terminals t ON t.id=p.terminal_id
+             WHERE t.data_dir NOT LIKE 'archive://%'
+               AND t.data_dir NOT LIKE 'import://%'
+               AND t.data_dir NOT LIKE 'inventory://%'
            UNION ALL
               SELECT o.terminal_id,t.account_login,t.server AS terminal_server,t.data_dir AS terminal_data_dir,o.symbol,o.magic,o.comment,0 deal_count,0 position_count,1 order_count
-             FROM pending_orders o JOIN terminals t ON t.id=o.terminal_id
+              FROM pending_orders o JOIN terminals t ON t.id=o.terminal_id
+             WHERE t.data_dir NOT LIKE 'archive://%'
+               AND t.data_dir NOT LIKE 'import://%'
+               AND t.data_dir NOT LIKE 'inventory://%'
            )
            SELECT terminal_id,account_login,terminal_server,terminal_data_dir,symbol,magic,comment,SUM(deal_count) deal_count,
                   SUM(position_count) position_count,SUM(order_count) order_count
@@ -623,28 +632,17 @@ def ensure_mt5_strategies(
     allow_auto_confirm: bool = True,
     allow_manual_accounts: bool = False,
 ) -> dict[str, int]:
-    """Link observations to known strategies without inventing identities.
+    """Resolve live MT5 trade evidence into operational strategies.
 
-    ``allowed_scopes`` is used only by the repair utility to constrain a
-    historical backfill. A normal terminal sync may extend a confirmed mapping
-    or link an exact known alias, but raw Magic/comment data is not EX5 identity
-    evidence and must never create a new dashboard bot.
+    A first entry, open position, or pending order with a usable non-zero Magic
+    is sufficient evidence that a bot exists on an active terminal. Inventory
+    data enriches that row later; it is not a creation prerequisite.
+    ``allowed_scopes`` remains available to constrain repair tooling.
     """
     safe_matches = auto_confirm_suggestions()["confirmed"] if allow_auto_confirm else 0
     created = linked = 0
     now = utcnow()
     with session() as conn:
-        row = conn.execute(
-            "SELECT value_json FROM settings WHERE key='manual_live_mapping_accounts'"
-        ).fetchone()
-        try:
-            manual_review_accounts = {
-                str(account).strip()
-                for account in json.loads(row["value_json"] if row else "[]")
-                if str(account).strip()
-            }
-        except (TypeError, json.JSONDecodeError):
-            manual_review_accounts = set()
         mappings = _live_mappings(conn)
         # Archived strategies stay in identity matching so MT5 activity can
         # reactivate the existing row instead of creating a duplicate.
@@ -690,15 +688,6 @@ def ensure_mt5_strategies(
             if len(mapped_strategy_ids) > 1:
                 # Legacy data has conflicting strategies for one operational
                 # identity.  Leave it untouched until it is explicitly merged.
-                continue
-
-            # This account is intentionally managed from a fixed, audited
-            # mapping set.  It may inherit a confirmed identity above, but it
-            # must not automatically discover or create a new one here.
-            if (
-                not allow_manual_accounts
-                and str(item["account_login"] or "").strip() in manual_review_accounts
-            ):
                 continue
 
             if _suppressed_observation(conn, item):
@@ -766,11 +755,10 @@ def ensure_mt5_strategies(
                 # Leave the observation unmapped for manual review.
                 continue
             else:
-                # Unknown observations remain visible to Suggestions until an
-                # EX5-backed inventory/deployment or an explicit repair scope
-                # establishes the bot identity. Creating from a comment here
-                # produced duplicate rows whenever broker/server aliases varied.
-                if allowed_scopes is None:
+                # A live MT5 entry is operational evidence. Keep the repair
+                # scope guard when explicitly requested, but normally create
+                # the standalone MT5 deployment immediately.
+                if allowed_scopes is not None and scope not in allowed_scopes:
                     continue
                 strategy_id = _create_mt5_strategy(conn, item, observed_name, now)
                 strategies = conn.execute("SELECT * FROM strategies WHERE retired=0").fetchall()

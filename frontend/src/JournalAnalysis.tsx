@@ -24,6 +24,8 @@ import {
   type TemporalBucket,
   type TemporalMetric,
 } from "./journalAnalytics";
+import { buildAccountPerformance } from "./performanceAccountAnalytics";
+import { Assets, Charts, DurationView, Periods, Statistics, Summary, WinnersLosers } from "./AccountPerformance";
 import "./JournalAnalysis.css";
 
 const GREEN = "#2dd4bf";
@@ -58,7 +60,8 @@ const MONTHS = [
 
 export type PerformanceGrouping = "bot" | "mn";
 export type EquityView = "balance" | "pnl" | "percent";
-export type EquityPoint = { label: string; equity: number; time_msc?: number };
+/** `capital` is a deposit (+) or withdrawal (-) applied at this point, not P/L. */
+export type EquityPoint = { label: string; equity: number; time_msc?: number; capital?: number };
 export type EquityPnlPoint = EquityPoint & {
   pnl: number;
   positivePnl: number | null;
@@ -98,18 +101,23 @@ function equityPnlPoint(point: EquityPoint, pnl: number, baseEquity: number, isZ
 
 export function buildEquityPnlPoints(points: EquityPoint[]): EquityPnlPoint[] {
   if (!points.length) return [];
-  const baseEquity = points[0].equity;
+  const baseEquity = points[0].equity - (points[0].capital || 0);
   const result: EquityPnlPoint[] = [];
   let previousPnl = 0;
+  let flows = 0;
 
   points.forEach((point, index) => {
-    const pnl = point.equity - baseEquity;
+    // Deposits/withdrawals change the balance but are excluded from P/L and
+    // added to the capital the percentage is measured against.
+    flows += point.capital || 0;
+    const invested = baseEquity + flows;
+    const pnl = point.equity - invested;
     if (index > 0 && previousPnl * pnl < 0) {
       // A zero-value point prevents Recharts from joining the green and red
       // segments directly across the reference line.
-      result.push(equityPnlPoint({ ...point, label: "" }, 0, baseEquity, true));
+      result.push(equityPnlPoint({ ...point, label: "" }, 0, invested, true));
     }
-    result.push(equityPnlPoint(point, pnl, baseEquity));
+    result.push(equityPnlPoint(point, pnl, invested));
     previousPnl = pnl;
   });
 
@@ -1212,23 +1220,16 @@ function utcPlusTwoDate(ms: number) {
     .replace("T", " ");
 }
 
-function AccountAnalytics({
-  data,
-  capitalEligible,
-}: {
-  data: JournalAnalysisData;
-  capitalEligible: boolean;
-}) {
-  const [metric, setMetric] = useState<TemporalMetric>("winRate");
-  const analytics = useMemo(
-    () => buildAccountAnalytics(data, capitalEligible),
-    [data, capitalEligible],
+type AccountAnalyticsResult = ReturnType<typeof buildAccountAnalytics>;
+
+function capitalReasonOf(analytics: AccountAnalyticsResult) {
+  return (
+    analytics.capital.reason ||
+    "Balances reconciliados con el P/L de las cuentas seleccionadas."
   );
-  const temporalSummaries = {
-    hours: bestAndWorst(analytics.temporal.hours, metric),
-    weekdays: bestAndWorst(analytics.temporal.weekdays, metric),
-    months: bestAndWorst(analytics.temporal.months, metric),
-  };
+}
+
+function AccountKpis({ analytics }: { analytics: AccountAnalyticsResult }) {
   const card = (
     label: string,
     value: string,
@@ -1241,21 +1242,8 @@ function AccountAnalytics({
       <small>{detail}</small>
     </div>
   );
-  const capitalReason =
-    analytics.capital.reason ||
-    "Balances reconciliados con el P/L de las cuentas seleccionadas.";
+  const capitalReason = capitalReasonOf(analytics);
   return (
-    <section className="account-analytics">
-      <div className="account-analytics-heading">
-        <div>
-          <span className="eyebrow">ACCOUNT ANALYTICS</span>
-          <h2>Nuevas analíticas de cuenta</h2>
-        </div>
-        <p>
-          Exposición, dependencia estadística y riesgo temporal · agrupación
-          fija UTC+02:00.
-        </p>
-      </div>
       <div className="account-kpi-grid">
         {card(
           "CAGR",
@@ -1305,11 +1293,40 @@ function AccountAnalytics({
           analytics.exposure == null,
         )}
       </div>
-      <div className="account-distribution-grid">
-        <Distribution title="Exposición por símbolo" rows={analytics.symbols} />
-        <Distribution title="Compra vs venta" rows={analytics.directions} />
-        <Distribution title="Tiempo de exposición" rows={analytics.durations} />
-      </div>
+  );
+}
+
+type DistributionKey = "symbols" | "directions" | "durations";
+const DISTRIBUTION_TITLES: Record<DistributionKey, string> = {
+  symbols: "Exposición por símbolo",
+  directions: "Compra vs venta",
+  durations: "Tiempo de exposición",
+};
+
+function AccountDistributions({
+  analytics,
+  keys = ["symbols", "directions", "durations"],
+}: {
+  analytics: AccountAnalyticsResult;
+  keys?: DistributionKey[];
+}) {
+  return (
+    <div className="account-distribution-grid">
+      {keys.map((key) => (
+        <Distribution key={key} title={DISTRIBUTION_TITLES[key]} rows={analytics[key]} />
+      ))}
+    </div>
+  );
+}
+
+function TemporalMatrix({ analytics }: { analytics: AccountAnalyticsResult }) {
+  const [metric, setMetric] = useState<TemporalMetric>("winRate");
+  const temporalSummaries = {
+    hours: bestAndWorst(analytics.temporal.hours, metric),
+    weekdays: bestAndWorst(analytics.temporal.weekdays, metric),
+    months: bestAndWorst(analytics.temporal.months, metric),
+  };
+  return (
       <section className="temporal-analysis">
         <div className="temporal-analysis-head">
           <div>
@@ -1390,6 +1407,12 @@ function AccountAnalytics({
           />
         </div>
       </section>
+  );
+}
+
+function DrawdownEpisodes({ analytics }: { analytics: AccountAnalyticsResult }) {
+  const capitalReason = capitalReasonOf(analytics);
+  return (
       <section className="panel drawdown-episodes">
         <div className="account-panel-title">
           <span>Análisis de drawdown</span>
@@ -1446,17 +1469,117 @@ function AccountAnalytics({
           </div>
         )}
       </section>
+  );
+}
+
+function AccountAnalytics({
+  data,
+  capitalEligible,
+}: {
+  data: JournalAnalysisData;
+  capitalEligible: boolean;
+}) {
+  const analytics = useMemo(
+    () => buildAccountAnalytics(data, capitalEligible),
+    [data, capitalEligible],
+  );
+  return (
+    <section className="account-analytics">
+      <div className="account-analytics-heading">
+        <div>
+          <span className="eyebrow">ACCOUNT ANALYTICS</span>
+          <h2>Nuevas analíticas de cuenta</h2>
+        </div>
+        <p>
+          Exposición, dependencia estadística y riesgo temporal · agrupación
+          fija UTC+02:00.
+        </p>
+      </div>
+      <AccountKpis analytics={analytics} />
+      <AccountDistributions analytics={analytics} />
+      <TemporalMatrix analytics={analytics} />
+      <DrawdownEpisodes analytics={analytics} />
     </section>
   );
 }
 
+type OverviewAnalyticsTab = "trades" | "summary" | "hourly" | "daily";
+
+function overviewMoney(value: number | null | undefined) {
+  return value == null || !Number.isFinite(value)
+    ? "N/D"
+    : value.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 });
+}
+
+function OverviewStatistic({ label, value, detail }: { label: string; value: string; detail: string }) {
+  return <div className="account-kpi"><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>;
+}
+
+export function OverviewAdvancedAnalytics({ data, capitalEligible = true }: { data: JournalAnalysisData | null; capitalEligible?: boolean }) {
+  const [tab, setTab] = useState<OverviewAnalyticsTab>("trades");
+  const [metric, setMetric] = useState<TemporalMetric>("winRate");
+  const performance = useMemo(() => data ? buildAccountPerformance(data) : null, [data]);
+  const analytics = useMemo(() => data ? buildAccountAnalytics(data, capitalEligible) : null, [data, capitalEligible]);
+  if (!data || !performance || !analytics) return <section className="panel overview-advanced-analytics analytics-loading">Cargando estadísticas avanzadas…</section>;
+  const advanced = performance.advanced;
+  const summary = {
+    hours: bestAndWorst(analytics.temporal.hours, metric),
+    weekdays: bestAndWorst(analytics.temporal.weekdays, metric),
+    months: bestAndWorst(analytics.temporal.months, metric),
+  };
+  const tabs: Array<[OverviewAnalyticsTab, string]> = [["trades", "Trades"], ["summary", "Summary"], ["hourly", "Hourly"], ["daily", "Daily"]];
+  return <section className="panel overview-advanced-analytics">
+    <div className="account-analytics-heading"><div><span className="eyebrow">ADVANCED STATISTICS</span><h2>Analítica de cuenta</h2></div><p>Operaciones cerradas · hora broker UTC+02:00.</p></div>
+    <div className="overview-advanced-tabs" role="tablist" aria-label="Estadísticas avanzadas">
+      {tabs.map(([key, label]) => <button type="button" role="tab" aria-selected={tab === key} className={tab === key ? "active" : ""} key={key} onClick={() => setTab(key)}>{label}</button>)}
+    </div>
+    {tab === "trades" && <div className="account-kpi-grid overview-trade-statistics">
+      <OverviewStatistic label="Trades" value={String(advanced.trades)} detail={`${advanced.wins} ganadoras · ${advanced.losses} perdedoras`} />
+      <OverviewStatistic label="Largos ganados" value={advanced.longTrades ? `${(advanced.longWins / advanced.longTrades * 100).toFixed(1)}%` : "N/D"} detail={`${advanced.longWins}/${advanced.longTrades}`} />
+      <OverviewStatistic label="Cortos ganados" value={advanced.shortTrades ? `${(advanced.shortWins / advanced.shortTrades * 100).toFixed(1)}%` : "N/D"} detail={`${advanced.shortWins}/${advanced.shortTrades}`} />
+      <OverviewStatistic label="Profit Factor" value={advanced.profitFactor == null ? "N/D" : advanced.profitFactor.toFixed(2)} detail="Beneficio bruto / pérdida bruta" />
+      <OverviewStatistic label="Desviación estándar" value={overviewMoney(advanced.deviation)} detail="P/L neto por trade" />
+      <OverviewStatistic label="Sharpe por trade" value={advanced.tradeSharpe == null ? "N/D" : advanced.tradeSharpe.toFixed(2)} detail="Media / desviación · no anualizado" />
+      <OverviewStatistic label="Z-Score" value={advanced.zScore == null ? "N/D" : advanced.zScore.toFixed(2)} detail={advanced.zProbability == null ? "Muestra insuficiente" : `Probabilidad ${advanced.zProbability.toFixed(2)}%`} />
+      <OverviewStatistic label="Expectancy" value={overviewMoney(advanced.expectancy)} detail="Resultado medio por trade" />
+      <OverviewStatistic label="Ganancia media" value={overviewMoney(advanced.averageWin)} detail="Trades positivos" />
+      <OverviewStatistic label="Pérdida media" value={overviewMoney(advanced.averageLoss)} detail="Trades negativos" />
+      <OverviewStatistic label="Mejor / peor trade" value={`${overviewMoney(advanced.bestTrade)} / ${overviewMoney(advanced.worstTrade)}`} detail="P/L neto" />
+      <OverviewStatistic label="Lotes / comisiones" value={`${performance.overview.lots.toFixed(2)} / ${overviewMoney(performance.overview.commissions)}`} detail={`Duración media ${Math.round(advanced.averageDuration / 3600)} h`} />
+    </div>}
+    {tab === "summary" && <AccountAnalytics data={data} capitalEligible={capitalEligible} />}
+    {(tab === "hourly" || tab === "daily") && <section className="temporal-analysis">
+      <div className="temporal-analysis-head"><div><span className="eyebrow">TEMPORAL MATRIX</span><h3>{tab === "hourly" ? "Comportamiento por hora" : "Comportamiento por día y mes"}</h3></div><div className="temporal-metric-toggle">{(["winRate", "expectancy", "profitFactor"] as TemporalMetric[]).map(value => <button type="button" key={value} className={metric === value ? "active" : ""} onClick={() => setMetric(value)}>{metricLabel(value)}</button>)}</div></div>
+      <div className="temporal-insights"><div className="temporal-badges">{tab === "hourly" ? <><TemporalBadge tone="best" label="Mejor hora" row={summary.hours.best} metric={metric}/><TemporalBadge tone="worst" label="Peor hora" row={summary.hours.worst} metric={metric}/></> : <><TemporalBadge tone="best" label="Mejor día" row={summary.weekdays.best} metric={metric}/><TemporalBadge tone="worst" label="Peor día" row={summary.weekdays.worst} metric={metric}/><TemporalBadge tone="best" label="Mejor mes" row={summary.months.best} metric={metric}/><TemporalBadge tone="worst" label="Peor mes" row={summary.months.worst} metric={metric}/></>}</div><TemporalLegend metric={metric}/></div>
+      <div className="temporal-grid">{tab === "hourly" ? <TemporalChart title="Horas" rows={analytics.temporal.hours} metric={metric}/> : <><TemporalChart title="Días" rows={analytics.temporal.weekdays} metric={metric}/><TemporalChart title="Meses" rows={analytics.temporal.months} metric={metric}/></>}</div>
+    </section>}
+  </section>;
+}
+
+type JournalTab = "summary" | "trades" | "periods" | "statistics" | "assets" | "temporal" | "duration" | "charts";
+const JOURNAL_TAB_LABELS: Record<JournalTab, string> = {
+  summary: "Resumen",
+  trades: "Trades",
+  periods: "Períodos",
+  statistics: "Estadísticas",
+  assets: "Activos",
+  temporal: "Temporal",
+  duration: "Duración",
+  charts: "Gráficos",
+};
+
 export default function JournalAnalysis({
   data,
   capitalEligible = true,
+  accountLabel,
 }: {
   data: JournalAnalysisData | null;
   capitalEligible?: boolean;
+  accountLabel: string;
 }) {
+  const [tab, setTab] = useState<JournalTab>("summary");
+  const performance = useMemo(() => data ? buildAccountPerformance(data) : null, [data]);
+  const accountAnalytics = useMemo(() => data ? buildAccountAnalytics(data, capitalEligible) : null, [data, capitalEligible]);
   const [botEquityExpanded, setBotEquityExpanded] = useState(false);
   const [equityView, setEquityView] = useState<EquityView>("balance");
   const charts = useMemo(() => {
@@ -1465,7 +1588,10 @@ export default function JournalAnalysis({
       // cumulative net profit for databases that haven't been updated yet.
       equity: EquityPoint[] =
         data?.real_equity_curve && data.real_equity_curve.length > 0
-          ? data.real_equity_curve.map(p => ({ label: p.label, equity: p.equity, time_msc: p.time_msc }))
+          ? data.real_equity_curve.map(p => ({
+              label: p.label, equity: p.equity, time_msc: p.time_msc,
+              capital: p.type === "capital" ? Number(p.net_profit) || 0 : 0,
+            }))
           : (() => {
               let total = 0;
               const arr: typeof equity = [];
@@ -1525,6 +1651,7 @@ export default function JournalAnalysis({
         No closed trades match the selected accounts and dates.
       </div>
     );
+  if (!performance || !accountAnalytics) return null;
   return (
     <div className="journal-view">
       <div className="performance-intro">
@@ -1537,7 +1664,26 @@ export default function JournalAnalysis({
           operations awaiting strategy assignment.
         </p>
       </div>
-      <div className="journal-grid">
+      <section className="panel account-performance journal-tabs-panel">
+        <div className="account-performance-tabs journal-tabs" role="tablist" aria-label="Secciones de Journal analysis">
+          {(Object.keys(JOURNAL_TAB_LABELS) as JournalTab[]).map((key) => (
+            <button role="tab" aria-selected={tab === key} type="button" key={key} className={tab === key ? "active" : ""} onClick={() => setTab(key)}>
+              {JOURNAL_TAB_LABELS[key]}
+            </button>
+          ))}
+        </div>
+        {tab !== "trades" && <div className="account-performance-body" role="tabpanel">
+          {tab === "summary" && <Summary analytics={performance} accountLabel={accountLabel} />}
+          {tab === "periods" && <Periods analytics={performance} />}
+          {tab === "statistics" && <><Statistics analytics={performance} /><AccountKpis analytics={accountAnalytics} /></>}
+          {tab === "assets" && <Assets analytics={performance} />}
+          {tab === "temporal" && <TemporalMatrix analytics={accountAnalytics} />}
+          {tab === "duration" && <DurationView analytics={performance} />}
+          {tab === "charts" && <Charts analytics={performance} />}
+        </div>}
+      </section>
+      {tab === "summary" && (
+        <div className="journal-grid">
         <JournalChart
           wide
           title={<>
@@ -1601,11 +1747,84 @@ export default function JournalAnalysis({
             </AreaChart>
           </ResponsiveContainer>
         </JournalChart>
-      </div>
-      <TradeList data={data} />
-      <UnassignedSummary data={data} />
-      <div className="journal-grid">
-        {charts.botEquity && (
+        </div>
+      )}
+      {tab === "trades" && <>
+        <TradeList data={data} />
+        <UnassignedSummary data={data} />
+      </>}
+      {tab === "periods" && (
+        <div className="journal-grid">
+          <Calendar data={data} />
+          <JournalChart title="Trades executed by month">
+          <ResponsiveContainer>
+            <BarChart data={charts.monthly}>
+              <CartesianGrid stroke={GRID} />
+              <XAxis dataKey="month" tick={{ fill: "#74899a", fontSize: 9 }} />
+              <YAxis tick={{ fill: "#74899a", fontSize: 9 }} />
+              <Tooltip content={<ChartTip />} />
+              <Bar dataKey="trades" fill="#38bdf8" />
+            </BarChart>
+          </ResponsiveContainer>
+        </JournalChart>
+          <JournalChart title="Max drawdown by month">
+          <ResponsiveContainer>
+            <LineChart data={charts.monthly}>
+              <CartesianGrid stroke={GRID} />
+              <XAxis dataKey="month" tick={{ fill: "#74899a", fontSize: 9 }} />
+              <YAxis tick={{ fill: "#74899a", fontSize: 9 }} />
+              <Tooltip content={<ChartTip />} />
+              <Line dataKey="drawdown" stroke={RED} strokeWidth={2} />
+            </LineChart>
+          </ResponsiveContainer>
+        </JournalChart>
+        </div>
+      )}
+      {tab === "statistics" && <DrawdownEpisodes analytics={accountAnalytics} />}
+      {tab === "assets" && <AccountDistributions analytics={accountAnalytics} keys={["symbols", "directions"]} />}
+      {tab === "temporal" && (
+        <div className="journal-grid">
+          <WinnersLosers rows={performance.temporal.hours} title="Ganadoras vs. perdedoras por hora" />
+          <WinnersLosers rows={performance.temporal.weekdays} title="Ganadoras vs. perdedoras por día" />
+          <JournalChart title="Net profit by hour">
+          <ResponsiveContainer>
+            <BarChart data={charts.hourly}>
+              <CartesianGrid stroke={GRID} />
+              <XAxis
+                dataKey="hour"
+                interval={2}
+                tick={{ fill: "#74899a", fontSize: 9 }}
+              />
+              <YAxis tick={{ fill: "#74899a", fontSize: 9 }} />
+              <Tooltip content={<ChartTip />} />
+              <Bar dataKey="profit">
+                {charts.hourly.map((item, index) => (
+                  <Cell key={index} fill={item.profit >= 0 ? GREEN : RED} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </JournalChart>
+          <JournalChart title="Win rate by weekday">
+          <ResponsiveContainer>
+            <BarChart data={charts.weekday}>
+              <CartesianGrid stroke={GRID} />
+              <XAxis dataKey="day" tick={{ fill: "#74899a", fontSize: 9 }} />
+              <YAxis
+                domain={[0, 100]}
+                tick={{ fill: "#74899a", fontSize: 9 }}
+              />
+              <Tooltip content={<ChartTip suffix="%" />} />
+              <Bar dataKey="winRate" fill={GREEN} />
+            </BarChart>
+          </ResponsiveContainer>
+        </JournalChart>
+        </div>
+      )}
+      {tab === "duration" && <AccountDistributions analytics={accountAnalytics} keys={["durations"]} />}
+      {tab === "charts" && (
+        <div className="journal-grid">
+          {charts.botEquity && (
           <section className="panel journal-chart wide bot-equity-chart">
             <div className="journal-chart-title">
               <span>Equity individual por bot</span>
@@ -1655,64 +1874,8 @@ export default function JournalAnalysis({
             )}
           </section>
         )}
-        <Calendar data={data} />
-        <JournalChart title="Trades executed by month">
-          <ResponsiveContainer>
-            <BarChart data={charts.monthly}>
-              <CartesianGrid stroke={GRID} />
-              <XAxis dataKey="month" tick={{ fill: "#74899a", fontSize: 9 }} />
-              <YAxis tick={{ fill: "#74899a", fontSize: 9 }} />
-              <Tooltip content={<ChartTip />} />
-              <Bar dataKey="trades" fill="#38bdf8" />
-            </BarChart>
-          </ResponsiveContainer>
-        </JournalChart>
-        <JournalChart title="Win rate by weekday">
-          <ResponsiveContainer>
-            <BarChart data={charts.weekday}>
-              <CartesianGrid stroke={GRID} />
-              <XAxis dataKey="day" tick={{ fill: "#74899a", fontSize: 9 }} />
-              <YAxis
-                domain={[0, 100]}
-                tick={{ fill: "#74899a", fontSize: 9 }}
-              />
-              <Tooltip content={<ChartTip suffix="%" />} />
-              <Bar dataKey="winRate" fill={GREEN} />
-            </BarChart>
-          </ResponsiveContainer>
-        </JournalChart>
-        <JournalChart title="Net profit by hour">
-          <ResponsiveContainer>
-            <BarChart data={charts.hourly}>
-              <CartesianGrid stroke={GRID} />
-              <XAxis
-                dataKey="hour"
-                interval={2}
-                tick={{ fill: "#74899a", fontSize: 9 }}
-              />
-              <YAxis tick={{ fill: "#74899a", fontSize: 9 }} />
-              <Tooltip content={<ChartTip />} />
-              <Bar dataKey="profit">
-                {charts.hourly.map((item, index) => (
-                  <Cell key={index} fill={item.profit >= 0 ? GREEN : RED} />
-                ))}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
-        </JournalChart>
-        <JournalChart title="Max drawdown by month">
-          <ResponsiveContainer>
-            <LineChart data={charts.monthly}>
-              <CartesianGrid stroke={GRID} />
-              <XAxis dataKey="month" tick={{ fill: "#74899a", fontSize: 9 }} />
-              <YAxis tick={{ fill: "#74899a", fontSize: 9 }} />
-              <Tooltip content={<ChartTip />} />
-              <Line dataKey="drawdown" stroke={RED} strokeWidth={2} />
-            </LineChart>
-          </ResponsiveContainer>
-        </JournalChart>
-      </div>
-      <AccountAnalytics data={data} capitalEligible={capitalEligible} />
+        </div>
+      )}
     </div>
   );
 }

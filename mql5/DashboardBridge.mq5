@@ -3,7 +3,7 @@
 //| Never sends, modifies or closes trading orders.                   |
 //+------------------------------------------------------------------+
 #property copyright "Dashboardv1"
-#property version   "1.00"
+#property version   "1.10"
 #property service
 
 input int PollIntervalMilliseconds = 1000;
@@ -79,6 +79,18 @@ string DealJson(const ulong ticket)
    return StringFormat("{\"ticket\":%I64u,\"position_id\":%I64d,\"time_msc\":%I64d,\"symbol\":\"%s\",\"deal_type\":\"%s\",\"entry_type\":\"%s\",\"volume\":%.8f,\"price\":%.10f,\"profit\":%.8f,\"commission\":%.8f,\"swap\":%.8f,\"magic\":%I64d,\"comment\":\"%s\"}",ticket,HistoryDealGetInteger(ticket,DEAL_POSITION_ID),HistoryDealGetInteger(ticket,DEAL_TIME_MSC),JsonEscape(HistoryDealGetString(ticket,DEAL_SYMBOL)),DealTypeName((ENUM_DEAL_TYPE)HistoryDealGetInteger(ticket,DEAL_TYPE)),EntryTypeName((ENUM_DEAL_ENTRY)HistoryDealGetInteger(ticket,DEAL_ENTRY)),HistoryDealGetDouble(ticket,DEAL_VOLUME),HistoryDealGetDouble(ticket,DEAL_PRICE),HistoryDealGetDouble(ticket,DEAL_PROFIT),HistoryDealGetDouble(ticket,DEAL_COMMISSION),HistoryDealGetDouble(ticket,DEAL_SWAP),HistoryDealGetInteger(ticket,DEAL_MAGIC),JsonEscape(HistoryDealGetString(ticket,DEAL_COMMENT)));
 }
 
+string CapitalTypeName(const ENUM_DEAL_TYPE type)
+{
+   if(type==DEAL_TYPE_BALANCE) return "BALANCE"; if(type==DEAL_TYPE_CREDIT) return "CREDIT"; if(type==DEAL_TYPE_CHARGE) return "CHARGE";
+   if(type==DEAL_TYPE_CORRECTION) return "CORRECTION"; if(type==DEAL_TYPE_BONUS) return "BONUS";
+   string name=EnumToString(type); StringReplace(name,"DEAL_TYPE_",""); return name;
+}
+
+string CapitalJson(const ulong ticket)
+{
+   return StringFormat("{\"ticket\":%I64u,\"time_msc\":%I64d,\"deal_type\":\"%s\",\"amount\":%.8f,\"comment\":\"%s\"}",ticket,HistoryDealGetInteger(ticket,DEAL_TIME_MSC),CapitalTypeName((ENUM_DEAL_TYPE)HistoryDealGetInteger(ticket,DEAL_TYPE)),HistoryDealGetDouble(ticket,DEAL_PROFIT),JsonEscape(HistoryDealGetString(ticket,DEAL_COMMENT)));
+}
+
 string PositionJson(const ulong ticket)
 {
    if(!PositionSelectByTicket(ticket)) return "";
@@ -109,10 +121,15 @@ void ProcessSync(const string request)
    bool selected=HistorySelect(from,TimeCurrent()); string deals="["; bool first=true;
    if(selected) for(int i=0;i<HistoryDealsTotal();i++) { ulong ticket=HistoryDealGetTicket(i); if(ticket==0) continue; long time_msc=HistoryDealGetInteger(ticket,DEAL_TIME_MSC); ENUM_DEAL_TYPE type=(ENUM_DEAL_TYPE)HistoryDealGetInteger(ticket,DEAL_TYPE); if(time_msc<=since_msc||(type!=DEAL_TYPE_BUY&&type!=DEAL_TYPE_SELL)) continue; if(!first) deals+=","; deals+=DealJson(ticket); first=false; }
    deals+="]";
+   // Non-trade balance deals (deposits, withdrawals, credits, charges) use their
+   // own cursor so existing terminals backfill the whole account history once.
+   long capital_since_msc=JsonLong(request,"capital_since_msc",0); string capital="["; first=true;
+   if(HistorySelect((datetime)(capital_since_msc/1000),TimeCurrent())) for(int i=0;i<HistoryDealsTotal();i++) { ulong ticket=HistoryDealGetTicket(i); if(ticket==0) continue; ENUM_DEAL_TYPE type=(ENUM_DEAL_TYPE)HistoryDealGetInteger(ticket,DEAL_TYPE); if(type==DEAL_TYPE_BUY||type==DEAL_TYPE_SELL||HistoryDealGetInteger(ticket,DEAL_TIME_MSC)<capital_since_msc) continue; if(!first) capital+=","; capital+=CapitalJson(ticket); first=false; }
+   capital+="]";
    string positions="["; first=true; for(int i=0;i<PositionsTotal();i++) { string row=PositionJson(PositionGetTicket(i)); if(row=="") continue; if(!first) positions+=","; positions+=row; first=false; } positions+="]";
    string orders="["; first=true; for(int i=0;i<OrdersTotal();i++) { string row=OrderJson(OrderGetTicket(i)); if(row=="") continue; if(!first) orders+=","; orders+=row; first=false; } orders+="]";
    string specs="["; first=true; for(int i=0;i<SymbolsTotal(true);i++) { string symbol=SymbolName(i,true); if(symbol=="") continue; if(!first) specs+=","; specs+=SymbolSpecJson(symbol); first=false; } specs+="]";
-   string response=StringFormat("{\"schema_version\":3,\"status\":\"ok\",\"terminal_connected\":%s,\"generated_at\":\"%s\",\"account_login\":\"%I64d\",\"server\":\"%s\",\"account\":{\"balance\":%.8f,\"equity\":%.8f,\"margin\":%.8f,\"free_margin\":%.8f},\"deals\":%s,\"positions\":%s,\"orders\":%s,\"symbol_specs\":%s}",terminal_connected?"true":"false",IsoUtc(),AccountInfoInteger(ACCOUNT_LOGIN),JsonEscape(AccountInfoString(ACCOUNT_SERVER)),AccountInfoDouble(ACCOUNT_BALANCE),AccountInfoDouble(ACCOUNT_EQUITY),AccountInfoDouble(ACCOUNT_MARGIN),AccountInfoDouble(ACCOUNT_MARGIN_FREE),deals,positions,orders,specs);
+   string response=StringFormat("{\"schema_version\":4,\"status\":\"ok\",\"terminal_connected\":%s,\"generated_at\":\"%s\",\"account_login\":\"%I64d\",\"server\":\"%s\",\"account\":{\"balance\":%.8f,\"equity\":%.8f,\"margin\":%.8f,\"free_margin\":%.8f},\"deals\":%s,\"capital_movements\":%s,\"positions\":%s,\"orders\":%s,\"symbol_specs\":%s}",terminal_connected?"true":"false",IsoUtc(),AccountInfoInteger(ACCOUNT_LOGIN),JsonEscape(AccountInfoString(ACCOUNT_SERVER)),AccountInfoDouble(ACCOUNT_BALANCE),AccountInfoDouble(ACCOUNT_EQUITY),AccountInfoDouble(ACCOUNT_MARGIN),AccountInfoDouble(ACCOUNT_MARGIN_FREE),deals,capital,positions,orders,specs);
    WriteAtomic(RESPONSES+"sync.response.json",response);
 }
 

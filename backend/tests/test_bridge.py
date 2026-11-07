@@ -178,6 +178,72 @@ def test_sync_response_is_ingested_and_deduplicated(tmp_path, monkeypatch):
         assert conn.execute("SELECT COUNT(*) FROM strategies").fetchone()[0] == 0
 
 
+def test_capital_movements_are_ingested_once_and_advance_their_cursor(tmp_path, monkeypatch):
+    from app.mt5_bridge import CAPITAL_CURSOR_OVERLAP_MSC, request_sync
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "capital.db")
+    db.init_db()
+    data_dir = tmp_path / "terminal"
+    (data_dir / "MQL5").mkdir(parents=True)
+    (data_dir / "origin.txt").write_text("C:\\MT5", encoding="utf-8")
+    terminal = register_terminal("Fixture", str(data_dir))
+    assert request_sync(terminal["id"])["capital_since_msc"] == 0
+    response_dir = data_dir / BRIDGE_RELATIVE / "Responses"
+    response_dir.mkdir(parents=True)
+    deposit_msc = 10 * CAPITAL_CURSOR_OVERLAP_MSC
+    payload = {
+        "schema_version": 4, "status": "ok", "generated_at": "2026-08-19T15:06:00Z",
+        "account_login": "60366027", "server": "Axi-US51-Live",
+        "account": {"balance": 2450, "equity": 2450, "margin": 0, "free_margin": 2450},
+        "deals": [],
+        "capital_movements": [
+            {"ticket": 1, "time_msc": 1000, "deal_type": "BALANCE", "amount": 2000, "comment": "Deposit"},
+            {"ticket": 2, "time_msc": deposit_msc, "deal_type": "BALANCE", "amount": 450, "comment": "Deposit"},
+        ],
+        "positions": [], "orders": [],
+    }
+    for _ in range(2):
+        (response_dir / "sync.response.json").write_text(json.dumps(payload), encoding="utf-8")
+        assert ingest_responses()["sync"] == 1
+    with db.session() as conn:
+        rows = conn.execute(
+            "SELECT account_login,ticket,time_msc,deal_type,amount FROM capital_movements ORDER BY ticket"
+        ).fetchall()
+        assert [tuple(row) for row in rows] == [
+            ("60366027", 1, 1000, "BALANCE", 2000.0),
+            ("60366027", 2, deposit_msc, "BALANCE", 450.0),
+        ]
+        cursor = conn.execute(
+            "SELECT capital_cursor_msc FROM terminals WHERE id=?", (terminal["id"],)
+        ).fetchone()[0]
+        assert cursor == deposit_msc
+    assert request_sync(terminal["id"])["capital_since_msc"] == deposit_msc - CAPITAL_CURSOR_OVERLAP_MSC
+
+
+def test_legacy_bridge_response_keeps_capital_cursor_for_backfill(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "legacy.db")
+    db.init_db()
+    data_dir = tmp_path / "terminal"
+    (data_dir / "MQL5").mkdir(parents=True)
+    (data_dir / "origin.txt").write_text("C:\\MT5", encoding="utf-8")
+    terminal = register_terminal("Fixture", str(data_dir))
+    response_dir = data_dir / BRIDGE_RELATIVE / "Responses"
+    response_dir.mkdir(parents=True)
+    payload = {
+        "status": "ok", "generated_at": "2026-06-22T12:00:00Z", "account_login": "123", "server": "Demo",
+        "account": {"balance": 10000, "equity": 10000, "margin": 0, "free_margin": 10000},
+        "deals": [{"ticket": 1, "position_id": 9, "time_msc": 5000, "symbol": "XAUUSD", "deal_type": "BUY", "entry_type": "IN", "volume": 0.1, "price": 2300, "profit": 0, "commission": 0, "swap": 0, "magic": 77, "comment": ""}],
+        "positions": [], "orders": [],
+    }
+    (response_dir / "sync.response.json").write_text(json.dumps(payload), encoding="utf-8")
+    assert ingest_responses()["sync"] == 1
+    with db.session() as conn:
+        row = conn.execute(
+            "SELECT cursor_msc,capital_cursor_msc FROM terminals WHERE id=?", (terminal["id"],)
+        ).fetchone()
+        assert tuple(row) == (5000, 0)
+
+
 def test_open_position_without_confirmed_ex5_remains_unassigned(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "position.db")
     db.init_db()
