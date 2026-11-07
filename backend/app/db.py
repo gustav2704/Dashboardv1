@@ -773,6 +773,8 @@ def init_db(path: Path | None = None) -> None:
             )
         if "no_mm_accepted_at" not in strategy_columns:
             conn.execute("ALTER TABLE strategies ADD COLUMN no_mm_accepted_at TEXT")
+        if "manual_timeframe" not in strategy_columns:
+            conn.execute("ALTER TABLE strategies ADD COLUMN manual_timeframe TEXT")
         if "backtest_risk_accepted_run_id" not in strategy_columns:
             conn.execute("ALTER TABLE strategies ADD COLUMN backtest_risk_accepted_run_id INTEGER")
         if "backtest_risk_accepted_at" not in strategy_columns:

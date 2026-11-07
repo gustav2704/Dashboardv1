@@ -214,6 +214,13 @@ class StrategyNoMmAcceptanceUpdate(BaseModel):
     accepted: bool
 
 
+MANUAL_TIMEFRAMES = ("M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN1")
+
+
+class StrategyManualTimeframeUpdate(BaseModel):
+    timeframe: str | None = None
+
+
 class StrategyBacktestRiskAcceptanceUpdate(BaseModel):
     accepted: bool
     run_id: int = Field(gt=0)
@@ -1878,7 +1885,11 @@ def dashboard_data(
                 )),
             )
             observed_profile_timeframes = sorted(profile_timeframes.get(profile_key, set()))
-            if deployment_timeframes:
+            manual_timeframe = str(strategy["manual_timeframe"] or "").strip()
+            if manual_timeframe:
+                timeframe = manual_timeframe
+                timeframe_source = "manual"
+            elif deployment_timeframes:
                 timeframe = " / ".join(deployment_timeframes)
                 timeframe_source = "terminal_profile"
             elif observed_profile_timeframes:
@@ -2296,7 +2307,7 @@ def dashboard_data(
     }
     timeframe_coverage = {
         source: sum(1 for item in output if item["timeframe_source"] == source)
-        for source in ("terminal_profile", "sqx", "missing")
+        for source in ("terminal_profile", "sqx", "manual", "missing")
     }
     return {
         "generated_at": utcnow(), "window": window,
@@ -3789,6 +3800,23 @@ def put_strategy_no_mm_acceptance(
         "no_mm_accepted": payload.accepted,
         "no_mm_accepted_at": accepted_at,
     }
+
+
+@app.put("/api/strategies/{strategy_id}/manual-timeframe")
+def put_strategy_manual_timeframe(
+    strategy_id: int, payload: StrategyManualTimeframeUpdate
+) -> dict[str, Any]:
+    value = (payload.timeframe or "").strip().upper()
+    if value and value not in MANUAL_TIMEFRAMES:
+        raise HTTPException(422, f"Timeframe must be one of: {', '.join(MANUAL_TIMEFRAMES)}")
+    with session() as conn:
+        result = conn.execute(
+            "UPDATE strategies SET manual_timeframe=? WHERE id=? AND archived_at IS NULL",
+            (value or None, strategy_id),
+        )
+        if result.rowcount == 0:
+            raise HTTPException(404, "Strategy not found")
+    return {"strategy_id": strategy_id, "manual_timeframe": value or None}
 
 
 @app.put("/api/strategies/{strategy_id}/backtest-risk-acceptance")
