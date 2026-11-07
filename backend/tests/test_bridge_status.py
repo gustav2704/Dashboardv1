@@ -54,6 +54,36 @@ def test_guardian_source_is_never_marked_stale_by_bridge_ingestion(tmp_path, mon
     assert tuple(row) == ("connected", stale_seen)
 
 
+def test_shared_guardian_source_is_ingested_by_dashboard_bridge(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "shared-guardian-bridge.db")
+    monkeypatch.setattr(mapping, "ensure_mt5_strategies", lambda: {"created": 0, "linked": 0, "safe_matches": 0})
+    db.init_db()
+    data_dir = tmp_path / "axi-live"
+    (data_dir / "MQL5").mkdir(parents=True)
+    (data_dir / "origin.txt").write_text("C:\\MT5", encoding="utf-8")
+    terminal = register_terminal("AXI Live", str(data_dir))
+    generated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    with db.session() as conn:
+        conn.execute(
+            "UPDATE terminals SET account_login='60366027',server='Axi-US51-Live' WHERE id=?",
+            (terminal["id"],),
+        )
+        conn.execute(
+            """INSERT INTO guardian_sources(
+                 terminal_id,directory,account_login,bridge_excluded,created_at,updated_at
+               ) VALUES(?,?,?,?,?,?)""",
+            (terminal["id"], "MQL5\\Files\\GuardianCuenta", "60366027", 0, generated_at, generated_at),
+        )
+    response_dir = data_dir / BRIDGE_RELATIVE / "Responses"
+    response_dir.mkdir(parents=True)
+    (response_dir / "sync.response.json").write_text(json.dumps({
+        "status": "ok", "terminal_connected": True, "generated_at": generated_at,
+        "account_login": "60366027", "server": "Axi-US51-Live", "account": {}, "deals": [], "positions": [], "orders": [],
+    }), encoding="utf-8")
+
+    assert ingest_responses()["sync"] == 1
+
+
 def test_stale_bridge_without_a_transport_failure_is_connecting_not_disconnected(tmp_path, monkeypatch):
     """A dashboard restart must not show a broker outage while MT5 is replying."""
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "startup-bridge-status.db")

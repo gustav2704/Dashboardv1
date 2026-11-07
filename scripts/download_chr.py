@@ -1,6 +1,6 @@
 import os, paramiko, sys
 
-HOST = "145.63.135.196"
+HOST = "145.63.130.53"
 USER = "Administrator"
 KEY = os.path.join(os.path.dirname(__file__), "..", "ssh_access", "codex_vps_ed25519")
 TERM = "6C3C6A11D1C3791DD4DBF45421BF8028"

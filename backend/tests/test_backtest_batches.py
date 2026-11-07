@@ -276,3 +276,32 @@ def test_pause_requested_during_run_is_preserved(tmp_path, monkeypatch):
         assert conn.execute(
             "SELECT status FROM backtest_batches WHERE id=?", (batch_id,)
         ).fetchone()[0] == "paused"
+
+
+def test_recover_finishes_terminal_paused_batch_after_transaction_commits(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "recover-paused.db")
+    db.init_db()
+    with db.session() as conn:
+        strategy_id = _strategy(conn, "Recovered Bot")
+        batch_id = conn.execute(
+            """INSERT INTO backtest_batches(
+                 status,broker,model,policy,only_missing,execution_target,pilot_required,created_at
+               ) VALUES('paused','Darwinex',1,'strict',0,'ssh_darwinex_demo',1,?)""",
+            (db.utcnow(),),
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO backtest_batch_items(
+                 batch_id,strategy_id,status,error,created_at,updated_at
+               ) VALUES(?,?,'validation_failed','fixture failure',?,?)""",
+            (batch_id, strategy_id, db.utcnow(), db.utcnow()),
+        )
+
+    backtest_batches.recover_batches()
+
+    with db.session() as conn:
+        recovered = conn.execute(
+            "SELECT status,finished_at,error FROM backtest_batches WHERE id=?", (batch_id,)
+        ).fetchone()
+    assert recovered["status"] == "completed"
+    assert recovered["finished_at"]
+    assert recovered["error"] is None

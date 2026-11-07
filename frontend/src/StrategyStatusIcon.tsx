@@ -1,4 +1,4 @@
-import { Frown, Smile } from 'lucide-react'
+import { Settings, Smile, Star, TriangleAlert } from 'lucide-react'
 import type { StrategyStatus } from './strategyStatusFilter'
 
 export const strategyStatusLabels: Record<StrategyStatus, string> = {
@@ -7,18 +7,22 @@ export const strategyStatusLabels: Record<StrategyStatus, string> = {
   monitor: 'Revisar',
   candidate_live: 'Candidata live',
   axi_live: 'Axi live',
+  favorite: 'Favorito',
+  to_modify: 'A modificar',
 }
 
 export function StrategyStatusIcon({ status, size = 16 }: { status: StrategyStatus; size?: number }) {
   if (status === 'live') return <span aria-label="Darwinex live" style={{ fontSize: size, lineHeight: 1 }}>D</span>
-  if (status === 'monitor') return <Frown size={size} aria-label="Revisar" />
+  if (status === 'monitor') return <TriangleAlert size={size} aria-label="Revisar" />
   if (status === 'candidate_live') return <Smile size={size} aria-label="Candidata live" />
   if (status === 'axi_live') return <span aria-label="Axi live" style={{ fontSize: size, lineHeight: 1 }}>A</span>
+  if (status === 'favorite') return <Star size={size} aria-label="Favorito" />
+  if (status === 'to_modify') return <Settings size={size} aria-label="A modificar" />
   return null
 }
 
 export function PositiveStrategyStatusIcon({ status, size = 14 }: { status: StrategyStatus; size?: number }) {
-  return status === 'live' || status === 'candidate_live' || status === 'axi_live'
+  return status === 'live' || status === 'candidate_live' || status === 'axi_live' || status === 'favorite'
     ? <StrategyStatusIcon status={status} size={size} />
     : null
 }

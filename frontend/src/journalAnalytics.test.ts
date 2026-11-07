@@ -257,4 +257,36 @@ describe('account analytics', () => {
     expect(temporalVisualValue(breakeven, 'profitFactor')).toBe(0)
     expect(positive.profitFactor).toBe(2.55)
   })
+
+  it('treats MT5 deposits as capital, not as equity gains or drawdowns', () => {
+    const trades = [
+      trade({ close_time_msc: 1 * DAY, net_profit: -100 }),
+      trade({ close_time_msc: 3 * DAY, net_profit: -50 }),
+    ]
+    const data = journal(trades, {
+      initial_capitals: { '100': 1000 },
+      capital_movements: [{ account: '100', ticket: 9, time_msc: 2 * DAY, amount: 500, comment: 'Deposit' }],
+      capital_coverage: {
+        accounts: ['100'],
+        start: { time_msc: 0, total_balance: 1000, accounts: { '100': { time_msc: 0, balance: 1000 } }, complete: true, max_age_msc: 0 },
+        end: { time_msc: 40 * DAY, total_balance: 1350, accounts: { '100': { time_msc: 40 * DAY, balance: 1350 } }, complete: true, max_age_msc: 0 },
+      },
+    })
+    const result = buildAccountAnalytics(data)
+    expect(result.capital.reason).not.toContain('no reconcilia')
+    expect(result.drawdowns).toHaveLength(1)
+    expect(result.drawdowns[0]).toMatchObject({ depth: 150, ongoing: true })
+    expect(result.drawdowns[0].depth_pct).toBeCloseTo(10, 8)
+  })
+
+  it('excludes capital movements from the P/L equity view', () => {
+    const points = buildEquityPnlPoints([
+      { label: 'a', equity: 1000 },
+      { label: 'b', equity: 900 },
+      { label: 'Depósito', equity: 1400, capital: 500 },
+      { label: 'c', equity: 1350 },
+    ])
+    expect(points.map(point => point.pnl)).toEqual([0, -100, -100, -150])
+    expect(points.at(-1)!.pnlPercent).toBeCloseTo(-10, 8)
+  })
 })

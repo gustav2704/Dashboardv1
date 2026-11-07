@@ -14,7 +14,7 @@
 
 .magic-number-entry-header > strong {
   color: #e2f5ff;
-  font: 700 13px Consolas, monospace;
+  font: 700 15px Consolas, monospace;
 }
 
 .magic-number-entry-header > span {
@@ -23,7 +23,7 @@
   border: 1px solid #245f79;
   background: #0d202b;
   color: #7dd3fc;
-  font: 9px Consolas, monospace;
+  font: 11px Consolas, monospace;
   text-transform: uppercase;
 }
 
@@ -39,7 +39,7 @@
   display: block;
   min-width: 0;
   color: #90a4b8;
-  font-size: 11px;
+  font-size: 13px;
   line-height: 1.45;
   overflow-wrap: break-word;
 }

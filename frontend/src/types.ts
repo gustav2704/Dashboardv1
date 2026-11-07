@@ -91,10 +91,10 @@ export type Strategy = {
   id: number; identity_strategy_id: number; symbol: string; asset_key: string; sqx_name: string; mql5_name: string; display_name: string; display_name_source: string | null; account_login: string; timeframe: string | null;
   timeframe_source: 'terminal_profile' | 'sqx' | 'manual' | 'missing';
   lineage_accounts: { current: string[]; predecessor: string[] };
-  origin: string; last_observed_at?: string; note: string; note_updated_at: string | null; selection: boolean; strategy_statuses: Array<'live' | 'monitor' | 'candidate_live' | 'axi_live'>; no_mm_accepted: boolean; no_mm_accepted_at: string | null;
+  origin: string; last_observed_at?: string; note: string; note_updated_at: string | null; selection: boolean; strategy_statuses: Array<'live' | 'monitor' | 'candidate_live' | 'axi_live' | 'favorite' | 'to_modify'>; no_mm_accepted: boolean; no_mm_accepted_at: string | null;
   state: string; link_state: 'linked' | 'candidate' | 'sqx_catalog' | 'sqx_only' | 'mt5_only' | 'catalog_only';
-  deployment_state: 'attached_active' | 'attached_inactive' | 'observed' | null;
-  activity_state: 'with_recent_trades' | 'without_recent_trades' | 'undetermined' | 'not_deployed';
+  deployment_state: 'attached_active' | 'attached_inactive' | 'observed' | 'trade_observed' | null;
+  activity_state: 'with_recent_trades' | 'without_recent_trades' | 'undetermined' | 'not_deployed' | 'observed_by_trade';
   last_inventory_at: string | null;
   deployments: BotDeployment[];
   sqx: SQXInfo | null; sqx_analytics: SQXAnalytics | null; metrics: Metrics; live_metrics: Metrics; historical_metrics: Metrics; lifetime_metrics: Metrics; monthly_net_profit: Array<{ key: string; label: string; net_profit: number }>; account_metrics: Record<string, Metrics>; account_balance: number | null; account_pl_percent: number | null; account_initial_capital: number | null; initial_capital_pl_percent: number | null; health: Health; risk_guard: RiskGuard; baseline: Baseline | null; baselines: Baseline[];
@@ -189,6 +189,7 @@ export type OverviewAnalytics = {
     live: { unit: 'lots'; total_positions: number; total_lots: number; groups: LiveExposureGroup[] };
   };
   calendar_profit: Array<{ year: number; months: number[]; total: number }>;
+  realized_period_profit: { week: number; month: number; year: number };
 }
 export type StrategyTemporalBucket = {
   key: string; label: string; count: number; win_rate: number | null;
@@ -213,12 +214,22 @@ export type AccountAliasSettings = {
   accounts: string[];
   aliases: Record<string, string>;
 }
+export type AccountInitialCapitalSettings = {
+  accounts: string[];
+  capitals: Record<string, number>;
+}
 
 export type JournalTrade = {
   strategy_id: number; strategy_name: string; symbol: string; account: string; source_role: 'live' | 'historical' | 'unassigned';
   is_stopped: boolean;
   primary_magic_number: number | null; magic_numbers: number[]; historical_magic_numbers: number[];
-  open_time_msc: number; close_time_msc: number; direction: string; volume: number; profit: number; commission: number; swap: number; net_profit: number;
+  open_time_msc: number; close_time_msc: number; open_price?: number; close_price?: number; direction: string; volume: number; profit: number; commission: number; swap: number; net_profit: number;
+}
+export type AccountSnapshot = {
+  captured_at: string; balance: number; equity: number | null; margin: number | null; free_margin: number | null; filtered_floating_profit?: number | null;
+}
+export type AccountSnapshotPoint = {
+  time_msc: number; balance: number | null; equity: number | null; margin: number | null; free_margin: number | null; filtered_floating_profit?: number | null;
 }
 export type JournalBalancePoint = { time_msc: number; balance: number }
 export type JournalBalanceBoundary = {
@@ -229,11 +240,17 @@ export type JournalAnalysisData = {
   generated_at: string; window: string; account: string | null; range_start_msc: number; range_end_msc: number;
   snapshot?: SnapshotMeta;
   balances: Record<string, number>; trades: JournalTrade[];
+  initial_capitals?: Record<string, number>;
+  initial_capital_sources?: Record<string, 'mt5' | 'configured' | 'estimated'>;
+  /** MT5 deposits (+) and withdrawals (-) made after the starting capital. */
+  capital_movements?: Array<{ account: string; ticket: number; time_msc: number; amount: number; comment: string }>;
+  account_snapshots?: Record<string, AccountSnapshot>;
+  account_snapshot_history?: Record<string, AccountSnapshotPoint[]>;
   unassigned_groups?: Array<{ account: string; symbol: string; magic_number: number; reason: string; count: number; first_close_time_msc: number; last_close_time_msc: number }>;
   daily_balances: Array<{ day: string; time_msc: number; total_balance: number; accounts: Record<string, JournalBalancePoint>; complete: boolean }>;
   capital_coverage: { accounts: string[]; start: JournalBalanceBoundary; end: JournalBalanceBoundary };
   reconciliation: { raw_closed_trades: number; attributed_trades: number; unassigned_trades: number; displayed_trades: number; status: 'reconciled' | 'mismatch' };
-  real_equity_curve?: Array<{ time_msc: number; equity: number; label: string }>;
+  real_equity_curve?: Array<{ time_msc: number; equity: number; net_profit?: number; type?: 'trade' | 'capital'; label: string }>;
 }
 
 export type BacktestDefaults = {
@@ -300,16 +317,28 @@ export type GuardianEvent = {
   event_type: string | null; intervention_id: string | null; position_id: string | null;
   ticket: string | null; symbol: string | null; side: string | null; volume: number | null;
   balance: number | null; net_profit: number | null; net_pct: number | null;
-  reason: string | null; capture_pct: number | null; detail: string | null;
+  reason: string | null; reason_label: string | null; capture_pct: number | null; detail: string | null;
+  ea_name: string | null;
 }
 export type GuardianImpactIntervention = {
   id: number; time: string; intervention_id: string | null; position_id: string | null; ticket: string | null;
-  symbol: string | null; side: string | null; volume: number | null; reason: string | null; detail: string | null;
+  symbol: string | null; side: string | null; volume: number | null; reason: string | null; reason_label: string | null; detail: string | null;
   virtual_delta: number | null; avoided_loss: number; foregone_gain: number; virtual_mfe: number | null; virtual_mae: number | null;
+  ea_name: string | null;
+  close_net: number | null; ea_sl_estimate: number | null; hold_outcome: number | null; adjusted_benefit: number | null; sl_capped: boolean;
+}
+export type GuardianStrategyStats = {
+  trades: number; net_profit: number; guardian_closes: number; guardian_net: number; ea_closes: number; ea_net: number;
+  win_rate: number | null; avg_win: number | null; avg_loss: number | null; breakeven_win_rate: number | null;
 }
 export type GuardianPendingIntervention = {
   id: number; time: string; intervention_id: string | null; position_id: string | null; ticket: string | null;
-  symbol: string | null; reason: string | null; detail: string | null; status: 'pending';
+  symbol: string | null; reason: string | null; reason_label: string | null; detail: string | null; status: 'pending';
+  ea_name: string | null;
+}
+export type GuardianConfig = {
+  sl_pct: number | null; tp_pct: number | null; trail_arm_pct: number | null; trail_floor_pct: number | null;
+  anti_arm_pct: number | null; anti_floor_pct: number | null; as_of: string | null; balance: number | null;
 }
 export type GuardianData = {
   generated_at: string;
@@ -323,5 +352,8 @@ export type GuardianData = {
     evaluated: number; pending: number; avoided_loss: number; foregone_gain: number;
     interventions: GuardianImpactIntervention[]; pending_interventions: GuardianPendingIntervention[];
     latest: GuardianImpactIntervention | GuardianPendingIntervention | null; method: string;
+    adjusted?: { avoided_loss: number; foregone_gain: number; net: number; evaluated: number; sl_capped: number; ea_sl_estimate: number | null; method: string };
   };
+  performance?: { strategies: Array<GuardianStrategyStats & { magic: string; ea_name: string | null; symbols: string[] }>; totals: GuardianStrategyStats } | null;
+  config: GuardianConfig | null;
 }

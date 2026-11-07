@@ -5,6 +5,7 @@ import json
 import msvcrt
 import re
 import shutil
+import sqlite3
 import subprocess
 import threading
 import time
@@ -961,7 +962,19 @@ def worker(stop_event: threading.Event) -> None:
     if lock_handle is None:
         return
     try:
-        recover_batches()
+        # Startup maintenance can briefly hold SQLite's write lock while this
+        # worker is being created.  A transient lock must delay recovery, not
+        # terminate the only batch consumer and leave queued work stranded.
+        while not stop_event.is_set():
+            try:
+                recover_batches()
+                break
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).casefold():
+                    raise
+                stop_event.wait(5)
+        if stop_event.is_set():
+            return
         while not stop_event.is_set():
             try:
                 progressed = process_once()
@@ -1000,6 +1013,7 @@ def worker(stop_event: threading.Event) -> None:
 
 
 def recover_batches() -> None:
+    finished: list[dict[str, Any]] = []
     with session() as conn:
         conn.execute(
             """UPDATE backtest_batch_items SET status='queued',updated_at=?
@@ -1014,7 +1028,7 @@ def recover_batches() -> None:
         # work remains).  A previous run may have paused the batch after a
         # transient error, but with no pending items there is nothing left to
         # do and the paused state only blocks new batches.
-        for row in conn.execute(
+        finished = rows(conn.execute(
             """SELECT b.id,b.broker,b.execution_target
                FROM backtest_batches b
                WHERE b.status='paused'
@@ -1022,13 +1036,18 @@ def recover_batches() -> None:
                    SELECT 1 FROM backtest_batch_items i
                    WHERE i.batch_id=b.id AND i.status IN ('resolving','queued','running')
                  )"""
-        ):
-            _finish_batch(
-                int(row["id"]),
-                status="completed",
-                broker=str(row["broker"] or "FPM"),
-                execution_target=str(row["execution_target"] or "local"),
-            )
+        ))
+    # Finish after the recovery transaction commits.  Calling _finish_batch()
+    # from inside the session above opens a second writer and deterministically
+    # deadlocks SQLite against the first connection whenever a terminal paused
+    # batch exists.
+    for row in finished:
+        _finish_batch(
+            int(row["id"]),
+            status="completed",
+            broker=str(row["broker"] or "FPM"),
+            execution_target=str(row["execution_target"] or "local"),
+        )
 
 
 def pause_batch(batch_id: int) -> dict[str, Any]:

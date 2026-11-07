@@ -1,0 +1,42 @@
+.account-performance { overflow: hidden; padding: 0; }
+.account-performance-tabs,.performance-subtabs { display: flex; gap: 2px; overflow-x: auto; border-bottom: 1px solid var(--line); background: #0c1a23; }
+.account-performance-tabs button,.performance-subtabs button { flex: 0 0 auto; padding: 12px 16px; border: 0; border-bottom: 2px solid transparent; background: #12232e; color: #8ba0ad; cursor: pointer; font: 600 13px Consolas, monospace; }
+.account-performance-tabs button:hover,.performance-subtabs button:hover { color: #d5e7ef; background: #152b37; }
+.account-performance-tabs button.active,.performance-subtabs button.active { border-bottom-color: #2dd4bf; background: #0b1821; color: #d9fff8; }
+.account-performance-body { min-height: 430px; padding: 20px; }
+.account-performance-scope-heading { display: flex; align-items: end; justify-content: space-between; gap: 18px; margin-bottom: 12px; }
+.account-performance-scope-heading.compact { margin-top: 24px; }
+.account-performance-scope-heading h3 { margin: 4px 0 0; font-size: 18px; }
+.performance-scope { display: inline-flex; width: max-content; padding: 4px 8px; border: 1px solid #285f5a; border-radius: 999px; background: #10332f; color: #8cf5e5; font: 600 11px Consolas,monospace; text-transform: uppercase; }
+.performance-scope.global { border-color: #2f5369; background: #102735; color: #8ed8f7; }
+.account-performance-metrics,.account-stat-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 1px; border: 1px solid var(--line); background: var(--line); }
+.account-global-metrics { grid-template-columns: repeat(4,minmax(0,1fr)); }
+.account-performance-metric { min-width: 0; padding: 15px; background: #09161f; }
+.account-performance-metric > span,.account-performance-metric > strong,.account-performance-metric > small { display: block; }
+.account-performance-metric > span { color: #78909f; font-size: 12px; text-transform: uppercase; }
+.account-performance-metric > strong { margin: 8px 0 5px; overflow: hidden; color: #e0eff5; font: 600 20px Consolas,monospace; text-overflow: ellipsis; }
+.account-performance-metric > small { color: #718895; font-size: 12px; line-height: 1.35; }
+.account-performance-table { width: 100%; border-collapse: collapse; }
+.account-performance-table th,.account-performance-table td { padding: 12px 10px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+.account-performance-table thead th { background: #10202a; color: #78909f; font: 600 11px Consolas,monospace; text-transform: uppercase; }
+.account-performance-table tbody th,.account-performance-table thead th:first-child { text-align: left; }
+.account-performance-table tbody th { color: #d5e7ef; }
+.account-performance-table td { color: #b6c7d0; font: 14px Consolas,monospace; }
+.account-performance-table td small { color: #667d8a; }
+.asset-performance-table thead tr:first-child th { border-right: 1px solid var(--line); text-align: center; }
+.performance-temporal-chart,.duration-view,.performance-chart-panel { min-width: 0; }
+.chart-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 8px 8px 16px; color: #d7e7ef; }
+.chart-title small { display: flex; align-items: center; gap: 9px; color: #718895; }
+.chart-title small .performance-scope { display: inline-flex; }
+.performance-subtabs { margin: -20px -20px 18px; }
+.duration-view .account-performance-metrics { width: min(660px,100%); margin-bottom: 25px; grid-template-columns: repeat(2,minmax(0,1fr)); }
+.performance-chart-panel .empty-state { min-height: 330px; }
+@media (max-width: 1050px) {
+  .account-global-metrics,.account-performance-metrics,.account-stat-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
+}
+@media (max-width: 620px) {
+  .account-performance-body { padding: 14px; }
+  .account-performance-scope-heading { align-items: flex-start; flex-direction: column; gap: 8px; }
+  .account-global-metrics,.account-performance-metrics,.account-stat-grid,.duration-view .account-performance-metrics { grid-template-columns: 1fr; }
+  .performance-subtabs { margin: -14px -14px 15px; }
+}

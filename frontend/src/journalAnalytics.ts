@@ -138,6 +138,23 @@ export function runsTest(trades: JournalTrade[]) {
   return { zScore, zProbability: Math.max(0, Math.min(100, (1 - pValue) * 100)), count: sequence.length }
 }
 
+/** Net deposits/withdrawals with from < time_msc <= to. */
+export function capitalFlowBetween(data: JournalAnalysisData, from: number, to: number, account?: string) {
+  return (data.capital_movements || [])
+    .filter(item => item.time_msc > from && item.time_msc <= to && (account == null || item.account === account))
+    .reduce((total, item) => total + item.amount, 0)
+}
+
+type EquityEvent = { time_msc: number; amount: number; flow: boolean }
+
+/** Trades and capital movements in time order; flows sort before trades at the same instant. */
+export function equityEvents(data: JournalAnalysisData): EquityEvent[] {
+  return [
+    ...data.trades.map(trade => ({ time_msc: trade.close_time_msc, amount: trade.net_profit, flow: false })),
+    ...(data.capital_movements || []).map(item => ({ time_msc: item.time_msc, amount: item.amount, flow: true })),
+  ].sort((left, right) => left.time_msc - right.time_msc || Number(right.flow) - Number(left.flow))
+}
+
 function capitalValidation(data: JournalAnalysisData, eligible: boolean) {
   if (!eligible) return { valid: false, reason: 'Los filtros parciales no representan el capital completo de la cuenta.' }
   const coverage = data.capital_coverage
@@ -154,7 +171,7 @@ function capitalValidation(data: JournalAnalysisData, eligible: boolean) {
     const pnl = data.trades
       .filter(trade => trade.account === account && trade.close_time_msc > start.time_msc && trade.close_time_msc <= end.time_msc)
       .reduce((sum, trade) => sum + trade.net_profit, 0)
-    const delta = end.balance - start.balance
+    const delta = end.balance - start.balance - capitalFlowBetween(data, start.time_msc, end.time_msc, account)
     if (Math.abs(delta - pnl) > Math.max(.05, Math.abs(pnl) * 1e-6)) {
       return { valid: false, reason: `El balance de ${account} no reconcilia con el P/L; puede haber movimientos de capital o trades filtrados.` }
     }
@@ -170,8 +187,10 @@ function capitalMetrics(data: JournalAnalysisData, eligible: boolean) {
   const startBalance = start.total_balance as number
   const endBalance = end.total_balance as number
   const elapsedDays = ((end.time_msc as number) - (start.time_msc as number)) / DAY_MSC
-  const cagr = elapsedDays >= 30 && startBalance > 0 && endBalance > 0
-    ? (Math.pow(endBalance / startBalance, 365.2425 / elapsedDays) - 1) * 100
+  // Deposits/withdrawals are not performance: compare against invested capital.
+  const invested = startBalance + capitalFlowBetween(data, start.time_msc as number, end.time_msc as number)
+  const cagr = elapsedDays >= 30 && invested > 0 && endBalance > 0
+    ? (Math.pow(endBalance / invested, 365.2425 / elapsedDays) - 1) * 100
     : null
   const complete = data.daily_balances.filter(point => point.complete).sort((left, right) => left.time_msc - right.time_msc)
   const returns: number[] = []
@@ -186,7 +205,8 @@ function capitalMetrics(data: JournalAnalysisData, eligible: boolean) {
     const pnl = data.trades
       .filter(trade => trade.close_time_msc > previous.time_msc && trade.close_time_msc <= point.time_msc)
       .reduce((sum, trade) => sum + trade.net_profit, 0)
-    if (Math.abs((point.total_balance - previous.total_balance) - pnl) > Math.max(.05, Math.abs(pnl) * 1e-6) || previous.total_balance <= 0) {
+    const flow = capitalFlowBetween(data, previous.time_msc, point.time_msc)
+    if (Math.abs((point.total_balance - previous.total_balance - flow) - pnl) > Math.max(.05, Math.abs(pnl) * 1e-6) || previous.total_balance <= 0) {
       sharpeValid = false
       break
     }
@@ -207,32 +227,41 @@ function capitalMetrics(data: JournalAnalysisData, eligible: boolean) {
 }
 
 function drawdownEpisodes(data: JournalAnalysisData, startBalance: number | null) {
-  const ordered = [...data.trades].sort((left, right) => left.close_time_msc - right.close_time_msc)
   let equity = startBalance ?? 0
   let peak = equity
   let peakAt = data.range_start_msc
   let active: { start: number; trough: number; troughAt: number; peak: number } | null = null
   const result: DrawdownEpisode[] = []
-  for (const trade of ordered) {
-    equity += trade.net_profit
+  for (const event of equityEvents(data)) {
+    equity += event.amount
+    if (event.flow) {
+      // A deposit/withdrawal shifts the whole equity level; it is neither a
+      // new high nor a drawdown.
+      peak += event.amount
+      if (active) {
+        active.peak += event.amount
+        active.trough += event.amount
+      }
+      continue
+    }
     if (equity < peak) {
-      if (!active) active = { start: peakAt, trough: equity, troughAt: trade.close_time_msc, peak }
+      if (!active) active = { start: peakAt, trough: equity, troughAt: event.time_msc, peak }
       if (equity < active.trough) {
         active.trough = equity
-        active.troughAt = trade.close_time_msc
+        active.troughAt = event.time_msc
       }
     } else {
       if (active) {
         const depth = active.peak - active.trough
         result.push({
-          start_msc: active.start, trough_msc: active.troughAt, recovery_msc: trade.close_time_msc,
+          start_msc: active.start, trough_msc: active.troughAt, recovery_msc: event.time_msc,
           depth, depth_pct: startBalance != null && active.peak > 0 ? depth / active.peak * 100 : null,
-          days: (trade.close_time_msc - active.start) / DAY_MSC, ongoing: false,
+          days: (event.time_msc - active.start) / DAY_MSC, ongoing: false,
         })
         active = null
       }
       peak = equity
-      peakAt = trade.close_time_msc
+      peakAt = event.time_msc
     }
   }
   if (active) {

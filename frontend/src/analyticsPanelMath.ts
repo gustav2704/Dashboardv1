@@ -3,6 +3,9 @@ import type { StrategyTemporalBucket } from './types'
 export type StrategyTemporalMetric = 'win_rate' | 'expectancy' | 'profit_factor'
 
 export function temporalMetricValue(bucket: StrategyTemporalBucket, metric: StrategyTemporalMetric) {
+  // The backend sends profit_factor = null when a bucket has trades but no
+  // losses (gross loss 0): that is an unbounded PF, not missing data.
+  if (metric === 'profit_factor' && bucket.profit_factor == null && bucket.count > 0) return Infinity
   return bucket[metric]
 }
 

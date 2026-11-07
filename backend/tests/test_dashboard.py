@@ -126,6 +126,27 @@ def test_dashboard_terminal_strip_excludes_guardian_sources(tmp_path, monkeypatc
     assert [terminal["id"] for terminal in dashboard_data()["terminals"]] == [broker_id]
 
 
+def test_dashboard_terminal_strip_keeps_shared_guardian_source(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "shared-guardian-strip.db")
+    monkeypatch.setattr(main, "suggestions", lambda: [])
+    db.init_db()
+    now = db.utcnow()
+    with db.session() as conn:
+        terminal_id = conn.execute(
+            """INSERT INTO terminals(name,data_dir,account_login,server,status,transport,created_at)
+               VALUES(?,?,?,?,?,?,?)""",
+            ("AXI Live", "ssh://axi", "60366027", "Axi-US51-Live", "connected", "ssh", now),
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO guardian_sources(
+                 terminal_id,directory,account_login,bridge_excluded,created_at,updated_at
+               ) VALUES(?,?,?,?,?,?)""",
+            (terminal_id, "MQL5\\Files\\GuardianCuenta", "60366027", 0, now, now),
+        )
+
+    assert [terminal["id"] for terminal in dashboard_data()["terminals"]] == [terminal_id]
+
+
 def test_archived_vps_inventory_remains_verified_terminal_evidence(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "archived-inventory-account.db")
     monkeypatch.setattr(main, "suggestions", lambda: [])
@@ -463,10 +484,11 @@ def test_worker_cycle_skips_when_another_cycle_owns_the_lock() -> None:
         main._WORKER_CYCLE_LOCK.release()
 
 
-def test_monthly_net_profit_includes_current_and_three_preceding_calendar_months() -> None:
+def test_monthly_net_profit_includes_current_and_five_preceding_calendar_months() -> None:
     months = _overview_months(datetime(2026, 1, 23, tzinfo=timezone.utc))
     assert [(month["key"], month["label"]) for month in months] == [
         ("2026-01", "Ene 2026"), ("2025-12", "Dic 2025"), ("2025-11", "Nov 2025"), ("2025-10", "Oct 2025"),
+        ("2025-09", "Sep 2025"), ("2025-08", "Ago 2025"),
     ]
     as_msc = lambda value: int(value.replace(tzinfo=timezone.utc).timestamp() * 1000)
     values = _monthly_net_profit([
@@ -476,7 +498,7 @@ def test_monthly_net_profit_includes_current_and_three_preceding_calendar_months
         {"close_time_msc": as_msc(datetime(2025, 10, 1)), "net_profit": -50},
         {"close_time_msc": as_msc(datetime(2025, 9, 30, 23, 59, 59)), "net_profit": 999},
     ], months)
-    assert [value["net_profit"] for value in values] == [100, -25, 10, -50]
+    assert [value["net_profit"] for value in values] == [100, -25, 10, -50, 999, 0]
 
 
 def test_latest_baselines_includes_completed_backtests_from_identity_members(tmp_path, monkeypatch):
@@ -1184,6 +1206,8 @@ def test_dashboard_keeps_historical_mapping_out_of_current_magic_and_metrics(tmp
     assert {tuple(trade["magic_numbers"]) for trade in journal["trades"]} == {(1,)}
     assert {tuple(trade["historical_magic_numbers"]) for trade in journal["trades"]} == {()}
     assert len({(trade["strategy_id"], trade["close_time_msc"], trade["net_profit"]) for trade in journal["trades"]}) == 4
+    assert {trade["open_price"] for trade in journal["trades"]} == {100.0}
+    assert {trade["close_price"] for trade in journal["trades"]} == {110.0}
 
     current_account = main.journal_analysis_data(account="100121894")
     assert len(current_account["trades"]) == 4
@@ -1712,6 +1736,15 @@ def test_journal_combines_active_and_archived_terminal_and_keeps_unassigned_trad
     assert unassigned["close_time_msc"] == 3001
     assert unassigned["direction"] == "Long"
     assert journal["balances"] == {"4000094894": 1000}
+    assert journal["account_snapshots"] == {
+        "4000094894": {
+            "captured_at": "2026-01-02T00:00:00+00:00",
+            "balance": 1000.0, "equity": 1000.0, "margin": 0.0, "free_margin": 1000.0,
+            "filtered_floating_profit": 0,
+        }
+    }
+    assert 0 < len(journal["account_snapshot_history"]["4000094894"]) <= 600
+    assert journal["account_snapshot_history"]["4000094894"][-1]["balance"] == 1000.0
     assert journal["range_start_msc"] == 1000
     assert journal["range_end_msc"] >= journal["range_start_msc"]
     assert isinstance(journal["daily_balances"], list)

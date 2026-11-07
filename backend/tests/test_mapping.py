@@ -339,7 +339,7 @@ def _observed_pending_order(conn, terminal_id, comment, *, symbol="GER40", magic
     )
 
 
-def test_unique_magic_without_ex5_evidence_stays_unassigned(
+def test_unique_magic_on_active_terminal_creates_mt5_strategy(
     tmp_path, monkeypatch
 ):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "operational-identity.db")
@@ -355,11 +355,11 @@ def test_unique_magic_without_ex5_evidence_stays_unassigned(
 
     result = ensure_mt5_strategies()
 
-    assert result["created"] == 0
+    assert result["created"] == 1
     assert ensure_mt5_strategies()["created"] == 0
     with db.session() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM strategies").fetchone()[0] == 0
-        assert conn.execute("SELECT COUNT(*) FROM mappings").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM strategies").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM mappings").fetchone()[0] == 1
 
 
 def test_exact_alias_links_observed_mt5_identity_without_creating_duplicate(
@@ -543,7 +543,7 @@ def test_archived_mapping_is_reused_when_the_active_terminal_observes_same_bot(t
         }
 
 
-def test_closed_deal_without_ex5_evidence_stays_unassigned(tmp_path, monkeypatch):
+def test_closed_deal_without_ex5_evidence_creates_mt5_strategy(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "closed-unassigned.db")
     db.init_db()
     now = db.utcnow()
@@ -564,10 +564,10 @@ def test_closed_deal_without_ex5_evidence_stays_unassigned(tmp_path, monkeypatch
 
     result = ensure_mt5_strategies()
 
-    assert result["created"] == 0
+    assert result["created"] == 1
     with db.session() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM strategies").fetchone()[0] == 0
-        assert conn.execute("SELECT COUNT(*) FROM mappings").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM strategies").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM mappings").fetchone()[0] == 1
 
 
 def test_shared_magic_requires_an_unambiguous_comment():

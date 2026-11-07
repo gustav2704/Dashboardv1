@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bestAndWorst, monthlyProfitColor, selectedCalendarTotal } from './analyticsPanelMath'
+import { bestAndWorst, monthlyProfitColor, selectedCalendarTotal, temporalMetricValue } from './analyticsPanelMath'
 import type { StrategyTemporalBucket } from './types'
 
 const bucket = (label: string, value: number | null): StrategyTemporalBucket => ({
@@ -12,6 +12,17 @@ describe('analytics panel helpers', () => {
     const result = bestAndWorst([bucket('A', 20), bucket('B', null), bucket('C', 80)], 'win_rate')
     expect(result.best?.label).toBe('C')
     expect(result.worst?.label).toBe('A')
+  })
+
+  it('treats a profit factor without losses as unbounded, not missing', () => {
+    const allWins: StrategyTemporalBucket = { key: 'W', label: 'W', count: 2, win_rate: 100, expectancy: 5, profit_factor: null, low_sample: true }
+    const empty: StrategyTemporalBucket = { key: 'E', label: 'E', count: 0, win_rate: null, expectancy: null, profit_factor: null, low_sample: true }
+    const losing: StrategyTemporalBucket = { key: 'L', label: 'L', count: 3, win_rate: 0, expectancy: -4, profit_factor: 0, low_sample: true }
+    expect(temporalMetricValue(allWins, 'profit_factor')).toBe(Infinity)
+    expect(temporalMetricValue(empty, 'profit_factor')).toBeNull()
+    const result = bestAndWorst([allWins, empty, losing], 'profit_factor')
+    expect(result.best?.label).toBe('W')
+    expect(result.worst?.label).toBe('L')
   })
 
   it('uses YTD for the current year and the full total for past years', () => {

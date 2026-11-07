@@ -174,6 +174,30 @@ def build_calendar_profit(trades: Iterable[dict[str, Any]]) -> list[dict[str, An
     ]
 
 
+def build_realized_period_profit(
+    trades: Iterable[dict[str, Any]], now: datetime | None = None,
+) -> dict[str, float]:
+    """Closed P/L for the active broker-calendar week, month and year."""
+    current = (now or datetime.now(BROKER_TZ)).astimezone(BROKER_TZ)
+    week_start = current.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=current.weekday())
+    month_start = current.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    year_start = current.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    result = {"week": 0.0, "month": 0.0, "year": 0.0}
+    for trade in trades:
+        close_msc = int(trade.get("close_time_msc") or 0)
+        if close_msc <= 0:
+            continue
+        closed = datetime.fromtimestamp(close_msc / 1000, BROKER_TZ)
+        value = float(trade.get("net_profit") or 0)
+        if closed >= week_start:
+            result["week"] += value
+        if closed >= month_start:
+            result["month"] += value
+        if closed >= year_start:
+            result["year"] += value
+    return {key: round(value, 2) for key, value in result.items()}
+
+
 def _bucket(label: str, values: list[float]) -> dict[str, Any]:
     wins = [value for value in values if value > 0]
     losses = [value for value in values if value < 0]

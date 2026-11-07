@@ -1,4 +1,4 @@
-export type StrategyStatus = '' | 'live' | 'monitor' | 'candidate_live' | 'axi_live'
+export type StrategyStatus = '' | 'live' | 'monitor' | 'candidate_live' | 'axi_live' | 'favorite' | 'to_modify'
 export type StrategyStatusFilter = 'all' | StrategyStatus | ''
 
 type StatusStrategy = { strategy_statuses: readonly StrategyStatus[] }

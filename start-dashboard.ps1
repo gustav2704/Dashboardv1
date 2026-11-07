@@ -11,14 +11,22 @@ $pnpm = if (Test-Path -LiteralPath $bundledPnpm) {
 } else {
     (Get-Command pnpm.cmd -ErrorAction Stop).Source
 }
-$basePython = 'C:\Users\Admin\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+$basePython = @(
+    'C:\Users\Admin\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+    'C:\Users\Admin\AppData\Local\Programs\Python\Python312\python.exe'
+) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+if (-not $basePython) { $basePython = (Get-Command python.exe -ErrorAction Stop).Source }
 $backend = Join-Path $root 'backend'
 $listener = Get-NetTCPConnection -LocalAddress '127.0.0.1' -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($listener) {
     throw "Dashboard already running on http://127.0.0.1:8765 (PID $($listener.OwningProcess)). Stop that process before starting another instance."
 }
-if (-not (Test-Path -LiteralPath $python)) {
-    & $basePython -m venv (Join-Path $root '.venv')
+# A venv whose base interpreter was removed still has python.exe but cannot run.
+$venvWorks = (Test-Path -LiteralPath $python) -and $(try { & $python -c 'import sys' 2>$null; $LASTEXITCODE -eq 0 } catch { $false })
+if (-not $venvWorks) {
+    $venvDir = Join-Path $root '.venv'
+    if (Test-Path -LiteralPath $venvDir) { Remove-Item -LiteralPath $venvDir -Recurse -Force }
+    & $basePython -m venv $venvDir
     & $python -m pip install --disable-pip-version-check -r (Join-Path $root 'requirements.txt')
 }
 $dist = Join-Path $root 'frontend\dist\index.html'
