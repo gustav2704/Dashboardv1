@@ -4070,6 +4070,10 @@ def put_strategy_manual_timeframe(
         )
         if result.rowcount == 0:
             raise HTTPException(404, "Strategy not found")
+    # An UPDATE does not change MAX(id)/COUNT(*), so clear both cache layers
+    # before the frontend reloads, otherwise it paints the stale timeframe.
+    _invalidate_dashboard_lookups_cache()
+    _invalidate_api_snapshot()
     return {"strategy_id": strategy_id, "manual_timeframe": value or None}
 
 
