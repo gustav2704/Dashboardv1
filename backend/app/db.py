@@ -184,11 +184,9 @@ CREATE TABLE IF NOT EXISTS strategy_categories (
 
 CREATE TRIGGER IF NOT EXISTS limit_strategy_categories
 BEFORE INSERT ON strategy_categories
-WHEN NEW.category IN ('live', 'monitor', 'candidate_live', 'axi_live')
-  AND (SELECT COUNT(*) FROM strategy_categories WHERE strategy_id = NEW.strategy_id
-       AND category IN ('live', 'monitor', 'candidate_live', 'axi_live')) >= 2
+WHEN (SELECT COUNT(*) FROM strategy_categories WHERE strategy_id = NEW.strategy_id) >= 4
 BEGIN
-  SELECT RAISE(ABORT, 'A strategy can have at most two categories');
+  SELECT RAISE(ABORT, 'A strategy can have at most four categories');
 END;
 
 CREATE TABLE IF NOT EXISTS strategy_account_lineage (
@@ -747,7 +745,7 @@ def _widen_strategy_status_check(conn: sqlite3.Connection) -> None:
 
 def _widen_strategy_categories(conn: sqlite3.Connection) -> None:
     """Allow 'favorite' / 'to_modify' in strategy_categories and make the
-    two-category limit apply only to the original four categories."""
+    trigger is recreated by init_db."""
     row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='strategy_categories'"
     ).fetchone()
@@ -768,16 +766,6 @@ def _widen_strategy_categories(conn: sqlite3.Connection) -> None:
         )
         conn.execute("INSERT INTO strategy_categories SELECT * FROM strategy_categories_old")
         conn.execute("DROP TABLE strategy_categories_old")
-        conn.execute(
-            """CREATE TRIGGER limit_strategy_categories
-BEFORE INSERT ON strategy_categories
-WHEN NEW.category IN ('live', 'monitor', 'candidate_live', 'axi_live')
-  AND (SELECT COUNT(*) FROM strategy_categories WHERE strategy_id = NEW.strategy_id
-       AND category IN ('live', 'monitor', 'candidate_live', 'axi_live')) >= 2
-BEGIN
-  SELECT RAISE(ABORT, 'A strategy can have at most two categories');
-END"""
-        )
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
@@ -871,6 +859,14 @@ def init_db(path: Path | None = None) -> None:
             )
         _widen_strategy_status_check(conn)
         _widen_strategy_categories(conn)
+        # Raise the per-strategy category cap to four (older DBs keep the old trigger).
+        conn.execute("DROP TRIGGER IF EXISTS limit_strategy_categories")
+        conn.execute("""CREATE TRIGGER limit_strategy_categories
+BEFORE INSERT ON strategy_categories
+WHEN (SELECT COUNT(*) FROM strategy_categories WHERE strategy_id = NEW.strategy_id) >= 4
+BEGIN
+  SELECT RAISE(ABORT, 'A strategy can have at most four categories');
+END""")
         _migrate_strategy_statuses_to_categories(conn)
         conn.execute(
             """CREATE UNIQUE INDEX IF NOT EXISTS idx_strategy_operational_identity

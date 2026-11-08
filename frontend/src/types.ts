@@ -5,7 +5,7 @@ export type Metrics = {
   winning_trades: number; losing_trades: number; breakeven_trades: number;
   open_positions: number; win_rate: number; profit_factor: number | null; expectancy: number;
   avg_duration_seconds: number; median_duration_seconds: number; avg_win: number; avg_loss: number;
-  best_trade: number | null; worst_trade: number | null; today_profit: number; today_trades: number;
+  best_trade: number | null; biggest_lot?: number | null; worst_trade: number | null; today_profit: number; today_trades: number;
   max_consecutive_wins: number; max_consecutive_losses: number; current_consecutive_losses: number; trades_per_month: number;
   trade_edge: number | null; performance_months: number; performance_trades_per_month: number; monthly_sqn: number | null;
   max_drawdown: number; return_dd: number | null; sqn: number | null; commissions: number; swaps: number;

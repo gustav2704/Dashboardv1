@@ -172,4 +172,4 @@ def test_strategy_status_returns_not_found_and_rejects_invalid_value(tmp_path, m
     assert response.json() == {"detail": "Strategy not found"}
     assert client.put("/api/strategies/999999/status", json={"statuses": ["invalid"]}).status_code == 422
     assert client.put("/api/strategies/999999/status", json={"statuses": ["live", "live"]}).status_code == 422
-    assert client.put("/api/strategies/999999/status", json={"statuses": ["live", "monitor", "axi_live"]}).status_code == 422
+    assert client.put("/api/strategies/999999/status", json={"statuses": ["live", "monitor", "axi_live", "favorite", "to_modify"]}).status_code == 422

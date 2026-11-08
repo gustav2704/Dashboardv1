@@ -45,6 +45,7 @@ from . import strategy_deletion
 from . import strategy_archival
 from . import strategy_identity
 from . import bot_inventory
+from . import db as _db_module
 from . import backtest_compare
 from . import migration_integrity
 from . import terminal_events
@@ -218,8 +219,6 @@ class StrategyStatusUpdate(BaseModel):
     def statuses_must_be_unique(self) -> "StrategyStatusUpdate":
         if len(set(self.statuses)) != len(self.statuses):
             raise ValueError("Strategy categories must be unique")
-        if len([s for s in self.statuses if s not in ("favorite", "to_modify")]) > 2:
-            raise ValueError("A strategy can have at most two categories")
         return self
 
 
@@ -2878,7 +2877,10 @@ def _api_scope_key(
     selected_assets: set[str] | None,
 ) -> tuple[Any, ...]:
     """Canonical cache key for every user-visible dashboard scope."""
+    # The database file is part of the scope so isolated (test) databases can
+    # never be served each other's cached payloads.
     return (
+        str(_db_module.DB_PATH),
         kind,
         window,
         start or "",
@@ -3459,14 +3461,39 @@ def get_strategy(
 ) -> dict[str, Any]:
     selected_accounts = {account.strip() for account in accounts if account.strip()} if filter_accounts else None
     selected_assets = {asset.strip() for asset in assets if asset.strip()} if filter_assets else None
-    data = dashboard_data(
-        window, start, end, selected_accounts, include_unassigned,
-        selected_assets, sync_alerts=False,
+    # Reuse the same immutable snapshot that /api/dashboard serves (pre-rendered
+    # for "all" and every single account).  Rebuilding dashboard_data here on
+    # every panel open took 5-10 s and tripped the frontend's 5 s budget.
+    data = _cached_api_payload(
+        _api_scope_key(
+            "dashboard", window, start, end, selected_accounts,
+            include_unassigned, selected_assets,
+        ) + (False,),
+        lambda: dashboard_data(
+            window, start, end, selected_accounts, include_unassigned,
+            selected_assets, sync_alerts=False,
+        ),
     )
     start_msc, end_msc = _window_bounds(window, start, end)
     for strategy in data["strategies"]:
         if strategy["id"] == strategy_id:
             with session() as conn:
+                # User-editable columns are written without invalidating the
+                # snapshot; read them fresh so the panel never shows old values.
+                editable = conn.execute(
+                    """SELECT note,note_updated_at,no_mm_accepted,no_mm_accepted_at,monitoring_selected
+                         FROM strategies WHERE id=?""",
+                    (strategy_id,),
+                ).fetchone()
+                if editable is not None:
+                    strategy = {
+                        **strategy,
+                        "note": editable["note"],
+                        "note_updated_at": editable["note_updated_at"],
+                        "no_mm_accepted": bool(editable["no_mm_accepted"]),
+                        "no_mm_accepted_at": editable["no_mm_accepted_at"],
+                        "selection": bool(editable["monitoring_selected"]),
+                    }
                 mappings = rows(conn.execute("SELECT * FROM mappings WHERE strategy_id=?", (strategy_id,)))
                 confirmed_mappings = _confirmed_mappings(conn, strategy_id)
                 operational_mappings = _operational_mappings(strategy, confirmed_mappings)
@@ -3486,7 +3513,9 @@ def get_strategy(
                     set(strategy.get("lineage_accounts", {}).get("predecessor", [])),
                     operational_mappings,
                 )
-                all_trades = reconstruct_trades(rows(conn.execute("SELECT * FROM deals ORDER BY time_msc,ticket")))
+                # Cached reconstruction, versioned by the deals table; trades are
+                # never mutated below (_annotate_trade_source copies them).
+                all_trades = _cached_reconstructed_trades(conn)[0]
                 current_trades = _dedupe_account_trades(sorted(
                     [
                         _annotate_trade_source(trade, mapping, "live")

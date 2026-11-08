@@ -194,6 +194,7 @@ def compute_metrics(
         "avg_win": statistics.fmean([p for p in profits if p > 0]) if any(p > 0 for p in profits) else 0.0,
         "avg_loss": statistics.fmean([p for p in profits if p < 0]) if any(p < 0 for p in profits) else 0.0,
         "best_trade": max(profits) if profits else None,
+        "biggest_lot": max((float(t.get("volume") or 0) for t in ordered_trades), default=None),
         "worst_trade": min(profits) if profits else None,
         "today_profit": sum(today_profits),
         "today_trades": len(today_profits),
