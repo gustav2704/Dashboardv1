@@ -568,6 +568,9 @@ textarea {
 .filters input.strategy-id-filter {
   width: 110px;
 }
+.filters input.min-trades-filter {
+  width: 110px;
+}
 .stopped-visibility-toggle {
   white-space: nowrap;
 }

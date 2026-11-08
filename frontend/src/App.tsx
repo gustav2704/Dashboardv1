@@ -19,6 +19,7 @@ import { strategyEventCategoryLabels, summarizeStrategyEvents, type StrategyEven
 import { normalizeFilterSelection, sameOptionalSet } from './filterSelection'
 import { buildAccountPerformance } from './performanceAccountAnalytics'
 import { isCurrentOverviewScope } from './overviewDataScope'
+import { meetsMinTrades, parseMinTrades } from './minTradesFilter'
 import './performanceMode.css'
 
 type Tab = 'overview' | 'performance' | 'journal' | 'events' | 'guardian' | 'detail' | 'chart' | 'settings'
@@ -33,6 +34,7 @@ type OverviewViewSnapshot = {
   query: string
   strategyIdQuery: string
   magicQuery: string
+  minTradesQuery: string
   strategyStatusFilter: StrategyStatusFilter
   showStopped: boolean
   statusFilter: string
@@ -2350,8 +2352,9 @@ export default function App() {
   const [query, setQuery] = useState('')
   const [strategyIdQuery, setStrategyIdQuery] = useState('')
   const [magicQuery, setMagicQuery] = useState('')
+  const [minTradesQuery, setMinTradesQuery] = useState('')
   const [showStopped, setShowStopped] = useState(false)
-  const [previousView, setPreviousView] = useState<{ query: string; magicQuery: string; strategyIdQuery: string; statusFilter: string; strategyStatusFilter: StrategyStatusFilter; linkFilter: string; backtestStatusFilter: BacktestFilter; showStopped: boolean; brokerAccounts: Set<string> | null; assets: Set<string> | null } | null>(null)
+  const [previousView, setPreviousView] = useState<{ query: string; magicQuery: string; minTradesQuery: string; strategyIdQuery: string; statusFilter: string; strategyStatusFilter: StrategyStatusFilter; linkFilter: string; backtestStatusFilter: BacktestFilter; showStopped: boolean; brokerAccounts: Set<string> | null; assets: Set<string> | null } | null>(null)
   const [relatedRequest, setRelatedRequest] = useState<{ magics: number[] } | null>(null)
   const [statusFilter, setStatusFilter] = useState('all')
   const [strategyStatusFilter, setStrategyStatusFilter] = useState<StrategyStatusFilter>('all')
@@ -2596,16 +2599,16 @@ export default function App() {
   // is cleared; the MN matches are resolved once the unscoped rows have loaded.
   function filterRelatedBots(strategy: Strategy) {
     // Keep the view from before the first related-filter so it can be restored.
-    setPreviousView(current => current || { query, magicQuery, strategyIdQuery, statusFilter, strategyStatusFilter, linkFilter, backtestStatusFilter, showStopped, brokerAccounts, assets })
+    setPreviousView(current => current || { query, magicQuery, minTradesQuery, strategyIdQuery, statusFilter, strategyStatusFilter, linkFilter, backtestStatusFilter, showStopped, brokerAccounts, assets })
     setRelatedRequest({ magics: [...new Set([...strategy.magic_numbers, ...(strategy.primary_magic_number != null ? [strategy.primary_magic_number] : [])])] })
-    setQuery(''); setMagicQuery(''); setStatusFilter('all'); setStrategyStatusFilter('all'); setLinkFilter('all'); setBacktestStatusFilter('all')
+    setQuery(''); setMagicQuery(''); setMinTradesQuery(''); setStatusFilter('all'); setStrategyStatusFilter('all'); setLinkFilter('all'); setBacktestStatusFilter('all')
     setShowStopped(true); setBrokerAccounts(null); setAssets(null)
     setStrategyIdQuery([...new Set([strategy.id, ...strategy.paired_ids])].join(', '))
   }
   function restorePreviousView() {
     if (!previousView) return
     setRelatedRequest(null)
-    setQuery(previousView.query); setMagicQuery(previousView.magicQuery); setStrategyIdQuery(previousView.strategyIdQuery)
+    setQuery(previousView.query); setMagicQuery(previousView.magicQuery); setMinTradesQuery(previousView.minTradesQuery); setStrategyIdQuery(previousView.strategyIdQuery)
     setStatusFilter(previousView.statusFilter); setStrategyStatusFilter(previousView.strategyStatusFilter); setLinkFilter(previousView.linkFilter)
     setBacktestStatusFilter(previousView.backtestStatusFilter); setShowStopped(previousView.showStopped)
     setBrokerAccounts(previousView.brokerAccounts); setAssets(previousView.assets)
@@ -2818,7 +2821,7 @@ export default function App() {
     return { ...preset, isCategory, available, active: autoOpenPanel && available && filterMatches }
   })
   const resetFilters = () => {
-    setQuery(''); setMagicQuery(''); setStrategyIdQuery(''); setStatusFilter('all'); setStrategyStatusFilter('all'); setLinkFilter('all')
+    setQuery(''); setMagicQuery(''); setMinTradesQuery(''); setStrategyIdQuery(''); setStatusFilter('all'); setStrategyStatusFilter('all'); setLinkFilter('all')
     setBacktestStatusFilter('all'); setShowStopped(false); setBrokerAccounts(null); setAssets(null); setAutoOpenPanel(false); setPanelStrategyId(null)
   }
   const applyFavorite = (preset: (typeof favoritePresets)[number]) => {
@@ -2888,6 +2891,7 @@ export default function App() {
   }, [relatedRequest, dashboardDataIsCurrent, brokerAccounts, assets, allStrategies, strategyIds])
   const overviewJournalData = journalDataIsCurrent ? journalData : null
   const overviewAnalytics = dashboardDataIsCurrent ? data?.overview_analytics : undefined
+  const minTrades = parseMinTrades(minTradesQuery)
   const filtered = useMemo(() => brokerFilteredStrategies.filter(strategy => {
     const matchesText = `${strategy.symbol} ${strategy.display_name} ${strategy.sqx_name} ${strategy.mql5_name}`.toLowerCase().includes(query.toLowerCase())
     const normalizedMagic = magicQuery.trim()
@@ -2898,7 +2902,8 @@ export default function App() {
       && (statusFilter === 'all' || strategy.state === statusFilter)
       && (linkFilter === 'all' || strategy.link_state === linkFilter)
       && matchesBacktestFilter(strategy.backtest, backtestStatusFilter)
-  }), [brokerFilteredStrategies, query, magicQuery, showStopped, strategyStatusFilter, statusFilter, linkFilter, backtestStatusFilter])
+      && meetsMinTrades(performanceMetrics(strategy).trades, minTrades)
+  }), [brokerFilteredStrategies, query, magicQuery, minTrades, showStopped, strategyStatusFilter, statusFilter, linkFilter, backtestStatusFilter])
   const sortedStrategies = useMemo(() => {
     if (!sort) return filtered
     return [...filtered].sort((a, b) => compareStrategies(a, b, sort.key, sort.direction))
@@ -2926,6 +2931,7 @@ export default function App() {
       setQuery(overviewView.query)
       setStrategyIdQuery(overviewView.strategyIdQuery)
       setMagicQuery(overviewView.magicQuery)
+      setMinTradesQuery(overviewView.minTradesQuery)
       setStrategyStatusFilter(overviewView.strategyStatusFilter)
       setShowStopped(overviewView.showStopped)
       setStatusFilter(overviewView.statusFilter)
@@ -2962,6 +2968,7 @@ export default function App() {
         query,
         strategyIdQuery,
         magicQuery,
+        minTradesQuery,
         strategyStatusFilter,
         showStopped,
         statusFilter,
@@ -2994,7 +3001,7 @@ export default function App() {
           <div className="overview-sticky-header">
             <div className="panel-heading">
             <div><span className="eyebrow">MONITORING</span><h2>All bots</h2><p className="timeframe-coverage">Temporalidad: <strong>{data?.timeframe_coverage.terminal_profile ?? 0} perfil MT5</strong> · {data?.timeframe_coverage.sqx ?? 0} SQX · {data?.timeframe_coverage.manual ?? 0} manual · <strong className="missing">{data?.timeframe_coverage.missing ?? 0} sin evidencia</strong></p></div>
-            <div className="filters"><button type="button" className="button diagnose-toggle" disabled={!selected} title={selected ? `Buscar errores de ${displayName(selected)} en los eventos del terminal (últimos 5 días)` : 'Selecciona una estrategia en la tabla primero'} onClick={() => { if (!selected) return; setStrategyEventsScope(selected.id); setEventDateRange('5d'); navigateTo('events') }}><TriangleAlert size={14}/>Diagnóstico 5d</button>{favoritePresets.map(preset => <button key={preset.n} type="button" className={`button stopped-visibility-toggle favorite-preset ${preset.active ? 'active' : ''}`} aria-pressed={preset.active} aria-label={`Favorito ${preset.n}: ${preset.label} y panel al seleccionar`} title={`Favorito ${preset.n}: ${preset.label} + panel al seleccionar`} disabled={!preset.available} onClick={() => applyFavorite(preset)}>{preset.n}</button>)}<button type="button" className={`button stopped-visibility-toggle ${autoOpenPanel ? 'active' : ''}`} aria-pressed={autoOpenPanel} aria-label={autoOpenPanel ? 'Abrir panel al seleccionar un bot: activado' : 'Abrir panel al seleccionar un bot: desactivado'} title={autoOpenPanel ? 'Abrir panel al seleccionar un bot (activado)' : 'Abrir panel al seleccionar un bot (desactivado)'} onClick={() => { setAutoOpenPanel(current => { const next = !current; if (!next) setPanelStrategyId(null); return next }) }}>{autoOpenPanel ? <PanelRightOpen size={14}/> : <PanelRight size={14}/>} Panel al seleccionar</button><button type="button" className={`button stopped-visibility-toggle ${showStopped ? 'active' : ''}`} aria-pressed={showStopped} aria-label={showStopped ? 'Ocultar bots stopped' : 'Mostrar bots stopped'} onClick={() => setShowStopped(current => !current)}>{showStopped ? <EyeOff size={14}/> : <Eye size={14}/>} {showStopped ? 'Ocultar stopped' : 'Mostrar stopped'}</button><select aria-label="Categoria manual" value={strategyStatusFilter} onChange={e => setStrategyStatusFilter(e.target.value as StrategyStatusFilter)}><option value="all">Todas las categorias</option><option value="live">D Darwinex live</option><option value="monitor">☹ Revisar</option><option value="candidate_live">☺ Candidata live</option><option value="axi_live">A Axi live</option><option value="">Sin categoria</option></select><input aria-label="Search strategies" placeholder="Search strategy or symbol…" value={query} onChange={e => setQuery(e.target.value)}/><input className="magic-filter" aria-label="Search MN" placeholder="Search MN…" value={magicQuery} onChange={e => setMagicQuery(e.target.value.replace(/\D/g, ''))}/><input className="strategy-id-filter" aria-label="Filtrar por ID interno" placeholder="IDs internos: 12, 34…" inputMode="numeric" value={strategyIdQuery} onChange={e => setStrategyIdQuery(e.target.value.replace(/[^\d,\s]/g, ''))}/><AccountFilter compact accounts={brokerAccountOptions} aliases={accountAliases} selected={brokerAccounts} onChange={setBrokerAccounts}/><AssetFilter compact assets={assetOptions} selected={assets} onChange={setAssets}/><select className="status-filter" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}><option value="all">All states</option>{Object.entries(stateLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select><select className="backtest-status-filter" aria-label="Backtest status or audit" value={backtestStatusFilter} onChange={e => setBacktestStatusFilter(e.target.value as BacktestFilter)}><option value="all">All backtests</option><optgroup label="Backtest status">{Object.entries(backtestLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</optgroup><optgroup label="Risk audit">{Object.entries(backtestAuditFilterLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</optgroup></select><button type="button" className="button reset-filters" title="Restablecer todos los filtros" aria-label="Restablecer todos los filtros" onClick={resetFilters}><RotateCcw size={14}/>Reset filtros</button></div>
+            <div className="filters"><button type="button" className="button diagnose-toggle" disabled={!selected} title={selected ? `Buscar errores de ${displayName(selected)} en los eventos del terminal (últimos 5 días)` : 'Selecciona una estrategia en la tabla primero'} onClick={() => { if (!selected) return; setStrategyEventsScope(selected.id); setEventDateRange('5d'); navigateTo('events') }}><TriangleAlert size={14}/>Diagnóstico 5d</button>{favoritePresets.map(preset => <button key={preset.n} type="button" className={`button stopped-visibility-toggle favorite-preset ${preset.active ? 'active' : ''}`} aria-pressed={preset.active} aria-label={`Favorito ${preset.n}: ${preset.label} y panel al seleccionar`} title={`Favorito ${preset.n}: ${preset.label} + panel al seleccionar`} disabled={!preset.available} onClick={() => applyFavorite(preset)}>{preset.n}</button>)}<button type="button" className={`button stopped-visibility-toggle ${autoOpenPanel ? 'active' : ''}`} aria-pressed={autoOpenPanel} aria-label={autoOpenPanel ? 'Abrir panel al seleccionar un bot: activado' : 'Abrir panel al seleccionar un bot: desactivado'} title={autoOpenPanel ? 'Abrir panel al seleccionar un bot (activado)' : 'Abrir panel al seleccionar un bot (desactivado)'} onClick={() => { setAutoOpenPanel(current => { const next = !current; if (!next) setPanelStrategyId(null); return next }) }}>{autoOpenPanel ? <PanelRightOpen size={14}/> : <PanelRight size={14}/>} Panel al seleccionar</button><button type="button" className={`button stopped-visibility-toggle ${showStopped ? 'active' : ''}`} aria-pressed={showStopped} aria-label={showStopped ? 'Ocultar bots stopped' : 'Mostrar bots stopped'} onClick={() => setShowStopped(current => !current)}>{showStopped ? <EyeOff size={14}/> : <Eye size={14}/>} {showStopped ? 'Ocultar stopped' : 'Mostrar stopped'}</button><select aria-label="Categoria manual" value={strategyStatusFilter} onChange={e => setStrategyStatusFilter(e.target.value as StrategyStatusFilter)}><option value="all">Todas las categorias</option><option value="live">D Darwinex live</option><option value="monitor">☹ Revisar</option><option value="candidate_live">☺ Candidata live</option><option value="axi_live">A Axi live</option><option value="">Sin categoria</option></select><input aria-label="Search strategies" placeholder="Search strategy or symbol…" value={query} onChange={e => setQuery(e.target.value)}/><input className="magic-filter" aria-label="Search MN" placeholder="Search MN…" value={magicQuery} onChange={e => setMagicQuery(e.target.value.replace(/\D/g, ''))}/><input className="min-trades-filter" aria-label="Mínimo de trades" placeholder="Min trades…" inputMode="numeric" title="Mostrar solo estrategias con al menos N trades" value={minTradesQuery} onChange={e => setMinTradesQuery(e.target.value.replace(/\D/g, ''))}/><input className="strategy-id-filter" aria-label="Filtrar por ID interno" placeholder="IDs internos: 12, 34…" inputMode="numeric" value={strategyIdQuery} onChange={e => setStrategyIdQuery(e.target.value.replace(/[^\d,\s]/g, ''))}/><AccountFilter compact accounts={brokerAccountOptions} aliases={accountAliases} selected={brokerAccounts} onChange={setBrokerAccounts}/><AssetFilter compact assets={assetOptions} selected={assets} onChange={setAssets}/><select className="status-filter" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}><option value="all">All states</option>{Object.entries(stateLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select><select className="backtest-status-filter" aria-label="Backtest status or audit" value={backtestStatusFilter} onChange={e => setBacktestStatusFilter(e.target.value as BacktestFilter)}><option value="all">All backtests</option><optgroup label="Backtest status">{Object.entries(backtestLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</optgroup><optgroup label="Risk audit">{Object.entries(backtestAuditFilterLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</optgroup></select><button type="button" className="button reset-filters" title="Restablecer todos los filtros" aria-label="Restablecer todos los filtros" onClick={resetFilters}><RotateCcw size={14}/>Reset filtros</button></div>
 	            <div className="overview-global-filters"><select aria-label="Time range" value={windowName} onChange={e => setWindowName(e.target.value)}><option value="30d">30 days</option><option value="90d">90 days</option><option value="all">All</option><option value="custom">Custom</option></select>{windowName === 'custom' && <><input aria-label="Start date" type="date" value={customStart} onChange={e => setCustomStart(e.target.value)}/><input aria-label="End date" type="date" value={customEnd} onChange={e => setCustomEnd(e.target.value)}/></>}<button className="button refresh icon-command" onClick={() => { void refreshSnapshot() }} disabled={overviewUpdating || snapshotRefreshing}><RefreshCw size={14}/>{snapshotRefreshing ? 'Actualizando…' : 'Refresh'}</button>{overviewUpdating && <span className="overview-loading" role="status" aria-live="polite"><RefreshCw className="overview-loading-spinner" size={13}/>Aplicando filtros…</span>}{data?.snapshot && <span className={`overview-snapshot ${data.snapshot.stale ? 'stale' : ''}`} title={`Snapshot ${data.snapshot.revision} · ${new Date(data.snapshot.generated_at).toLocaleString()}`}>{data.snapshot.stale ? 'Datos desactualizados' : snapshotAgeLabel(data.snapshot)}</span>}</div>
 	          </div>
 	          <div ref={overviewTopScrollRef} className="table-scroll-top" aria-label="Scrollable table columns" tabIndex={0} onScroll={() => syncOverviewScroll('top')}>
