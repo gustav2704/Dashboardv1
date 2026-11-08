@@ -3803,14 +3803,14 @@ def get_strategy_daily_pnl(strategy_id: int, month: str = Query(..., pattern=r"^
         )
         scoped_mappings = [*live_mappings, *historical_mappings]
         terminal_ids = sorted({int(mapping["terminal_id"]) for mapping in scoped_mappings})
-        deal_rows: list[dict[str, Any]] = []
-        if terminal_ids:
-            placeholders = ",".join("?" for _ in terminal_ids)
-            deal_rows = rows(conn.execute(
-                f"SELECT * FROM deals WHERE terminal_id IN ({placeholders}) ORDER BY time_msc,ticket",
-                terminal_ids,
-            ))
-        reconstructed = reconstruct_trades(deal_rows)
+        # Trades are reconstructed per (terminal, position), so the cached
+        # per-terminal index equals reconstructing that terminal's deals, without
+        # re-reading and re-reconstructing them on every calendar open.
+        _, trades_by_terminal, _, _ = _cached_reconstructed_trades(conn)
+        reconstructed = [
+            trade for terminal_id in terminal_ids
+            for trade in trades_by_terminal.get(terminal_id, [])
+        ]
         current_trades = _dedupe_account_trades([
             _annotate_trade_source(trade, mapping, "live")
             for trade in reconstructed

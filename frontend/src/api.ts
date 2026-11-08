@@ -1,5 +1,10 @@
 const GET_RETRY_DELAYS_MS = [300, 900, 2_000]
 const TRANSIENT_HTTP_STATUSES = new Set([502, 503, 504])
+// The backend is a single Python process whose periodic MT5 sync and snapshot
+// rebuild (every 60 s) hold the CPU for several seconds. Any read issued in
+// that window is slow but completes; a 5 s budget turned it into an error in
+// whichever panel happened to load. Callers still abort stale reads via signal.
+const DEFAULT_READ_TIMEOUT_MS = 30_000
 export type ApiOptions = RequestInit & { timeoutMs?: number }
 
 function waitForRetry(delay: number, signal?: AbortSignal | null) {
@@ -19,7 +24,7 @@ function waitForRetry(delay: number, signal?: AbortSignal | null) {
 export async function api<T>(url: string, options?: ApiOptions): Promise<T> {
   const method = String(options?.method || 'GET').toUpperCase()
   const retryDelays = method === 'GET' || method === 'HEAD' ? GET_RETRY_DELAYS_MS : []
-  const timeoutMs = options?.timeoutMs ?? ((method === 'GET' || method === 'HEAD') ? 5_000 : 0)
+  const timeoutMs = options?.timeoutMs ?? ((method === 'GET' || method === 'HEAD') ? DEFAULT_READ_TIMEOUT_MS : 0)
   const timeoutController = new AbortController()
   let timedOut = false
   const externalSignal = options?.signal
