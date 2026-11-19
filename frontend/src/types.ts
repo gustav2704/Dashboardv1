@@ -97,13 +97,14 @@ export type Strategy = {
   activity_state: 'with_recent_trades' | 'without_recent_trades' | 'undetermined' | 'not_deployed' | 'observed_by_trade';
   last_inventory_at: string | null;
   deployments: BotDeployment[];
-  sqx: SQXInfo | null; sqx_analytics: SQXAnalytics | null; metrics: Metrics; live_metrics: Metrics; historical_metrics: Metrics; lifetime_metrics: Metrics; monthly_net_profit: Array<{ key: string; label: string; net_profit: number }>; account_metrics: Record<string, Metrics>; account_balance: number | null; account_pl_percent: number | null; account_initial_capital: number | null; initial_capital_pl_percent: number | null; health: Health; risk_guard: RiskGuard; baseline: Baseline | null; baselines: Baseline[];
+  sqx: SQXInfo | null; sqx_analytics: SQXAnalytics | null; metrics: Metrics; live_metrics: Metrics; historical_metrics: Metrics; lifetime_metrics: Metrics; monthly_net_profit: Array<{ key: string; label: string; net_profit: number }>; week_net_profit?: number; account_metrics: Record<string, Metrics>; account_balance: number | null; account_pl_percent: number | null; account_initial_capital: number | null; initial_capital_pl_percent: number | null; health: Health; risk_guard: RiskGuard; baseline: Baseline | null; baselines: Baseline[];
   active_alerts: AlertEpisode[];
   alert_thresholds: { loss_streak_yellow: number; loss_streak_red: number; loss_streak_relative_yellow: number; loss_streak_relative_red: number };
   backtest: BacktestSummary; backtest_risk?: BacktestSummary['risk_audit']; backtest_risk_alert?: boolean; mapping_count: number; historical_mapping_count: number;
   magic_numbers: number[]; historical_magic_numbers: number[]; primary_magic_number: number | null;
   magic_number_details: Array<{ magic: number; roles: string[]; trades: number; first_trade_at: string | null; last_trade_at: string | null; confirmed: boolean }>;
   paired_ids: number[];
+  clone_deviation: CloneDeviation | null;
   recent_equity_curve: Array<{ net_profit: number; equity: number }>;
   operational_identity: { server: string; account_login: string; asset_key: string; expert_name: string; expert_key: string; symbol: string } | null;
   identity_conflicts: Array<{ identity: { server: string; account_login: string; asset_key: string; expert_key: string }; primary: boolean; mapping_ids: number[]; roles: string[] }>;
@@ -143,7 +144,7 @@ export type PanelHistory = {
   scope_version: string;
   reset: boolean;
 }
-export type Terminal = { id: number; name: string; data_dir: string; transport?: 'local'|'ssh'; remote_data_dir?: string; account_login?: string; server?: string; status: string; last_seen?: string; last_error?: string }
+export type Terminal = { id: number; name: string; data_dir: string; transport?: 'local'|'ssh'; remote_data_dir?: string; account_login?: string; server?: string; status: string; last_seen?: string; last_sync?: string; last_error?: string }
 export type TerminalEvent = {
   id: number; source_id: number; terminal_id: number; account_login: string | null;
   severity: 'warning' | 'error'; log_kind: 'journal' | 'experts'; log_name: string;
@@ -271,6 +272,7 @@ export type BacktestRetentionPreview = {
   active_excluded_states: string[]; runs: Array<{ id: number; strategy_id: number; status: string; broker: string; requested_at: string; finished_at?: string; run_dir?: string }>;
 }
 export type DailyPnl = { strategy_id: number; month: string; days: Record<string, number>; net_profit: number }
+export type MonthlyPnl = { strategy_id: number; year: number; months: Record<string, number>; trades: Record<string, number>; net_profit: number }
 export type BacktestCandidates = {
   counts: { eligible: number; resolvable: number; blocked: number; validated: number };
   expert_files: number;
@@ -357,3 +359,19 @@ export type GuardianData = {
   performance?: { strategies: Array<GuardianStrategyStats & { magic: string; ea_name: string | null; symbols: string[] }>; totals: GuardianStrategyStats } | null;
   config: GuardianConfig | null;
 }
+
+export type CloneDeviation = {
+  source: 'auto' | 'manual';
+  clone_strategy_id: number | null;
+  clone_account: string | null;
+  clone_name: string | null;
+  candidates: Array<{ id: number; account: string; name: string }>;
+  window_start_msc: number | null;
+  scale: number | null;
+  live_pl: number | null;
+  clone_pl: number | null;
+  clone_pl_scaled: number | null;
+  live_trades: number;
+  clone_trades: number;
+  deviation_pp: number | null;
+};

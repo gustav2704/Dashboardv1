@@ -456,6 +456,9 @@ textarea {
 .overview-main .terminal-strip > div {
   font-size: 14px;
 }
+.terminal-strip .terminal-update.stale {
+  color: #f3bd58;
+}
 .terminal-strip span,
 .terminal-strip small {
   color: var(--muted);
@@ -660,7 +663,7 @@ table {
 }
 .overview-table {
   table-layout: fixed;
-  min-width: 3036px;
+  min-width: 3266px;
 }
 th {
   text-align: left;
@@ -1390,6 +1393,30 @@ td.overview-symbol-column { padding-left: 10px; padding-right: 10px; }
 .calendar-day.positive strong { color: #21d29f; }
 .calendar-day.negative { border-color: #713642; background: #2a171d; }
 .calendar-day.negative strong { color: #ff8490; }
+.monthly-result-calendar { margin-top: 12px; }
+.monthly-result-total { font: 700 12px Consolas, monospace; }
+.monthly-result-total.positive { color: #21d29f; }
+.monthly-result-total.negative { color: #ff8490; }
+.monthly-result-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+}
+.monthly-result-tile {
+  min-height: 44px;
+  padding: 4px 6px;
+  border: 1px solid #1b3141;
+  border-radius: 4px;
+  background: #0d1b2a;
+  text-align: center;
+}
+.monthly-result-tile small { display: block; color: #6f8798; font-size: 11px; }
+.monthly-result-tile strong { display: block; margin-top: 3px; font: 700 11px Consolas, monospace; color: #8ea3b1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.monthly-result-tile.positive { border-color: #1f6257; }
+.monthly-result-tile.positive strong { color: #21d29f; }
+.monthly-result-tile.negative { border-color: #713642; }
+.monthly-result-tile.negative strong { color: #ff8490; }
+.monthly-result-tile.future { opacity: .45; }
 .streak-pair {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3439,3 +3466,17 @@ footer {
 .guardian-adjusted { margin: 0 0 14px; font-size: 13px; }
 .guardian-adjusted .guardian-journal-note { margin: 4px 0 0; }
 .guardian-total-row td { font-weight: 600; background: #0d1a24; }
+
+/* AlgoTAP EGT columns in the overview table */
+.algotap-egt-empty { color: var(--muted); }
+.algotap-trend { display: inline-flex; flex-direction: column; font-weight: 600; white-space: nowrap; }
+.algotap-trend small { color: var(--muted); font: 11px Consolas, monospace; }
+.algotap-trend.improving { color: var(--teal); }
+.algotap-trend.stable { color: #8ed8f7; }
+.algotap-trend.degrading { color: var(--red); }
+.algotap-egt-grade.grade-excelente { border-color: #285f5a; color: #8cf5e5; }
+.algotap-egt-grade.grade-bueno { border-color: #2f5369; color: #8ed8f7; }
+.algotap-egt-grade.grade-esperado { border-color: #6b5520; color: var(--yellow); }
+.algotap-egt-grade.grade-degradado { border-color: #7a4320; color: #fb923c; }
+.algotap-egt-grade.grade-roto { border-color: #6b2535; color: var(--red); }
+.algotap-egt-grade small, .algotap-egt-grade .analytics-badge-value { color: inherit; }

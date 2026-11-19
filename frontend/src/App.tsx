@@ -1,13 +1,16 @@
 import { Component, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Activity, Archive, BookOpen, CandlestickChart, ChevronLeft, ChevronRight, Eye, EyeOff, Filter, HelpCircle, LayoutDashboard, PanelRight, PanelRightOpen, Pause, Play, RefreshCw, RotateCcw, Settings as SettingsIcon, Square, TrendingUp, Trash2, TriangleAlert, X } from 'lucide-react'
+import { Activity, Archive, BookOpen, CandlestickChart, ChevronLeft, Gauge, ChevronRight, Eye, EyeOff, Filter, HelpCircle, LayoutDashboard, PanelRight, PanelRightOpen, Pause, Play, RefreshCw, RotateCcw, Settings as SettingsIcon, Square, TrendingUp, Trash2, TriangleAlert, X } from 'lucide-react'
 import { Bar, BarChart, CartesianGrid, Cell, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { api } from './api'
 import ChartPanel from './ChartPanel'
+import AlgoTapPanel from './AlgoTap'
+import { buildEgtIndex, egtForStrategy, egtTrendArrows, egtTrendLabels, type AlgoTapEgt, type EgtIndex } from './algotapEgt'
 import { OverviewAnalyticsPanel, StrategyAnalyticsPanel } from './AnalyticsPanels'
 import { StrategyPerformanceView } from './StrategyPerformance'
 import JournalAnalysis, { OverviewAdvancedAnalytics, TopTenCharts, type PerformanceGrouping } from './JournalAnalysis'
 import { getCachedPanelHistory, prefetchPanelHistory, requestPanelHistory } from './panelHistoryCache'
-import type { AccountAliasSettings, AccountInitialCapitalSettings, AlertEpisode, BacktestBatch, BacktestCandidates, BacktestDefaults, BacktestRetentionPreview, BacktestRun, BacktestSummary, Baseline, ChartScanAccount, ChartScanResult, DailyPnl, Dashboard, GuardianData, Metrics, PanelHistory, RiskCheck, RiskGuard, RiskStatus, Strategy, StrategyArchiveImpact, StrategyDeletionImpact, StrategyDetails, TerminalEventsData, TerminalEventsStrategy } from './types'
+import { terminalUpdateLabel } from './terminalUpdateAge'
+import type { AccountAliasSettings,AccountInitialCapitalSettings, CloneDeviation,AlertEpisode, BacktestBatch, BacktestCandidates, BacktestDefaults, BacktestRetentionPreview, BacktestRun, BacktestSummary, Baseline, ChartScanAccount, ChartScanResult, DailyPnl, Dashboard, MonthlyPnl, GuardianData, Metrics, PanelHistory, RiskCheck, RiskGuard, RiskStatus, Strategy, StrategyArchiveImpact, StrategyDeletionImpact, StrategyDetails, Terminal, TerminalEventsData, TerminalEventsStrategy } from './types'
 import type { JournalAnalysisData, JournalTrade } from './journalTypes'
 import { detailGuides, type DetailGuideId } from './detailGuides'
 import { filterJournalByStrategyIds, filterStrategiesByIds, parseStrategyIds } from './strategyIdFilter'
@@ -22,11 +25,11 @@ import { isCurrentOverviewScope } from './overviewDataScope'
 import { meetsMinTrades, parseMinTrades } from './minTradesFilter'
 import './performanceMode.css'
 
-type Tab = 'overview' | 'performance' | 'journal' | 'events' | 'guardian' | 'detail' | 'chart' | 'settings'
+type Tab = 'overview' | 'performance' | 'journal' | 'events' | 'guardian' | 'algotap' | 'detail' | 'chart' | 'settings'
 type EventDateRange = 'today' | '24h' | '3d' | '5d'
 type GuardianDateRange = 'all' | '30d' | '5d'
 const AUTO_REFRESH_MS = 5 * 60_000
-type SortKey = 'state' | 'source' | 'backtest' | 'edge' | 'egt' | 'doctor' | 'strategy' | 'symbol' | 'account' | 'magic' | 'net_profit' | 'expectancy' | 'trades' | 'win_rate' | 'profit_factor' | 'sqn' | 'return_dd' | 'trades_per_month' | 'max_drawdown' | 'avg_wl' | 'monthly_net_profit_0' | 'monthly_net_profit_1' | 'monthly_net_profit_2' | 'monthly_net_profit_3' | 'monthly_net_profit_4' | 'monthly_net_profit_5' | 'best_trade' | 'biggest_lot' | 'today_profit' | 'floating_profit' | 'account_pl_percent' | 'health' | 'id'
+type SortKey = 'state' | 'source' | 'backtest' | 'edge' | 'egt' | 'egt_trend' | 'egt_global' | 'doctor' | 'strategy' | 'symbol' | 'account' | 'magic' | 'net_profit' | 'expectancy' | 'trades' | 'win_rate' | 'profit_factor' | 'sqn' | 'return_dd' | 'trades_per_month' | 'max_drawdown' | 'avg_wl' | 'monthly_net_profit_0' | 'monthly_net_profit_1' | 'monthly_net_profit_2' | 'monthly_net_profit_3' | 'monthly_net_profit_4' | 'monthly_net_profit_5' | 'week_net_profit' | 'best_trade' | 'biggest_lot' | 'today_profit' | 'floating_profit' | 'account_pl_percent' | 'clone_deviation' | 'health' | 'id'
 type SortDirection = 'ascending' | 'descending'
 type SortState = { key: SortKey; direction: SortDirection } | null
 type BacktestFilter = 'all' | BacktestSummary['state'] | 'risk_exceeded' | 'risk_validated' | 'no_mm' | 'not_auditable' | 'no_risk_audit'
@@ -138,6 +141,25 @@ type EquityOverlay = { label: string; points: StrategyDetails['equity_curve'] }
 function signedPercent(value: number | null | undefined) {
   if (value == null) return '—'
   return `${value > 0 ? '+' : ''}${value.toFixed(2)}%`
+}
+function cloneDeviationLabel(deviation: CloneDeviation | null | undefined) {
+  if (deviation?.deviation_pp == null) return '—'
+  const value = deviation.deviation_pp
+  return `${value > 0 ? '+' : ''}${value.toFixed(2)} pp`
+}
+function cloneDeviationTitle(deviation: CloneDeviation | null | undefined) {
+  if (!deviation) return 'Solo para bots en Darwinex live y Axi live'
+  if (deviation.clone_strategy_id == null) return deviation.source === 'manual' ? 'Sin clon (fijado manualmente)' : 'No se encontró clon demo; puedes fijarlo en el panel del bot'
+  const lines = [
+    `Clon: ${deviation.clone_name || '—'} · cuenta ${deviation.clone_account || '—'} · #${deviation.clone_strategy_id} (${deviation.source === 'manual' ? 'manual' : 'auto'})`,
+    `Desde: ${deviation.window_start_msc ? new Date(deviation.window_start_msc).toLocaleDateString() : '—'}`,
+    `Trades live / clon: ${deviation.live_trades} / ${deviation.clone_trades}`,
+    `P/L live: ${signedMoney(deviation.live_pl ?? 0)}`,
+    `P/L clon: ${signedMoney(deviation.clone_pl ?? 0)} × ${deviation.scale == null ? '—' : deviation.scale.toFixed(2)} = ${deviation.clone_pl_scaled == null ? '—' : signedMoney(deviation.clone_pl_scaled)}`,
+    'Dev = (P/L live − P/L clon escalado) / balance live, en puntos %',
+  ]
+  if (deviation.deviation_pp == null) lines.push(deviation.clone_trades === 0 ? 'Sin trades del clon en ese periodo' : 'Sin datos suficientes')
+  return lines.join('\n')
 }
 function performanceMetrics(strategy: Strategy) {
   return strategy.lifetime_metrics || strategy.metrics
@@ -310,6 +332,24 @@ function baselineValue(baseline: Baseline | null, ...keys: string[]) {
 
 function Logo() { return <div className="logo"><div className="logo-mark"><span /><span /><span /></div><div><strong>EA Observatory</strong><small>LIVE VS. BACKTEST</small></div></div> }
 function HealthDot({ status }: { status: string }) { return <span className={`health-dot ${status}`} aria-label={status} /> }
+// Re-renders on its own timer so the "hace X" labels age without reloading the
+// dashboard data or re-rendering the whole App.
+function TerminalUpdateStrip({ terminals }: { terminals: Terminal[] }) {
+  const [nowMs, setNowMs] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowMs(Date.now()), 30_000)
+    return () => window.clearInterval(timer)
+  }, [])
+  return <section className="terminal-strip">{terminals.map(terminal => {
+    const connection = terminalConnectionPresentation(terminal.status)
+    const update = terminalUpdateLabel(terminal, nowMs)
+    return <div key={terminal.id} title={connection.text ? 'Dashboard bridge is waiting for a current MT5 heartbeat.' : 'Current MT5 heartbeat received.'}>
+      <HealthDot status={connection.dot}/><strong>{terminal.name}</strong><span>{`Account ${terminal.account_login || '—'}${connection.text}`}</span>
+      <small className={update.stale ? 'terminal-update stale' : 'terminal-update'}>{update.text}</small>
+    </div>
+  })}</section>
+}
+
 function terminalConnectionPresentation(status: string) {
   if (status === 'connected') return { dot: 'green', text: '' }
   if (status === 'connecting') return { dot: 'yellow', text: ' · Synchronizing' }
@@ -371,12 +411,12 @@ function SortableHeader({ label, sortKey, sort, onSort, className = '' }: { labe
 
 function OverviewTableColGroup() {
   return <colgroup>
-    {[60, 62, 100, 115, 116, 340, 75, 112, 70, 115, 103.5, 90, 92, 92, 92, 80, 92, 92, 94, 69, 90, 120, 120, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 30].map((width, index) => <col key={index} style={{ width }} />)}
+    {[60, 62, 100, 115, 116, 340, 75, 112, 70, 115, 103.5, 90, 92, 92, 92, 80, 92, 92, 69, 90, 120, 120, 100, 100, 100, 100, 100, 100, 115, 115, 100, 100, 94, 100, 100, 100, 100, 30].map((width, index) => <col key={index} style={{ width }} />)}
   </colgroup>
 }
 
 function OverviewTableHead({ sort, onSort, months }: { sort: SortState; onSort: (key: SortKey) => void; months: Dashboard['monthly_net_profit_months'] }) {
-  return <tr><SortableHeader label="ID" sortKey="id" sort={sort} onSort={onSort}/><th className="selection-column">Stopped</th><SortableHeader label="Backtest" sortKey="backtest" sort={sort} onSort={onSort}/><SortableHeader label="Health" sortKey="health" sort={sort} onSort={onSort}/><th className="equity-curve-header">Curve</th><SortableHeader label="Strategy" sortKey="strategy" sort={sort} onSort={onSort}/><SortableHeader className="overview-symbol-column" label="Symbol" sortKey="symbol" sort={sort} onSort={onSort}/><SortableHeader label="Account" sortKey="account" sort={sort} onSort={onSort}/><SortableHeader label="Magic" sortKey="magic" sort={sort} onSort={onSort}/><SortableHeader label="Account P/L %" sortKey="account_pl_percent" sort={sort} onSort={onSort}/><SortableHeader label="P/L today" sortKey="today_profit" sort={sort} onSort={onSort}/><SortableHeader label="Win %" sortKey="win_rate" sort={sort} onSort={onSort}/><SortableHeader label="Trades" sortKey="trades" sort={sort} onSort={onSort}/><SortableHeader label="PF" sortKey="profit_factor" sort={sort} onSort={onSort}/><SortableHeader label="SQN" sortKey="sqn" sort={sort} onSort={onSort}/><SortableHeader label="Ret/DD" sortKey="return_dd" sort={sort} onSort={onSort}/><SortableHeader label="Trades/mes" sortKey="trades_per_month" sort={sort} onSort={onSort}/><SortableHeader label="EGT" sortKey="egt" sort={sort} onSort={onSort}/><SortableHeader label="Net P/L" sortKey="net_profit" sort={sort} onSort={onSort}/><SortableHeader label="Floating" sortKey="floating_profit" sort={sort} onSort={onSort}/>{months.map((month, index) => <SortableHeader key={month.key} label={month.label} sortKey={`monthly_net_profit_${index}` as SortKey} sort={sort} onSort={onSort}/>)}<SortableHeader label="BLot" sortKey="biggest_lot" sort={sort} onSort={onSort}/><SortableHeader label="Best trade" sortKey="best_trade" sort={sort} onSort={onSort}/><SortableHeader label="Max DD" sortKey="max_drawdown" sort={sort} onSort={onSort}/><SortableHeader label="Edge" sortKey="edge" sort={sort} onSort={onSort}/><SortableHeader label="Doctor" sortKey="doctor" sort={sort} onSort={onSort}/><SortableHeader label="Esperanza" sortKey="expectancy" sort={sort} onSort={onSort}/><SortableHeader label="Avg W/L" sortKey="avg_wl" sort={sort} onSort={onSort}/><SortableHeader label="Source" sortKey="source" sort={sort} onSort={onSort}/><SortableHeader className="overview-state-column" label="State" sortKey="state" sort={sort} onSort={onSort}/><th aria-label="Open panel"></th></tr>
+  return <tr><SortableHeader label="ID" sortKey="id" sort={sort} onSort={onSort}/><th className="selection-column">Stopped</th><SortableHeader label="Backtest" sortKey="backtest" sort={sort} onSort={onSort}/><SortableHeader label="Health" sortKey="health" sort={sort} onSort={onSort}/><th className="equity-curve-header">Curve</th><SortableHeader label="Strategy" sortKey="strategy" sort={sort} onSort={onSort}/><SortableHeader className="overview-symbol-column" label="Symbol" sortKey="symbol" sort={sort} onSort={onSort}/><SortableHeader label="Account" sortKey="account" sort={sort} onSort={onSort}/><SortableHeader label="Magic" sortKey="magic" sort={sort} onSort={onSort}/><SortableHeader label="Account P/L %" sortKey="account_pl_percent" sort={sort} onSort={onSort}/><SortableHeader label="Dev" sortKey="clone_deviation" sort={sort} onSort={onSort}/><SortableHeader label="P/L today" sortKey="today_profit" sort={sort} onSort={onSort}/><SortableHeader label="Win %" sortKey="win_rate" sort={sort} onSort={onSort}/><SortableHeader label="Trades" sortKey="trades" sort={sort} onSort={onSort}/><SortableHeader label="PF" sortKey="profit_factor" sort={sort} onSort={onSort}/><SortableHeader label="SQN" sortKey="sqn" sort={sort} onSort={onSort}/><SortableHeader label="Ret/DD" sortKey="return_dd" sort={sort} onSort={onSort}/><SortableHeader label="Trades/mes" sortKey="trades_per_month" sort={sort} onSort={onSort}/><SortableHeader label="Net P/L" sortKey="net_profit" sort={sort} onSort={onSort}/><SortableHeader label="Floating" sortKey="floating_profit" sort={sort} onSort={onSort}/>{months.map((month, index) => <SortableHeader key={month.key} label={month.label} sortKey={`monthly_net_profit_${index}` as SortKey} sort={sort} onSort={onSort}/>)}<SortableHeader label="P/L semana" sortKey="week_net_profit" sort={sort} onSort={onSort}/><SortableHeader label="BLot" sortKey="biggest_lot" sort={sort} onSort={onSort}/><SortableHeader label="Tendencia EGT" sortKey="egt_trend" sort={sort} onSort={onSort}/><SortableHeader label="EGT global" sortKey="egt_global" sort={sort} onSort={onSort}/><SortableHeader label="Best trade" sortKey="best_trade" sort={sort} onSort={onSort}/><SortableHeader label="Max DD" sortKey="max_drawdown" sort={sort} onSort={onSort}/><SortableHeader label="EGT" sortKey="egt" sort={sort} onSort={onSort}/><SortableHeader label="Edge" sortKey="edge" sort={sort} onSort={onSort}/><SortableHeader label="Doctor" sortKey="doctor" sort={sort} onSort={onSort}/><SortableHeader label="Esperanza" sortKey="expectancy" sort={sort} onSort={onSort}/><SortableHeader label="Avg W/L" sortKey="avg_wl" sort={sort} onSort={onSort}/><SortableHeader label="Source" sortKey="source" sort={sort} onSort={onSort}/><SortableHeader className="overview-state-column" label="State" sortKey="state" sort={sort} onSort={onSort}/><th aria-label="Open panel"></th></tr>
 }
 const guardianDateRangeLabels: Record<GuardianDateRange, string> = { all: 'Todo el historial', '30d': 'Últimos 30 días', '5d': 'Últimos 5 días' }
 function guardianDateBounds(range: GuardianDateRange, now = new Date()) {
@@ -408,8 +448,10 @@ function backtestSortRank(summary: BacktestSummary) {
   return 6
 }
 
-function sortValue(strategy: Strategy, key: SortKey): string | number | null {
+function sortValue(strategy: Strategy, key: SortKey, algotapEgt?: AlgoTapEgt): string | number | null {
   switch (key) {
+    case 'egt_trend': return algotapEgt?.trend_slope ?? null
+    case 'egt_global': return algotapEgt?.egt_overall_score ?? null
     case 'state': return stateLabels[strategy.state] || strategy.state
     case 'source': return linkLabels[strategy.link_state] || strategy.link_state
     case 'backtest': return backtestSortRank(strategy.backtest)
@@ -435,20 +477,22 @@ function sortValue(strategy: Strategy, key: SortKey): string | number | null {
     case 'monthly_net_profit_3': return strategy.monthly_net_profit[3]?.net_profit ?? 0
     case 'monthly_net_profit_4': return strategy.monthly_net_profit[4]?.net_profit ?? 0
     case 'monthly_net_profit_5': return strategy.monthly_net_profit[5]?.net_profit ?? 0
+    case 'week_net_profit': return strategy.week_net_profit ?? 0
     case 'biggest_lot': return performanceMetrics(strategy).biggest_lot ?? null
     case 'best_trade': return performanceMetrics(strategy).best_trade
     case 'today_profit': return strategy.metrics.today_profit
     case 'floating_profit': return strategy.metrics.floating_profit
     case 'account_pl_percent': return strategy.account_pl_percent
+    case 'clone_deviation': return strategy.clone_deviation?.deviation_pp ?? null
     case 'health': return { red: 0, yellow: 1, green: 2, gray: 3 }[strategy.health.status]
     case 'sqn': return performanceMetrics(strategy).sqn
     case 'id': return strategy.id
   }
 }
 
-export function compareStrategies(a: Strategy, b: Strategy, key: SortKey, direction: SortDirection) {
-  const left = sortValue(a, key)
-  const right = sortValue(b, key)
+export function compareStrategies(a: Strategy, b: Strategy, key: SortKey, direction: SortDirection, egtFor?: (strategy: Strategy) => AlgoTapEgt | undefined) {
+  const left = sortValue(a, key, egtFor?.(a))
+  const right = sortValue(b, key, egtFor?.(b))
   if (left == null && right == null) return 0
   if (left == null) return 1
   if (right == null) return -1
@@ -643,6 +687,16 @@ function SQXAnalyticsBadge({ strategy, kind }: { strategy: Strategy; kind: 'edge
   if (!egt) return <span className="analytics-badge unavailable" title="No SQX analytics snapshot">—</span>
   if (!egt.available) return <span className="analytics-badge unavailable" title={egt.reason || 'Not available'}>N/A</span>
   return <span className="analytics-badge egt" title={`EGT · ${egt.grade || 'No grade'} · ${egt.history_source || egt.source || 'Unknown source'}`}><span className="analytics-badge-value">{number(egt.total)}</span><small>{egt.grade}</small></span>
+}
+
+function AlgoTapEgtCells({ egt }: { egt: AlgoTapEgt | undefined }) {
+  if (!egt) return <><td className="algotap-egt-empty" title="Sin dato de AlgoTAP (pulsa Sincronizar en la pestaña AlgoTAP)">—</td><td className="algotap-egt-empty">—</td></>
+  const direction = egt.trend_direction || ''
+  const grade = (egt.egt_grade || '').toUpperCase()
+  return <>
+    <td title={`AlgoTAP · tendencia ${direction || 'N/D'} · pendiente ${number(egt.trend_slope, 3)}`}><span className={`algotap-trend ${direction.toLowerCase()}`}>{egtTrendArrows[direction] || '·'} {egtTrendLabels[direction] || direction || '—'}<small>{number(egt.trend_slope, 2)}</small></span></td>
+    <td title={`AlgoTAP · EGT global ${number(egt.egt_overall_score, 2)} (escala −30 a 30) · ${grade || 'sin nota'}`}><span className={`analytics-badge algotap-egt-grade grade-${grade.toLowerCase()}`}><span className="analytics-badge-value">{number(egt.egt_overall_score, 1)}</span><small>{grade || '—'}</small></span></td>
+  </>
 }
 
 function SQXAnalyticsPanel({ strategy, onGuide }: { strategy: Strategy; onGuide: (guide: DetailGuideId) => void }) {
@@ -1186,6 +1240,49 @@ function ManualTimeframeEditor({ strategy, onSaved }: { strategy: Strategy; onSa
   </details>
 }
 
+function CloneEditor({ strategy, allStrategies, onSaved }: { strategy: Strategy; allStrategies: Strategy[]; onSaved: () => void }) {
+  const deviation = strategy.clone_deviation
+  const current = !deviation || deviation.source === 'auto' ? 'auto' : String(deviation.clone_strategy_id ?? 'none')
+  const [draft, setDraft] = useState(current)
+  const [saving, setSaving] = useState(false)
+  const [status, setStatus] = useState('')
+  useEffect(() => { setDraft(current); setStatus('') }, [strategy.id, current])
+  if (!deviation) return null
+  const options = new Map(deviation.candidates.map(item => [item.id, `#${item.id} · ${item.account} · ${item.name}`]))
+  if (deviation.clone_strategy_id != null && !options.has(deviation.clone_strategy_id)) options.set(deviation.clone_strategy_id, `#${deviation.clone_strategy_id} · ${deviation.clone_account ?? ''} · ${deviation.clone_name ?? ''}`)
+  const others = allStrategies.filter(item => item.id !== strategy.id && !options.has(item.id) && item.asset_key === strategy.asset_key && item.account_login !== strategy.account_login)
+
+  async function save(value: string) {
+    setSaving(true)
+    setStatus('')
+    try {
+      await api(`/api/strategies/${strategy.id}/clone`, {
+        method: 'PUT',
+        body: JSON.stringify(value === 'auto' ? { mode: 'auto' } : { mode: 'manual', clone_strategy_id: value === 'none' ? null : Number(value) }),
+      })
+      setStatus('Guardado')
+      onSaved()
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : 'No se pudo guardar')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return <details className="drawer-section drawer-collapsible clone-editor">
+    <summary className="drawer-collapsible-summary"><div className="strategy-note-heading"><div><span className="eyebrow">CLON DEMO</span><small>{deviation.clone_strategy_id == null ? 'Sin clon' : `#${deviation.clone_strategy_id} · ${deviation.clone_account} (${deviation.source === 'manual' ? 'manual' : 'auto'})`}</small></div><span className={status && status !== 'Guardado' ? 'note-status error' : 'note-status'}>{status}</span></div><span className="drawer-collapsible-chevron" aria-hidden="true">⌄</span></summary>
+    <div className="drawer-collapsible-content">
+      <select aria-label="Clon demo" value={draft} onChange={event => { setDraft(event.target.value); setStatus('') }}>
+        <option value="auto">Automático</option>
+        <option value="none">Sin clon</option>
+        {[...options].map(([id, label]) => <option key={id} value={String(id)}>{label}</option>)}
+        {others.length > 0 && <optgroup label="Otros bots del mismo activo">{others.map(item => <option key={item.id} value={String(item.id)}>{`#${item.id} · ${item.account_login} · ${displayName(item)}`}</option>)}</optgroup>}
+      </select>
+      <div className="strategy-note-actions"><small>Dev compara este bot con su clon escalado por tamaño de posición.</small><button className="button primary" type="button" disabled={draft === current || saving} onClick={() => { void save(draft) }}>{saving ? 'Guardando…' : 'Guardar'}</button></div>
+    </div>
+  </details>
+}
+
 function MagicNumbersPanel({ strategy, mappings, placement = 'detail', onGuide }: {
   strategy: Strategy; mappings?: StrategyDetails['mappings']; placement?: 'detail' | 'drawer'; onGuide?: (guide: DetailGuideId) => void
 }) {
@@ -1410,6 +1507,46 @@ function MonthlyPnlCalendar({ strategyId }: { strategyId: number }) {
   </section>
 }
 
+const MONTH_TILE_LABELS = ['ENE', 'FEB', 'MAR', 'ABR', 'MAY', 'JUN', 'JUL', 'AGO', 'SEP', 'OCT', 'NOV', 'DIC']
+
+function MonthlyResultCalendar({ strategyId }: { strategyId: number }) {
+  const [year, setYear] = useState(() => new Date().getFullYear())
+  const [data, setData] = useState<MonthlyPnl | null>(null)
+  const [error, setError] = useState('')
+  const [retryVersion, setRetryVersion] = useState(0)
+  useEffect(() => {
+    let cancelled = false
+    const controller = new AbortController()
+    setError('')
+    api<MonthlyPnl>(`/api/strategies/${strategyId}/monthly-pnl?year=${year}`, { signal: controller.signal })
+      .then(value => { if (!cancelled) setData(value) })
+      .catch(err => { if (!cancelled) setError(err instanceof Error ? err.message : 'Could not load monthly P/L') })
+    return () => { cancelled = true; controller.abort() }
+  }, [strategyId, year, retryVersion])
+  const currentMonth = new Date().getMonth()
+  const isCurrentYear = year === new Date().getFullYear()
+  const values = MONTH_TILE_LABELS.map((_, index) => data?.months[`${year}-${String(index + 1).padStart(2, '0')}`])
+  const maxAbs = Math.max(0, ...values.map(value => Math.abs(value ?? 0)))
+  return <section className="drawer-section monthly-result-calendar">
+    <div className="drawer-section-title"><span className="eyebrow">RESULTADO MENSUAL</span><strong className={`monthly-result-total ${(data?.net_profit ?? 0) > 0 ? 'positive' : (data?.net_profit ?? 0) < 0 ? 'negative' : ''}`}>{signedMoney(data?.net_profit)}</strong></div>
+    <div className="calendar-navigation"><button type="button" onClick={() => setYear(current => current - 1)} aria-label="Año anterior">‹</button><strong>{year}</strong><button type="button" onClick={() => setYear(current => current + 1)} aria-label="Año siguiente">›</button></div>
+    {error && <div className="drawer-error">{error} <button type="button" className="button" onClick={() => setRetryVersion(current => current + 1)}>Reintentar</button></div>}
+    <div className="monthly-result-grid">{MONTH_TILE_LABELS.map((label, index) => {
+      const key = `${year}-${String(index + 1).padStart(2, '0')}`
+      const pnl = data?.months[key]
+      const trades = data?.trades[key] ?? 0
+      const future = isCurrentYear && index > currentMonth
+      const tone = pnl == null || pnl === 0 ? '' : pnl > 0 ? 'positive' : 'negative'
+      const intensity = pnl && maxAbs ? Math.min(1, Math.abs(pnl) / maxAbs) : 0
+      const style = pnl ? { backgroundColor: tone === 'positive' ? `rgba(16, 185, 129, ${0.1 + intensity * 0.3})` : `rgba(244, 63, 94, ${0.1 + intensity * 0.3})` } : undefined
+      return <div key={key} className={`monthly-result-tile ${tone} ${future ? 'future' : ''}`} style={style} title={trades ? `${trades} operaciones` : undefined}>
+        <small>{label}</small>
+        <strong>{pnl == null || (pnl === 0 && !trades) ? '—' : signedMoney(pnl)}</strong>
+      </div>
+    })}</div>
+  </section>
+}
+
 // A panel error must never blank the whole dashboard.  If the side panel
 // throws while rendering (e.g. an unexpected empty dataset), show a compact
 // fallback instead of letting React unmount the entire tree.
@@ -1456,7 +1593,7 @@ function PairedComparePanel({ strategyId, ...props }: Omit<Parameters<typeof Str
   </aside>
 }
 
-function StrategySidePanel({ strategy, allStrategies, query, refreshVersion, onClose, onDeleted, onNoteSaved, onDisplayNameSaved, onTimeframeSaved, onStatusChange, statusSaving, onOpenDetail, onBacktestRiskAcceptance, savingBacktestRiskAcceptance, onPairedSaved, className = '', compareId = null, onCompare, onFilterRelated, onRestoreView }: { strategy: Strategy; allStrategies: Strategy[]; query: string; refreshVersion: number; onClose: () => void; onDeleted: (strategyId: number) => void; onNoteSaved: NoteSavedHandler; onDisplayNameSaved: DisplayNameSavedHandler; onTimeframeSaved: (strategyId: number, timeframe: string | null) => void; onStatusChange: (strategyId: number, statuses: StrategyStatus[]) => void; statusSaving: boolean; onOpenDetail: (strategyId: number) => void; onBacktestRiskAcceptance: (strategyId: number, runId: number, accepted: boolean) => void; savingBacktestRiskAcceptance: boolean; onPairedSaved: (strategyId: number, updates: Record<string, number[]>) => void; className?: string; compareId?: number | null; onCompare?: (strategyId: number | null) => void; onFilterRelated?: (strategy: Strategy) => void; onRestoreView?: (() => void) | null }) {
+function StrategySidePanel({ strategy, allStrategies, query, refreshVersion, onClose, onDeleted, onNoteSaved, onDisplayNameSaved, onTimeframeSaved, onStatusChange, statusSaving, onOpenDetail, onBacktestRiskAcceptance, savingBacktestRiskAcceptance, onPairedSaved, onCloneSaved, className = '', compareId = null, onCompare, onFilterRelated, onRestoreView }: { strategy: Strategy; allStrategies: Strategy[]; query: string; refreshVersion: number; onClose: () => void; onDeleted: (strategyId: number) => void; onNoteSaved: NoteSavedHandler; onDisplayNameSaved: DisplayNameSavedHandler; onTimeframeSaved: (strategyId: number, timeframe: string | null) => void; onStatusChange: (strategyId: number, statuses: StrategyStatus[]) => void; statusSaving: boolean; onOpenDetail: (strategyId: number) => void; onBacktestRiskAcceptance: (strategyId: number, runId: number, accepted: boolean) => void; savingBacktestRiskAcceptance: boolean; onPairedSaved: (strategyId: number, updates: Record<string, number[]>) => void; onCloneSaved?: () => void; className?: string; compareId?: number | null; onCompare?: (strategyId: number | null) => void; onFilterRelated?: (strategy: Strategy) => void; onRestoreView?: (() => void) | null }) {
   const [detailStrategy, setDetailStrategy] = useState<Strategy | null>(null)
   const [detailError, setDetailError] = useState('')
   const [detailRetry, setDetailRetry] = useState(0)
@@ -1596,6 +1733,7 @@ function StrategySidePanel({ strategy, allStrategies, query, refreshVersion, onC
     no_mm_accepted: strategy.no_mm_accepted,
     no_mm_accepted_at: strategy.no_mm_accepted_at,
     backtest: strategy.backtest,
+    clone_deviation: strategy.clone_deviation ?? detailStrategy.clone_deviation ?? null,
   }
   const m = active.metrics
   const history = panelHistory ? [...panelHistory.trades].reverse() : []
@@ -1636,6 +1774,7 @@ function StrategySidePanel({ strategy, allStrategies, query, refreshVersion, onC
       <div className="drawer-stat-grid">
         <DrawerMetric label="Realized P/L" value={signedMoney(m.net_profit)} detail={`${m.trades} combined trades | Exp ${money(m.expectancy)}`} tone={m.net_profit >= 0 ? 'positive' : 'negative'} />
         <DrawerMetric label="Accumulated P/L %" value={signedPercent(active.account_pl_percent)} detail={active.account_balance == null ? 'No active-account balance snapshot' : `Combined P/L + floating / current ${money(active.account_balance)} balance`} tone={(active.account_pl_percent ?? 0) >= 0 ? 'positive' : 'negative'} />
+        {active.clone_deviation && <DrawerMetric label="Dev vs clon" value={cloneDeviationLabel(active.clone_deviation)} detail={active.clone_deviation.clone_strategy_id == null ? 'Sin clon' : `${active.clone_deviation.live_trades}/${active.clone_deviation.clone_trades} trades · clon ${active.clone_deviation.clone_account} #${active.clone_deviation.clone_strategy_id} · ×${active.clone_deviation.scale == null ? '—' : active.clone_deviation.scale.toFixed(2)}`} tone={(active.clone_deviation.deviation_pp ?? 0) >= 0 ? 'positive' : 'negative'} />}
         <DrawerMetric label="Health" value={healthLabel(active.health.status)} detail={active.health.reasons.join(', ') || 'No active alerts'} tone={`status-${active.health.status}`} dotStatus={active.health.status} />
         <DrawerMetric label="Today" value={signedMoney(m.today_profit)} detail={`${m.today_trades} trades today`} tone={m.today_profit >= 0 ? 'positive' : 'negative'} />
         <DrawerMetric label="Win %" value={`${(m.win_rate * 100).toFixed(1)}%`} detail={`${m.winning_trades}/${m.trades} won`} tone={m.win_rate >= .5 ? 'positive' : 'negative'} />
@@ -1647,6 +1786,7 @@ function StrategySidePanel({ strategy, allStrategies, query, refreshVersion, onC
         <DrawerMetric label="Worst trade" value={signedMoney(m.worst_trade)} detail="Closed trade" tone={(m.worst_trade || 0) >= 0 ? 'positive' : 'negative'} />
         <div className="drawer-card streak-card"><StreakPair metrics={m} /></div>
       </div>
+      <MonthlyResultCalendar strategyId={active.id} />
       <MonthlyPnlCalendar strategyId={active.id} />
       <section className="drawer-section drawer-paired-bots">
         <div className="drawer-section-title"><span className="eyebrow">BOTS DUPLICADOS</span>{parsePairedIds(pairedInput).length > 0 && <strong>{parsePairedIds(pairedInput).length} pareja{parsePairedIds(pairedInput).length === 1 ? '' : 's'}</strong>}</div>
@@ -1681,6 +1821,7 @@ function StrategySidePanel({ strategy, allStrategies, query, refreshVersion, onC
       }} />
       {panelHistory && <MagicNumbersPanel key={`magic-numbers-${strategy.id}`} strategy={active} mappings={panelHistory.mappings} placement="drawer" />}
       <ManualTimeframeEditor key={`manual-timeframe-${strategy.id}`} strategy={active} onSaved={onTimeframeSaved} />
+      {active.clone_deviation && <CloneEditor key={`clone-${strategy.id}`} strategy={active} allStrategies={allStrategies} onSaved={() => onCloneSaved?.()} />}
       <StrategyIdentifiers key={`identifiers-${strategy.id}`} strategy={active} detail={panelHistory} />
       <section className="drawer-section drawer-history">
         <div className="drawer-section-title"><span className="eyebrow">HISTORY ({panelHistory?.total_trades ?? 0})</span>{historyRefreshing && panelHistory && <small>Actualizando…</small>}</div>
@@ -2765,7 +2906,9 @@ export default function App() {
       return
     }
     setDashboardFilterPending(true)
-    const timer = window.setTimeout(() => { void loadDashboard() }, 200)
+    // The debounce only coalesces filter clicks; the very first load has
+    // nothing to coalesce, so start it immediately alongside the journal.
+    const timer = window.setTimeout(() => { void loadDashboard() }, dashboardRequestRef.current.id === 0 ? 0 : 200)
     return () => {
       window.clearTimeout(timer)
       if (dashboardRequestRef.current.controller) {
@@ -2805,13 +2948,22 @@ export default function App() {
     journalRequestRef.current.controller?.abort()
   }, [])
   const allStrategies = data?.strategies || []
+  const [algotapEgt, setAlgotapEgt] = useState<EgtIndex>(() => new Map())
+  useEffect(() => {
+    // Local cached copy only; AlgoTAP itself is contacted from the AlgoTAP tab button.
+    api<{ snapshot: { egt?: AlgoTapEgt[] } | null }>('/api/algotap')
+      .then(status => setAlgotapEgt(buildEgtIndex(status.snapshot?.egt)))
+      .catch(() => undefined)
+  }, [])
+  const egtFor = useCallback((strategy: Strategy) => egtForStrategy(algotapEgt, strategy), [algotapEgt])
   const brokerAccountOptions = data?.broker_accounts || []
   const accountsByAlias = (name: string) => brokerAccountOptions.filter(account => accountAlias(accountAliases, account).trim().toLowerCase() === name)
   const favoritePresets = [
-    { n: 1, label: 'cuenta Axi live', accounts: accountsByAlias('axi live'), category: null as StrategyStatus | null },
-    { n: 2, label: 'categoría Axi live', accounts: [] as string[], category: 'axi_live' as StrategyStatus },
-    { n: 3, label: 'cuenta Darwinex live', accounts: accountsByAlias('darwinex live'), category: null as StrategyStatus | null },
-    { n: 4, label: 'categoría Darwinex live', accounts: [] as string[], category: 'live' as StrategyStatus },
+    { n: 1, label: 'cuenta Axi live', accounts: accountsByAlias('axi live'), category: null as StrategyStatusFilter | null },
+    { n: 2, label: 'categoría Axi live', accounts: [] as string[], category: 'axi_live' as StrategyStatusFilter },
+    { n: 3, label: 'cuenta Darwinex live', accounts: accountsByAlias('darwinex live'), category: null as StrategyStatusFilter | null },
+    { n: 4, label: 'categoría Darwinex live', accounts: [] as string[], category: 'live' as StrategyStatusFilter },
+    { n: 5, label: 'solo candidata live (sin otra marca)', accounts: [] as string[], category: 'candidate_live_only' as StrategyStatusFilter },
   ].map(preset => {
     const isCategory = preset.category !== null
     const available = isCategory || preset.accounts.length > 0
@@ -2830,7 +2982,7 @@ export default function App() {
       return
     }
     if (!preset.available) return
-    if (preset.isCategory) { setBrokerAccounts(null); setStrategyStatusFilter(preset.category as StrategyStatus) }
+    if (preset.isCategory) { setBrokerAccounts(null); setStrategyStatusFilter(preset.category as StrategyStatusFilter) }
     else { setStrategyStatusFilter('all'); setBrokerAccounts(new Set(preset.accounts)) }
     setAutoOpenPanel(true)
   }
@@ -2906,7 +3058,7 @@ export default function App() {
   }), [brokerFilteredStrategies, query, magicQuery, minTrades, showStopped, strategyStatusFilter, statusFilter, linkFilter, backtestStatusFilter])
   const sortedStrategies = useMemo(() => {
     if (!sort) return filtered
-    return [...filtered].sort((a, b) => compareStrategies(a, b, sort.key, sort.direction))
+    return [...filtered].sort((a, b) => compareStrategies(a, b, sort.key, sort.direction, egtFor))
   }, [filtered, sort])
   useEffect(() => {
     const topScroll = overviewTopScrollRef.current
@@ -2989,19 +3141,19 @@ export default function App() {
   return <div className={sidebarCollapsed ? 'shell collapsed-sidebar' : 'shell'}>
     <button className="sidebar-toggle" type="button" aria-label={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'} onClick={toggleSidebar}>{sidebarCollapsed ? '›' : '‹'}</button>
     <aside className="sidebar"><Logo/><nav>{([
-      ['overview','Overview',LayoutDashboard],['detail','Strategy',Activity],['journal','Journal analysis',BookOpen],['events','MT5 Events',TriangleAlert],['guardian','Guardian',Activity],['performance','Ranking',TrendingUp],['chart','Chart',CandlestickChart],
+      ['overview','Overview',LayoutDashboard],['detail','Strategy',Activity],['journal','Journal analysis',BookOpen],['events','MT5 Events',TriangleAlert],['guardian','Guardian',Activity],['algotap','AlgoTAP',Gauge],['performance','Ranking',TrendingUp],['chart','Chart',CandlestickChart],
       ['settings','Settings',SettingsIcon],
     ] as const).map(([key,label,Icon]) => <button key={key} className={tab === key ? 'active' : ''} onClick={() => navigateTo(key)}><Icon size={15}/>{label}</button>)}</nav><div className="sidebar-footer"><div className="pulse"/><div><strong>Local system</strong><small>Refresh every 1 min</small></div></div></aside>
-    <main className={tab === 'overview' ? 'overview-main' : undefined}><header><div><span className="eyebrow">STRATEGY PORTFOLIO</span><h1>{tab === 'overview' ? 'Operational status' : tab === 'performance' ? 'Ranking' : tab === 'journal' ? 'Journal analysis' : tab === 'events' ? 'MT5 Events' : tab === 'guardian' ? 'Guardian monitor' : tab === 'detail' ? 'Strategy detail' : tab === 'chart' ? 'Market trades' : 'Settings'}</h1></div>{tab !== 'overview' && <div className="header-actions">{tab !== 'guardian' && <AccountFilter accounts={brokerAccountOptions} aliases={accountAliases} selected={brokerAccounts} onChange={setBrokerAccounts}/>} {tab !== 'events' && tab !== 'guardian' && <><AssetFilter assets={assetOptions} selected={assets} onChange={setAssets}/><select value={windowName} onChange={e => setWindowName(e.target.value)}><option value="30d">30 days</option><option value="90d">90 days</option><option value="all">All</option><option value="custom">Custom</option></select>{windowName === 'custom' && <><input aria-label="Start date" type="date" value={customStart} onChange={e => setCustomStart(e.target.value)}/><input aria-label="End date" type="date" value={customEnd} onChange={e => setCustomEnd(e.target.value)}/></>}</>}<button className="button refresh icon-command" disabled={snapshotRefreshing} onClick={() => { void refreshSnapshot() }}><RefreshCw size={14}/>{snapshotRefreshing ? 'Actualizando…' : 'Refresh'}</button></div>}</header>
+    <main className={tab === 'overview' ? 'overview-main' : undefined}><header><div><span className="eyebrow">STRATEGY PORTFOLIO</span><h1>{tab === 'overview' ? 'Operational status' : tab === 'performance' ? 'Ranking' : tab === 'journal' ? 'Journal analysis' : tab === 'events' ? 'MT5 Events' : tab === 'guardian' ? 'Guardian monitor' : tab === 'algotap' ? 'AlgoTAP' : tab === 'detail' ? 'Strategy detail' : tab === 'chart' ? 'Market trades' : 'Settings'}</h1></div>{tab !== 'overview' && tab !== 'algotap' && <div className="header-actions">{tab !== 'guardian' && <AccountFilter accounts={brokerAccountOptions} aliases={accountAliases} selected={brokerAccounts} onChange={setBrokerAccounts}/>} {tab !== 'events' && tab !== 'guardian' && <><AssetFilter assets={assetOptions} selected={assets} onChange={setAssets}/><select value={windowName} onChange={e => setWindowName(e.target.value)}><option value="30d">30 days</option><option value="90d">90 days</option><option value="all">All</option><option value="custom">Custom</option></select>{windowName === 'custom' && <><input aria-label="Start date" type="date" value={customStart} onChange={e => setCustomStart(e.target.value)}/><input aria-label="End date" type="date" value={customEnd} onChange={e => setCustomEnd(e.target.value)}/></>}</>}<button className="button refresh icon-command" disabled={snapshotRefreshing} onClick={() => { void refreshSnapshot() }}><RefreshCw size={14}/>{snapshotRefreshing ? 'Actualizando…' : 'Refresh'}</button></div>}</header>
       {error && <div className="error-banner">{error}</div>}
       {tab === 'overview' && <>
-        <section className="terminal-strip">{data?.terminals.map(terminal => { const connection = terminalConnectionPresentation(terminal.status); return <div key={terminal.id} title={connection.text ? 'Dashboard bridge is waiting for a current MT5 heartbeat.' : 'Current MT5 heartbeat received.'}><HealthDot status={connection.dot}/><strong>{terminal.name}</strong><span>{`Account ${terminal.account_login || '—'}${connection.text}`}</span>{terminal.last_seen && <small>{new Date(terminal.last_seen).toLocaleString('en-US')}</small>}</div> })}</section>
+        <TerminalUpdateStrip terminals={data?.terminals || []}/>
         <details className="overview-summary" open={summaryOpen} onToggle={event => setSummaryOpen(event.currentTarget.open)}><summary><span>Resumen general</span><small>Métricas, exposición y resultado mensual</small></summary><div className={`overview-summary-content${overviewUpdating ? ' overview-data-pending' : ''}`}><div className="overview-summary-tabs" role="tablist" aria-label="Resumen general"><button type="button" role="tab" aria-selected={overviewSummaryTab === 'summary'} className={overviewSummaryTab === 'summary' ? 'active' : ''} onClick={() => setOverviewSummaryTab('summary')}>Resumen</button><button type="button" role="tab" aria-selected={overviewSummaryTab === 'advanced'} className={overviewSummaryTab === 'advanced' ? 'active' : ''} onClick={() => setOverviewSummaryTab('advanced')}>Estadísticas avanzadas</button></div>{overviewSummaryTab === 'summary' ? <><OverviewTradingMetrics data={overviewJournalData}/><OverviewAnalyticsPanel analytics={overviewAnalytics} /></> : <OverviewAdvancedAnalytics data={overviewJournalData} capitalEligible={assets === null}/>}</div>
         </details><section className="panel table-panel" aria-busy={overviewUpdating}>
           <div className="overview-sticky-header">
             <div className="panel-heading">
             <div><span className="eyebrow">MONITORING</span><h2>All bots</h2><p className="timeframe-coverage">Temporalidad: <strong>{data?.timeframe_coverage.terminal_profile ?? 0} perfil MT5</strong> · {data?.timeframe_coverage.sqx ?? 0} SQX · {data?.timeframe_coverage.manual ?? 0} manual · <strong className="missing">{data?.timeframe_coverage.missing ?? 0} sin evidencia</strong></p></div>
-            <div className="filters"><button type="button" className="button diagnose-toggle" disabled={!selected} title={selected ? `Buscar errores de ${displayName(selected)} en los eventos del terminal (últimos 5 días)` : 'Selecciona una estrategia en la tabla primero'} onClick={() => { if (!selected) return; setStrategyEventsScope(selected.id); setEventDateRange('5d'); navigateTo('events') }}><TriangleAlert size={14}/>Diagnóstico 5d</button>{favoritePresets.map(preset => <button key={preset.n} type="button" className={`button stopped-visibility-toggle favorite-preset ${preset.active ? 'active' : ''}`} aria-pressed={preset.active} aria-label={`Favorito ${preset.n}: ${preset.label} y panel al seleccionar`} title={`Favorito ${preset.n}: ${preset.label} + panel al seleccionar`} disabled={!preset.available} onClick={() => applyFavorite(preset)}>{preset.n}</button>)}<button type="button" className={`button stopped-visibility-toggle ${autoOpenPanel ? 'active' : ''}`} aria-pressed={autoOpenPanel} aria-label={autoOpenPanel ? 'Abrir panel al seleccionar un bot: activado' : 'Abrir panel al seleccionar un bot: desactivado'} title={autoOpenPanel ? 'Abrir panel al seleccionar un bot (activado)' : 'Abrir panel al seleccionar un bot (desactivado)'} onClick={() => { setAutoOpenPanel(current => { const next = !current; if (!next) setPanelStrategyId(null); return next }) }}>{autoOpenPanel ? <PanelRightOpen size={14}/> : <PanelRight size={14}/>} Panel al seleccionar</button><button type="button" className={`button stopped-visibility-toggle ${showStopped ? 'active' : ''}`} aria-pressed={showStopped} aria-label={showStopped ? 'Ocultar bots stopped' : 'Mostrar bots stopped'} onClick={() => setShowStopped(current => !current)}>{showStopped ? <EyeOff size={14}/> : <Eye size={14}/>} {showStopped ? 'Ocultar stopped' : 'Mostrar stopped'}</button><select aria-label="Categoria manual" value={strategyStatusFilter} onChange={e => setStrategyStatusFilter(e.target.value as StrategyStatusFilter)}><option value="all">Todas las categorias</option><option value="live">D Darwinex live</option><option value="monitor">☹ Revisar</option><option value="candidate_live">☺ Candidata live</option><option value="axi_live">A Axi live</option><option value="">Sin categoria</option></select><input aria-label="Search strategies" placeholder="Search strategy or symbol…" value={query} onChange={e => setQuery(e.target.value)}/><input className="magic-filter" aria-label="Search MN" placeholder="Search MN…" value={magicQuery} onChange={e => setMagicQuery(e.target.value.replace(/\D/g, ''))}/><input className="min-trades-filter" aria-label="Mínimo de trades" placeholder="Min trades…" inputMode="numeric" title="Mostrar solo estrategias con al menos N trades" value={minTradesQuery} onChange={e => setMinTradesQuery(e.target.value.replace(/\D/g, ''))}/><input className="strategy-id-filter" aria-label="Filtrar por ID interno" placeholder="IDs internos: 12, 34…" inputMode="numeric" value={strategyIdQuery} onChange={e => setStrategyIdQuery(e.target.value.replace(/[^\d,\s]/g, ''))}/><AccountFilter compact accounts={brokerAccountOptions} aliases={accountAliases} selected={brokerAccounts} onChange={setBrokerAccounts}/><AssetFilter compact assets={assetOptions} selected={assets} onChange={setAssets}/><select className="status-filter" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}><option value="all">All states</option>{Object.entries(stateLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select><select className="backtest-status-filter" aria-label="Backtest status or audit" value={backtestStatusFilter} onChange={e => setBacktestStatusFilter(e.target.value as BacktestFilter)}><option value="all">All backtests</option><optgroup label="Backtest status">{Object.entries(backtestLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</optgroup><optgroup label="Risk audit">{Object.entries(backtestAuditFilterLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</optgroup></select><button type="button" className="button reset-filters" title="Restablecer todos los filtros" aria-label="Restablecer todos los filtros" onClick={resetFilters}><RotateCcw size={14}/>Reset filtros</button></div>
+            <div className="filters"><button type="button" className="button diagnose-toggle" disabled={!selected} title={selected ? `Buscar errores de ${displayName(selected)} en los eventos del terminal (últimos 5 días)` : 'Selecciona una estrategia en la tabla primero'} onClick={() => { if (!selected) return; setStrategyEventsScope(selected.id); setEventDateRange('5d'); navigateTo('events') }}><TriangleAlert size={14}/>Diagnóstico 5d</button>{favoritePresets.map(preset => <button key={preset.n} type="button" className={`button stopped-visibility-toggle favorite-preset ${preset.active ? 'active' : ''}`} aria-pressed={preset.active} aria-label={`Favorito ${preset.n}: ${preset.label} y panel al seleccionar`} title={`Favorito ${preset.n}: ${preset.label} + panel al seleccionar`} disabled={!preset.available} onClick={() => applyFavorite(preset)}>{preset.n}</button>)}<button type="button" className={`button stopped-visibility-toggle ${autoOpenPanel ? 'active' : ''}`} aria-pressed={autoOpenPanel} aria-label={autoOpenPanel ? 'Abrir panel al seleccionar un bot: activado' : 'Abrir panel al seleccionar un bot: desactivado'} title={autoOpenPanel ? 'Abrir panel al seleccionar un bot (activado)' : 'Abrir panel al seleccionar un bot (desactivado)'} onClick={() => { setAutoOpenPanel(current => { const next = !current; if (!next) setPanelStrategyId(null); return next }) }}>{autoOpenPanel ? <PanelRightOpen size={14}/> : <PanelRight size={14}/>} Panel al seleccionar</button><button type="button" className={`button stopped-visibility-toggle ${showStopped ? 'active' : ''}`} aria-pressed={showStopped} aria-label={showStopped ? 'Ocultar bots stopped' : 'Mostrar bots stopped'} onClick={() => setShowStopped(current => !current)}>{showStopped ? <EyeOff size={14}/> : <Eye size={14}/>} {showStopped ? 'Ocultar stopped' : 'Mostrar stopped'}</button><select aria-label="Categoria manual" value={strategyStatusFilter} onChange={e => setStrategyStatusFilter(e.target.value as StrategyStatusFilter)}><option value="all">Todas las categorias</option><option value="live">D Darwinex live</option><option value="monitor">☹ Revisar</option><option value="candidate_live">☺ Candidata live</option><option value="candidate_live_only">☺ Solo candidata live</option><option value="axi_live">A Axi live</option><option value="">Sin categoria</option></select><input aria-label="Search strategies" placeholder="Search strategy or symbol…" value={query} onChange={e => setQuery(e.target.value)}/><input className="magic-filter" aria-label="Search MN" placeholder="Search MN…" value={magicQuery} onChange={e => setMagicQuery(e.target.value.replace(/\D/g, ''))}/><input className="min-trades-filter" aria-label="Mínimo de trades" placeholder="Min trades…" inputMode="numeric" title="Mostrar solo estrategias con al menos N trades" value={minTradesQuery} onChange={e => setMinTradesQuery(e.target.value.replace(/\D/g, ''))}/><input className="strategy-id-filter" aria-label="Filtrar por ID interno" placeholder="IDs internos: 12, 34…" inputMode="numeric" value={strategyIdQuery} onChange={e => setStrategyIdQuery(e.target.value.replace(/[^\d,\s]/g, ''))}/><AccountFilter compact accounts={brokerAccountOptions} aliases={accountAliases} selected={brokerAccounts} onChange={setBrokerAccounts}/><AssetFilter compact assets={assetOptions} selected={assets} onChange={setAssets}/><button type="button" className="button reset-filters" title="Restablecer todos los filtros" aria-label="Restablecer todos los filtros" onClick={resetFilters}><RotateCcw size={14}/>Reset filtros</button><select className="status-filter" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}><option value="all">All states</option>{Object.entries(stateLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select><select className="backtest-status-filter" aria-label="Backtest status or audit" value={backtestStatusFilter} onChange={e => setBacktestStatusFilter(e.target.value as BacktestFilter)}><option value="all">All backtests</option><optgroup label="Backtest status">{Object.entries(backtestLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</optgroup><optgroup label="Risk audit">{Object.entries(backtestAuditFilterLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</optgroup></select></div>
 	            <div className="overview-global-filters"><select aria-label="Time range" value={windowName} onChange={e => setWindowName(e.target.value)}><option value="30d">30 days</option><option value="90d">90 days</option><option value="all">All</option><option value="custom">Custom</option></select>{windowName === 'custom' && <><input aria-label="Start date" type="date" value={customStart} onChange={e => setCustomStart(e.target.value)}/><input aria-label="End date" type="date" value={customEnd} onChange={e => setCustomEnd(e.target.value)}/></>}<button className="button refresh icon-command" onClick={() => { void refreshSnapshot() }} disabled={overviewUpdating || snapshotRefreshing}><RefreshCw size={14}/>{snapshotRefreshing ? 'Actualizando…' : 'Refresh'}</button>{overviewUpdating && <span className="overview-loading" role="status" aria-live="polite"><RefreshCw className="overview-loading-spinner" size={13}/>Aplicando filtros…</span>}{data?.snapshot && <span className={`overview-snapshot ${data.snapshot.stale ? 'stale' : ''}`} title={`Snapshot ${data.snapshot.revision} · ${new Date(data.snapshot.generated_at).toLocaleString()}`}>{data.snapshot.stale ? 'Datos desactualizados' : snapshotAgeLabel(data.snapshot)}</span>}</div>
 	          </div>
 	          <div ref={overviewTopScrollRef} className="table-scroll-top" aria-label="Scrollable table columns" tabIndex={0} onScroll={() => syncOverviewScroll('top')}>
@@ -3032,13 +3184,16 @@ export default function App() {
                   <td>{strategy.account_login ? <><strong>{strategy.account_login}</strong>{alias && <small>{alias}</small>}</> : '—'}</td>
                   <td className="magic-numbers">{primaryMagicLabel(strategy)}</td>
                   <td className={(strategy.account_pl_percent ?? 0) >= 0 ? 'value-good' : 'value-bad'}>{signedPercent(strategy.account_pl_percent)}</td>
+                  <td className={strategy.clone_deviation?.deviation_pp == null ? 'clone-deviation-cell' : strategy.clone_deviation.deviation_pp >= 0 ? 'clone-deviation-cell value-good' : 'clone-deviation-cell value-bad'} title={cloneDeviationTitle(strategy.clone_deviation)}>{cloneDeviationLabel(strategy.clone_deviation)}</td>
                   <td className={strategy.metrics.today_profit >= 0 ? 'value-good' : 'value-bad'}>{money(strategy.metrics.today_profit)}</td><td>{(p.win_rate * 100).toFixed(1)}%</td><td>{p.trades}</td><td>{p.profit_factor == null ? '—' : p.profit_factor.toFixed(2)}</td><td>{number(p.sqn, 2)}</td><td>{number(p.return_dd, 2)}</td><td>{number(p.performance_trades_per_month, 1)}</td>
-                  <td><SQXAnalyticsBadge strategy={strategy} kind="egt"/></td>
                   <td className={p.net_profit >= 0 ? 'value-good' : 'value-bad'}>{money(p.net_profit)}</td><td className={strategy.metrics.floating_profit >= 0 ? 'value-good' : 'value-bad'}>{signedMoney(strategy.metrics.floating_profit)}</td>
                   {strategy.monthly_net_profit.map(month => <td key={month.key} className={`monthly-profit-cell${month.net_profit > 0 ? ' positive' : month.net_profit < 0 ? ' negative' : ''}`}>{money(month.net_profit)}</td>)}
+                  <td className={`monthly-profit-cell${(strategy.week_net_profit ?? 0) > 0 ? ' positive' : (strategy.week_net_profit ?? 0) < 0 ? ' negative' : ''}`} title="P/L cerrado de la semana en curso (lunes 00:00 a lunes 00:00, hora broker)">{money(strategy.week_net_profit ?? 0)}</td>
                   <td>{p.biggest_lot != null ? p.biggest_lot.toFixed(2) : '—'}</td>
+                  <AlgoTapEgtCells egt={egtFor(strategy)}/>
                   <td className={(p.best_trade || 0) >= 0 ? 'value-good' : 'value-bad'}>{money(p.best_trade)}</td>
                   <td>{money(p.max_drawdown)}</td>
+                  <td><SQXAnalyticsBadge strategy={strategy} kind="egt"/></td>
                   <td><SQXAnalyticsBadge strategy={strategy} kind="edge"/></td><td><SQXAnalyticsBadge strategy={strategy} kind="doctor"/></td>
                   <td className={p.expectancy >= 0 ? 'value-good' : 'value-bad'}>{money(p.expectancy)}</td>
                   <td>{money(p.avg_win)} / {money(p.avg_loss)}</td>
@@ -3051,7 +3206,7 @@ export default function App() {
           </div></div>
         </section>
       </>}
-      {tab === 'overview' && panelStrategy && <PanelErrorBoundary key={`panel-${panelStrategy.id}`} className={compareOpen ? 'with-compare' : ''}><StrategySidePanel strategy={panelStrategy} allStrategies={allStrategies} query={dashboardQuery} refreshVersion={historyRefreshVersion} onClose={() => setPanelStrategyId(null)} onDeleted={handleDeleted} onNoteSaved={handleNoteSaved} onDisplayNameSaved={handleDisplayNameSaved} onTimeframeSaved={handleTimeframeSaved} onStatusChange={updateStrategyStatus} statusSaving={strategyStatusSaving.has(panelStrategy.id)} onOpenDetail={strategyId => { setSelectedId(strategyId); setPanelStrategyId(null); navigateTo('detail') }} onBacktestRiskAcceptance={updateStrategyBacktestRiskAcceptance} savingBacktestRiskAcceptance={backtestRiskAcceptanceSaving.has(panelStrategy.id)} onPairedSaved={handlePairedSaved} className={compareOpen ? 'with-compare' : ''} compareId={compareOpen ? comparePanelId : null} onCompare={setComparePanelId} onFilterRelated={filterRelatedBots} onRestoreView={previousView ? restorePreviousView : null} /></PanelErrorBoundary>}
+      {tab === 'overview' && panelStrategy && <PanelErrorBoundary key={`panel-${panelStrategy.id}`} className={compareOpen ? 'with-compare' : ''}><StrategySidePanel strategy={panelStrategy} allStrategies={allStrategies} query={dashboardQuery} refreshVersion={historyRefreshVersion} onClose={() => setPanelStrategyId(null)} onDeleted={handleDeleted} onNoteSaved={handleNoteSaved} onDisplayNameSaved={handleDisplayNameSaved} onTimeframeSaved={handleTimeframeSaved} onStatusChange={updateStrategyStatus} statusSaving={strategyStatusSaving.has(panelStrategy.id)} onOpenDetail={strategyId => { setSelectedId(strategyId); setPanelStrategyId(null); navigateTo('detail') }} onBacktestRiskAcceptance={updateStrategyBacktestRiskAcceptance} savingBacktestRiskAcceptance={backtestRiskAcceptanceSaving.has(panelStrategy.id)} onPairedSaved={handlePairedSaved} onCloneSaved={() => { void load() }} className={compareOpen ? 'with-compare' : ''} compareId={compareOpen ? comparePanelId : null} onCompare={setComparePanelId} onFilterRelated={filterRelatedBots} onRestoreView={previousView ? restorePreviousView : null} /></PanelErrorBoundary>}
       {tab === 'overview' && panelStrategy && compareOpen && comparePanelId != null && <PanelErrorBoundary key={`compare-${comparePanelId}`} className="compare"><PairedComparePanel strategyId={comparePanelId} allStrategies={allStrategies} query={unscopedQuery(dashboardQuery).toString()} refreshVersion={historyRefreshVersion} onClose={() => setComparePanelId(null)} onDeleted={async strategyId => { setComparePanelId(null); if (strategyId === panelStrategy.id) await handleDeleted(); else await load() }} onNoteSaved={handleNoteSaved} onDisplayNameSaved={handleDisplayNameSaved} onTimeframeSaved={handleTimeframeSaved} onStatusChange={updateStrategyStatus} statusSaving={strategyStatusSaving.has(comparePanelId)} onOpenDetail={strategyId => { setSelectedId(strategyId); setPanelStrategyId(null); navigateTo('detail') }} onBacktestRiskAcceptance={updateStrategyBacktestRiskAcceptance} savingBacktestRiskAcceptance={backtestRiskAcceptanceSaving.has(comparePanelId)} onPairedSaved={handlePairedSaved} className="compare" /></PanelErrorBoundary>}
       {tab === 'performance' && <Performance
         strategies={brokerFilteredStrategies}
@@ -3064,6 +3219,7 @@ export default function App() {
       {tab === 'guardian' && <GuardianPanel data={guardianData} loading={guardianLoading} refreshing={guardianRefreshing} dateRange={guardianDateRange} onDateRange={setGuardianDateRange} onRefresh={() => { void refreshGuardian() }} strategies={data?.strategies || []} />}
       {tab === 'detail' && <><div className="strategy-selector"><label>Strategy</label><select value={selectedId || ''} disabled={!brokerFilteredStrategies.length} onChange={e => setSelectedId(Number(e.target.value))}>{brokerFilteredStrategies.map(strategy => <option key={strategy.id} value={strategy.id}>{strategy.symbol} — {displayName(strategy)}</option>)}</select></div>{selected ? <LazyStrategyDetail strategy={selected} query={dashboardQuery} onDeleted={handleDeleted} onNoteSaved={handleNoteSaved} onNoMmAcceptance={updateStrategyNoMmAcceptance} savingNoMmAcceptance={noMmAcceptanceSaving.has(selected.id)} /> : <div className="empty-state">No strategy selected for this broker account.</div>}</>}
       {tab === 'chart' && <><div className="strategy-selector"><label>Strategy</label><select value={selectedId || ''} disabled={!brokerFilteredStrategies.length} onChange={e => setSelectedId(Number(e.target.value))}>{brokerFilteredStrategies.map(strategy => <option key={strategy.id} value={strategy.id}>{strategy.symbol} — {displayName(strategy)}</option>)}</select></div>{selected ? <ChartPanel strategyId={selected.id} accountQuery={dashboardQuery}/> : <div className="empty-state">Select a strategy for the selected broker accounts.</div>}</>}
+      {tab === 'algotap' && <AlgoTapPanel strategies={allStrategies} onSnapshot={snapshot => setAlgotapEgt(buildEgtIndex(snapshot?.egt))} onSelect={strategyId => { setSelectedId(strategyId); navigateTo('detail') }}/>}
       {tab === 'settings' && <Settings reload={load} aliases={accountAliases} onAliasesSaved={setAccountAliases}/>}<footer>EA Observatory · Local data · {data ? `Updated ${new Date(data.generated_at).toLocaleTimeString('en-US')}` : 'Connecting…'}</footer>
     </main>
   </div>

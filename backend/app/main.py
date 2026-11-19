@@ -26,15 +26,17 @@ from .config import (
     REFRESH_SECONDS, SYNC_RESPONSE_WAIT_SECONDS,
 )
 from .db import DB_PATH, DEFAULT_ACCOUNT_INITIAL_CAPITALS, DEFAULT_ALERTS, init_db, rows, session, utcnow
-from .dashboard_analytics import build_calendar_profit, build_historical_exposure, build_live_exposure, build_realized_period_profit, build_strategy_analytics
+from .dashboard_analytics import BROKER_TZ, build_calendar_profit, build_historical_exposure, build_live_exposure, build_realized_period_profit, build_strategy_analytics
 from .history_import import import_tradebuddy_history, imported_history_index, imported_history_trades
 from .identity_audit import audit as identity_audit
 from .expert_identity_migration import audit as expert_identity_audit
 from .mapping import annotate_magic_scope_counts, asset_key, asset_label, auto_confirm_suggestions, confirm_mapping, ensure_mt5_strategies, stable_comment, suggestions
 from .operational_identity import conflicts as identity_conflicts, expert_key, identity_dict, load_mappings, mappings_for_primary, normalize_expert, same_identity, terminal_session_id
 from .metrics import compute_metrics, health_status, pick_baseline, reconstruct_trades, risk_guard_status
+from .clone_deviation import LIVE_CLONE_ACCOUNTS, clone_profile, compute_clone_deviation, is_clone_candidate, live_window_start, pick_clone
 from .mt5_bridge import canonical_ingestion_source, ingest_responses, latest_chart_response_id, register_terminal, request_chart, request_sync, run_remote_diagnostic, set_canonical_ingestion_source, sync_all
 from .ssh_bridge import SSHBridgeError
+from . import algotap
 from . import backtest_batches
 from . import alert_engine
 from . import mt5_backtests
@@ -1103,6 +1105,23 @@ def _monthly_net_profit(trades: list[dict[str, Any]], months: list[dict[str, Any
     ]
 
 
+def _current_week_start_msc(now: datetime | None = None) -> int:
+    """Monday 00:00 (broker time) of the week in progress, in epoch milliseconds."""
+    current = (now or datetime.now(BROKER_TZ)).astimezone(BROKER_TZ)
+    monday = current.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=current.weekday())
+    return int(monday.timestamp() * 1000)
+
+
+def _week_net_profit(trades: list[dict[str, Any]], week_start_msc: int) -> float:
+    """Realised closed-trade Net P/L from Monday to Monday of the current week."""
+    week_end_msc = week_start_msc + 7 * 86_400_000
+    return sum(
+        float(trade.get("net_profit") or 0)
+        for trade in trades
+        if week_start_msc <= int(trade.get("close_time_msc") or 0) < week_end_msc
+    )
+
+
 def _account_is_selected(account: str | None, selected_accounts: set[str] | None, include_unassigned: bool) -> bool:
     """Return whether an account belongs to the optional dashboard account scope."""
     if selected_accounts is None:
@@ -1690,6 +1709,156 @@ def _dashboard_lookups(conn: Any) -> dict[str, Any]:
     return lookups
 
 
+def _clone_pairs(conn: Any) -> dict[int, int | None]:
+    """Manual live→clone overrides; a None value means "no clone"."""
+    row = conn.execute("SELECT value_json FROM settings WHERE key='clone_pairs'").fetchone()
+    if not row:
+        return {}
+    try:
+        stored = json.loads(row["value_json"])
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    pairs: dict[int, int | None] = {}
+    if isinstance(stored, dict):
+        for live_id, clone_id in stored.items():
+            try:
+                pairs[int(live_id)] = None if clone_id is None else int(clone_id)
+            except (TypeError, ValueError):
+                continue
+    return pairs
+
+
+def _strategy_clone_profile(
+    strategy: Any,
+    mappings: list[Any],
+    deployments: list[dict[str, Any]],
+    account: str,
+) -> dict[str, Any]:
+    expert_name = next(
+        (str(item.get("ex5_name") or "").strip() for item in deployments if str(item.get("ex5_name") or "").strip()),
+        str(strategy["mql5_name"] or strategy["sqx_name"] or ""),
+    )
+    symbol = next(
+        (
+            str(item.get("symbol") or "").strip()
+            for item in [*deployments, *[dict(mapping) for mapping in mappings]]
+            if str(item.get("symbol") or "").strip()
+        ),
+        str(strategy["symbol"] or ""),
+    )
+    timeframes = [str(item.get("timeframe") or "") for item in deployments]
+    if not any(timeframes) and str(strategy["manual_timeframe"] or "").strip():
+        timeframes = [str(strategy["manual_timeframe"])]
+    magics = [item.get("magic") for item in deployments] + [mapping["magic"] for mapping in mappings]
+    aliases = [str(strategy["mql5_name"] or ""), str(strategy["sqx_name"] or "")]
+    aliases += [str(item.get("ex5_name") or "") for item in deployments]
+    return clone_profile(int(strategy["id"]), account, expert_name, symbol, timeframes, magics, aliases)
+
+
+def _attach_clone_deviations(
+    output: list[dict[str, Any]],
+    strategies: list[Any],
+    overrides: dict[int, int | None],
+    live_trade_view: Any,
+    mappings_by_strategy: dict[int, list[Any]],
+    deployments_by_strategy: dict[int, list[dict[str, Any]]],
+    account_balances: dict[str, float],
+) -> None:
+    """Fill ``clone_deviation`` for every displayed row on a live account."""
+    live_rows = [item for item in output if str(item.get("account_login") or "") in LIVE_CLONE_ACCOUNTS]
+    if not live_rows:
+        return
+    strategies_by_id = {int(strategy["id"]): strategy for strategy in strategies}
+    profiles: dict[int, dict[str, Any]] = {}
+    for strategy in strategies:
+        strategy_id = int(strategy["id"])
+        mappings = mappings_by_strategy.get(strategy_id, [])
+        deployments = deployments_by_strategy.get(strategy_id, [])
+        operational = [
+            mapping for mapping in _operational_mappings(strategy, mappings)
+            if not str(mapping.get("terminal_data_dir") or "").startswith("import://")
+        ]
+        if not operational and not deployments:
+            continue
+        if strategy["retired"] and strategy_id not in overrides.values():
+            continue
+        account = _effective_strategy_account(strategy, mappings, deployments)
+        profiles[strategy_id] = _strategy_clone_profile(strategy, mappings, deployments, account)
+
+    def trade_count(strategy_id: int) -> int:
+        return len(live_trade_view(strategies_by_id[strategy_id])["trades"])
+
+    for item in live_rows:
+        live_id = int(item["id"])
+        live_profile = profiles.get(live_id) or _strategy_clone_profile(
+            strategies_by_id[live_id],
+            mappings_by_strategy.get(live_id, []),
+            deployments_by_strategy.get(live_id, []),
+            str(item["account_login"]),
+        )
+        candidates = [profile for profile in profiles.values() if is_clone_candidate(live_profile, profile)]
+        if live_id in overrides:
+            source = "manual"
+            clone_id = overrides[live_id]
+        else:
+            source = "auto"
+            live_view = live_trade_view(strategies_by_id[live_id])
+            window_start = live_window_start(
+                str(item["account_login"]), live_view["trades"], live_view["positions"]
+            )
+
+            def trades_since_live_start(strategy_id: int, start: int | None = window_start) -> int:
+                if start is None:
+                    return trade_count(strategy_id)
+                clone_view = live_trade_view(strategies_by_id[strategy_id])
+                return sum(
+                    1 for trade in clone_view["trades"]
+                    if int(trade.get("open_time_msc") or trade.get("close_time_msc") or 0) >= start
+                ) + len(clone_view["positions"])
+
+            picked = pick_clone(live_profile, candidates, trades_since_live_start)
+            clone_id = picked["id"] if picked else None
+        clone = profiles.get(clone_id) if clone_id is not None else None
+        if clone_id is not None and clone is None and clone_id in strategies_by_id:
+            clone_strategy = strategies_by_id[clone_id]
+            clone = _strategy_clone_profile(
+                clone_strategy,
+                mappings_by_strategy.get(clone_id, []),
+                deployments_by_strategy.get(clone_id, []),
+                str(clone_strategy["account_login"] or ""),
+            )
+        result: dict[str, Any] = {
+            "source": source,
+            "clone_strategy_id": clone["id"] if clone else None,
+            "clone_account": clone["account"] if clone else None,
+            "clone_name": clone["expert_name"] if clone else None,
+            "candidates": [
+                {"id": profile["id"], "account": profile["account"], "name": profile["expert_name"]}
+                for profile in sorted(candidates, key=lambda profile: (profile["account"], profile["id"]))
+            ],
+            "window_start_msc": None,
+            "scale": None,
+            "live_pl": None,
+            "clone_pl": None,
+            "clone_pl_scaled": None,
+            "live_trades": 0,
+            "clone_trades": 0,
+            "deviation_pp": None,
+        }
+        if clone:
+            live_view = live_trade_view(strategies_by_id[live_id])
+            clone_view = live_trade_view(strategies_by_id[clone["id"]])
+            result.update(compute_clone_deviation(
+                str(item["account_login"]),
+                live_view["trades"],
+                live_view["positions"],
+                clone_view["trades"],
+                clone_view["positions"],
+                account_balances.get(str(item["account_login"])),
+            ))
+        item["clone_deviation"] = result
+
+
 def dashboard_data(
     window: str = "all",
     start: str | None = None,
@@ -1701,6 +1870,7 @@ def dashboard_data(
 ) -> dict[str, Any]:
     start_msc, end_msc = _window_bounds(window, start, end)
     overview_months = _overview_months()
+    week_start_msc = _current_week_start_msc()
     pending_candidates = _pending_candidate_strategy_ids(refresh_if_stale=sync_alerts)
     with session() as conn:
         # Import-only terminals exist solely to attach a previous account's trades
@@ -1805,6 +1975,74 @@ def dashboard_data(
             **account_initial_capitals,
             **_account_initial_capitals(conn),
         }
+        live_scopes: dict[int, dict[str, Any]] = {}
+        live_trade_views: dict[int, dict[str, Any]] = {}
+
+        def live_scope(strategy: Any) -> dict[str, Any]:
+            """Live mappings and displayed account of a strategy (cheap)."""
+            view_id = int(strategy["id"])
+            cached_scope = live_scopes.get(view_id)
+            if cached_scope is not None:
+                return cached_scope
+            view_account = str(strategy["account_login"] or "")
+            view_mappings = mappings_by_strategy.get(view_id, [])
+            view_operational = _operational_mappings(strategy, view_mappings)
+            view_deployments = deployments_by_strategy.get(view_id, [])
+            view_live_mappings = [
+                mapping for mapping in view_operational
+                if str(mapping["role"] or "live") == "live"
+                and (
+                    not view_account
+                    or not str(mapping["account_login"] or "")
+                    or str(mapping["account_login"] or "") == view_account
+                )
+            ]
+            scope = {
+                "live_mappings": view_live_mappings,
+                "effective_account": _effective_strategy_account(
+                    strategy, view_mappings, view_deployments
+                ),
+            }
+            live_scopes[view_id] = scope
+            return scope
+
+        def live_trade_view(strategy: Any) -> dict[str, Any]:
+            """Live-role trades/positions of a strategy, cached per request.
+
+            Shared by the table rows and the live-vs-clone comparison, which
+            needs the clone's trades even when its account is filtered out.
+            """
+            view_id = int(strategy["id"])
+            cached_view = live_trade_views.get(view_id)
+            if cached_view is not None:
+                return cached_view
+            scope = live_scope(strategy)
+            view_live_mappings = scope["live_mappings"]
+            view_effective_account = scope["effective_account"]
+            view_trades = _dedupe_account_trades(sorted(
+                [
+                    _annotate_trade_source(t, mapping, "live", view_effective_account)
+                    for t in _candidate_trades_for_mappings(
+                        view_live_mappings,
+                        trades_by_terminal,
+                        trades_by_terminal_magic,
+                        trades_by_terminal_magic_symbol,
+                    )
+                    if (mapping := _matching_mapping(view_live_mappings, t))
+                ],
+                key=lambda t: (int(t.get("close_time_msc", 0)), int(t.get("deal_ticket", 0))),
+            ))
+            view = {
+                **scope,
+                "trades": view_trades,
+                "positions": [
+                    p for p in positions_all
+                    if any(_matches(m, p) for m in view_live_mappings)
+                ],
+            }
+            live_trade_views[view_id] = view
+            return view
+
         output = []
         overview_calendar_trades: list[dict[str, Any]] = []
         overview_calendar_seen: set[tuple[Any, ...]] = set()
@@ -1817,7 +2055,6 @@ def dashboard_data(
             lineage_accounts = lineages_by_strategy.get(
                 strategy_id, {"current": [], "predecessor": []}
             )
-            current_account = str(strategy["account_login"] or "")
             predecessor_accounts = set(lineage_accounts["predecessor"])
             mappings = mappings_by_strategy.get(strategy_id, [])
             operational_mappings = _operational_mappings(strategy, mappings)
@@ -1851,16 +2088,9 @@ def dashboard_data(
                 ) or ""
             ).strip()
             resolved_asset = asset_key(operational_symbol)
-            live_mappings = [
-                mapping for mapping in operational_mappings
-                if str(mapping["role"] or "live") == "live"
-                and (
-                    not current_account
-                    or not str(mapping["account_login"] or "")
-                    or str(mapping["account_login"] or "") == current_account
-                )
-            ]
-            effective_account = _effective_strategy_account(strategy, mappings, deployments)
+            strategy_scope = live_scope(strategy)
+            live_mappings = strategy_scope["live_mappings"]
+            effective_account = strategy_scope["effective_account"]
             active_accounts = _active_strategy_accounts(
                 strategy, operational_mappings, deployments, lineage_accounts, effective_account
             )
@@ -1961,19 +2191,8 @@ def dashboard_data(
                 timeframe = None
                 timeframe_source = "missing"
             magic_numbers = sorted({int(mapping["magic"]) for mapping in live_mappings if mapping["magic"] is not None})
-            strategy_trades = _dedupe_account_trades(sorted(
-                [
-                    _annotate_trade_source(t, mapping, "live", effective_account)
-                    for t in _candidate_trades_for_mappings(
-                        live_mappings,
-                        trades_by_terminal,
-                        trades_by_terminal_magic,
-                        trades_by_terminal_magic_symbol,
-                    )
-                    if (mapping := _matching_mapping(live_mappings, t))
-                ],
-                key=lambda t: (int(t.get("close_time_msc", 0)), int(t.get("deal_ticket", 0))),
-            ))
+            trade_view = live_trade_view(strategy)
+            strategy_trades = trade_view["trades"]
             historical_mt5_trades = sorted(
                 [
                     _annotate_trade_source(t, mapping, "historical")
@@ -2026,6 +2245,7 @@ def dashboard_data(
                     overview_calendar_seen.add(key)
                     overview_calendar_trades.append(calendar_trade)
             monthly_net_profit = _monthly_net_profit(strategy_trades + historical_all, overview_months)
+            week_net_profit = _week_net_profit(strategy_trades + historical_all, week_start_msc)
             recent_equity_curve = _recent_equity_curve(strategy_trades + historical_all)
             magic_detail: dict[int, dict[str, Any]] = {}
             for mapping in [*live_mappings, *historical_mappings]:
@@ -2087,7 +2307,7 @@ def dashboard_data(
                 trade for trade in historical_all
                 if start_msc <= int(trade["close_time_msc"]) <= end_msc
             ]
-            positions = [p for p in positions_all if any(_matches(m, p) for m in live_mappings)]
+            positions = trade_view["positions"]
             live_metrics = compute_metrics(trades, positions)
             historical_metrics = compute_metrics(historical_trades)
             lifetime_metrics = compute_metrics(trades + historical_trades, positions)
@@ -2272,6 +2492,7 @@ def dashboard_data(
                     "historical_metrics": historical_metrics,
                     "lifetime_metrics": lifetime_metrics,
                     "monthly_net_profit": monthly_net_profit,
+                    "week_net_profit": week_net_profit,
                     "account_metrics": account_metrics,
                     "account_balance": account_balance,
                     "account_pl_percent": account_pl_percent,
@@ -2314,8 +2535,18 @@ def dashboard_data(
                     "magic_number_details": magic_number_details,
                     "recent_equity_curve": recent_equity_curve,
                     "paired_ids": _parse_paired_ids(str(strategy["paired_strategy_ids"] or "")),
+                    "clone_deviation": None,
                 }
             )
+        _attach_clone_deviations(
+            output,
+            strategies,
+            _clone_pairs(conn),
+            live_trade_view,
+            mappings_by_strategy,
+            deployments_by_strategy,
+            account_balances,
+        )
         asset_options = [
             {"key": key, "label": asset_label(key), "symbols": sorted(symbols)}
             for key, symbols in sorted(asset_symbols_by_key.items(), key=lambda item: (asset_label(item[0]).casefold(), item[0]))
@@ -2855,6 +3086,13 @@ _api_snapshot_generated_at = ""
 _api_snapshot_generated_mono = 0.0
 _api_response_cache: OrderedDict[tuple[Any, ...], dict[str, Any]] = OrderedDict()
 _api_response_inflight: dict[tuple[Any, ...], threading.Event] = {}
+# Cleared by ``lifespan`` while the first revision is built in the background.
+# The HTTP listener (and the static UI) is available immediately; cold API
+# requests attach to that build instead of starting a duplicate one.  Set by
+# default so code paths without a lifespan (tests, scripts) never wait.
+_initial_snapshot_ready = threading.Event()
+_initial_snapshot_ready.set()
+_INITIAL_SNAPSHOT_WAIT_SECONDS = 60.0
 
 
 def _invalidate_api_snapshot() -> None:
@@ -3020,8 +3258,12 @@ def _cached_api_payload(
                         name="dashboard-snapshot-scope",
                     ).start()
                 return _api_payload_with_snapshot(entry, force_stale=True)
+            initial_pending = not _initial_snapshot_ready.is_set()
             event = _api_response_inflight.get(key)
-            if event is None:
+            if event is None and initial_pending:
+                event = _initial_snapshot_ready
+                owner = False
+            elif event is None:
                 event = threading.Event()
                 _api_response_inflight[key] = event
                 owner = True
@@ -3033,6 +3275,11 @@ def _cached_api_payload(
             )
             if entry is not None:
                 return _api_payload_with_snapshot(entry)
+            continue
+        if event is _initial_snapshot_ready:
+            # The startup build covers the unscoped views; other scopes are
+            # built on demand once it has published (CPU is free again).
+            event.wait(timeout=_INITIAL_SNAPSHOT_WAIT_SECONDS)
             continue
         # A cold duplicate waits for its single owner. Once any prior snapshot
         # exists, callers never wait here: they receive stale data immediately.
@@ -3074,8 +3321,36 @@ def _publish_api_snapshot(
     return _api_snapshot_meta(dashboard_entry)
 
 
-def _refresh_dashboard_snapshot(*, sync_alerts: bool) -> dict[str, Any]:
-    """Build a complete revision off-lock, then publish it atomically."""
+def _store_scoped_payloads_if_current(
+    revision: str,
+    scoped_payloads: list[tuple[tuple[Any, ...], dict[str, Any]]],
+) -> None:
+    """Add pre-rendered scopes to an already published revision."""
+    with _api_snapshot_lock:
+        if str(_api_snapshot_revision) != str(revision):
+            return
+        for scope_key, scope_payload in scoped_payloads:
+            # A user request may already have built this scope; keep it.
+            if scope_key in _api_response_cache:
+                continue
+            _store_api_cache_entry(
+                scope_key, scope_payload, _api_snapshot_revision,
+                _api_snapshot_generated_at, _api_snapshot_generated_mono,
+            )
+
+
+def _refresh_dashboard_snapshot(
+    *, sync_alerts: bool, defer_scopes: bool = False,
+    on_published: Any = None,
+) -> dict[str, Any]:
+    """Build a complete revision off-lock, then publish it atomically.
+
+    ``defer_scopes`` publishes the unscoped views first and pre-renders the
+    per-account scopes afterwards.  Startup uses it because no previous
+    revision exists yet: waiting for every account (~7 s) delayed the first
+    page for nothing.  Periodic refreshes keep the atomic behaviour so the
+    previous revision serves accounts until all scopes are ready.
+    """
     # The build semaphore is taken per builder, not across the whole rebuild.
     # Holding it for the full multi-second pass queued every cold user filter
     # (e.g. a multi-account selection) behind the periodic refresh, pushing it
@@ -3089,6 +3364,11 @@ def _refresh_dashboard_snapshot(*, sync_alerts: bool) -> dict[str, Any]:
         journal = build(journal_analysis_data, "all")
         dashboard = build(dashboard_data, "all", sync_alerts=sync_alerts)
         scoped_payloads: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        meta: dict[str, Any] | None = None
+        if defer_scopes:
+            meta = _publish_api_snapshot(dashboard, journal, [])
+            if on_published is not None:
+                on_published()
         # Account selection is the most common and most expensive burst.
         # Pre-render the small, finite set while the previous revision is
         # still live so every account is instant immediately after publish.
@@ -3117,6 +3397,9 @@ def _refresh_dashboard_snapshot(*, sync_alerts: bool) -> dict[str, Any]:
                     scoped_journal,
                 ),
             ))
+        if meta is not None:
+            _store_scoped_payloads_if_current(meta["revision"], scoped_payloads)
+            return meta
         return _publish_api_snapshot(dashboard, journal, scoped_payloads)
 
 
@@ -3258,13 +3541,32 @@ async def lifespan(_: FastAPI):
     mt5_backtests.recover_interrupted_runs()
     if DEFAULT_TERMINAL.is_dir():
         register_terminal("FPM Demo", str(DEFAULT_TERMINAL))
-    # Prepare one complete read-only revision before the HTTP listener accepts
-    # filters. Subsequent revisions are built in the maintenance thread while
-    # requests continue to use this immutable snapshot.
-    try:
-        _refresh_dashboard_snapshot(sync_alerts=False)
-    except Exception:
-        logger.exception("initial dashboard snapshot failed")
+    # Build the first read-only revision in the background so the listener
+    # (and the UI shell) is available at once.  Cold API requests wait for the
+    # unscoped views via ``_initial_snapshot_ready`` instead of duplicating the
+    # work; per-account scopes are pre-rendered right after.  Previously this
+    # blocked startup ~12 s while the browser showed a blank page.
+    _initial_snapshot_ready.clear()
+
+    def initial_snapshot() -> None:
+        started = time.perf_counter()
+        try:
+            _refresh_dashboard_snapshot(
+                sync_alerts=False, defer_scopes=True,
+                on_published=_initial_snapshot_ready.set,
+            )
+        except Exception:
+            logger.exception("initial dashboard snapshot failed")
+        finally:
+            _initial_snapshot_ready.set()
+            logger.info(
+                "initial dashboard snapshot duration_ms=%.1f",
+                (time.perf_counter() - started) * 1000,
+            )
+
+    threading.Thread(
+        target=initial_snapshot, daemon=True, name="dashboard-initial-snapshot",
+    ).start()
     # Remote polling, inventory and full analytics must not block the HTTP
     # listener. Both workers run immediately after startup and keep their own
     # cadence; the UI can meanwhile render the last persisted snapshot.
@@ -3294,18 +3596,26 @@ async def lifespan(_: FastAPI):
         daemon=True,
         name="backtest-equity-preload",
     )
-    sync_thread.start()
-    thread.start()
-    snapshot_thread.start()
-    batch_thread.start()
-    equity_thread.start()
+    def start_workers() -> None:
+        # Previously these only started after the blocking startup build; keep
+        # them off the CPU until the first page's data is published.
+        _initial_snapshot_ready.wait(timeout=_INITIAL_SNAPSHOT_WAIT_SECONDS)
+        if stop.is_set():
+            return
+        sync_thread.start()
+        thread.start()
+        snapshot_thread.start()
+        batch_thread.start()
+        equity_thread.start()
+
+    starter = threading.Thread(target=start_workers, daemon=True, name="dashboard-worker-starter")
+    starter.start()
     yield
     stop.set()
-    sync_thread.join(timeout=2)
-    thread.join(timeout=2)
-    snapshot_thread.join(timeout=2)
-    batch_thread.join(timeout=2)
-    equity_thread.join(timeout=2)
+    starter.join(timeout=2)
+    for worker_thread in (sync_thread, thread, snapshot_thread, batch_thread, equity_thread):
+        if worker_thread.ident is not None:
+            worker_thread.join(timeout=2)
 
 
 app = FastAPI(title="Dashboardv1", version="1.0.0", lifespan=lifespan)
@@ -3354,6 +3664,22 @@ def get_dashboard(
         len(selected_assets or ()),
     )
     return result
+
+
+@app.get("/api/algotap")
+def get_algotap() -> dict[str, Any]:
+    """Last AlgoTAP copy from disk; never contacts the remote service."""
+    return algotap.status()
+
+
+@app.post("/api/algotap/sync")
+def sync_algotap() -> dict[str, Any]:
+    """Copy AlgoTAP KPIs now (only when the user presses the button)."""
+    try:
+        snapshot = algotap.sync()
+    except algotap.AlgoTapError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"configured": True, "snapshot": snapshot}
 
 
 @app.post("/api/dashboard/refresh")
@@ -3766,22 +4092,14 @@ def get_strategy_panel_history(
         }
 
 
-@app.get("/api/strategies/{strategy_id}/daily-pnl")
-def get_strategy_daily_pnl(strategy_id: int, month: str = Query(..., pattern=r"^\d{4}-\d{2}$")) -> dict[str, Any]:
-    """Return just one strategy month's realised P/L for the side-panel calendar.
+def _strategy_closed_pnl_points(strategy_id: int, start_msc: int, end_msc: int) -> list[tuple[int, float]]:
+    """Return (close_time_msc, net_profit) for a strategy's closed trades in the window.
 
-    This intentionally does not call ``get_strategy``: that endpoint builds the
-    whole dashboard before selecting a single strategy, which made opening the
-    calendar noticeably slow.
+    Shared by the daily and monthly side-panel calendars. It intentionally does
+    not call ``get_strategy``: that endpoint builds the whole dashboard before
+    selecting a single strategy, which made opening the calendar noticeably slow.
     """
-    try:
-        first = datetime.strptime(month, "%Y-%m").replace(tzinfo=timezone.utc)
-    except ValueError as exc:
-        raise HTTPException(422, "month must be YYYY-MM") from exc
-    following = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
-    start_msc = int(first.timestamp() * 1000)
-    end_msc = int(following.timestamp() * 1000) - 1
-    days: dict[str, float] = {}
+    points: list[tuple[int, float]] = []
     with session() as conn:
         strategy = conn.execute("SELECT * FROM strategies WHERE id=?", (strategy_id,)).fetchone()
         if not strategy or strategy["archived_at"]:
@@ -3823,11 +4141,40 @@ def get_strategy_daily_pnl(strategy_id: int, month: str = Query(..., pattern=r"^
         ] + imported_history_trades(conn, historical_mappings)
         for trade in [*current_trades, *historical_trades]:
             closed_msc = int(trade["close_time_msc"])
-            if not start_msc <= closed_msc <= end_msc:
-                continue
-            key = datetime.fromtimestamp(closed_msc / 1000, tz=timezone.utc).date().isoformat()
-            days[key] = days.get(key, 0.0) + float(trade.get("net_profit") or 0)
+            if start_msc <= closed_msc <= end_msc:
+                points.append((closed_msc, float(trade.get("net_profit") or 0)))
+    return points
+
+
+@app.get("/api/strategies/{strategy_id}/daily-pnl")
+def get_strategy_daily_pnl(strategy_id: int, month: str = Query(..., pattern=r"^\d{4}-\d{2}$")) -> dict[str, Any]:
+    """Return just one strategy month's realised P/L for the side-panel calendar."""
+    try:
+        first = datetime.strptime(month, "%Y-%m").replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise HTTPException(422, "month must be YYYY-MM") from exc
+    following = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
+    start_msc = int(first.timestamp() * 1000)
+    end_msc = int(following.timestamp() * 1000) - 1
+    days: dict[str, float] = {}
+    for closed_msc, profit in _strategy_closed_pnl_points(strategy_id, start_msc, end_msc):
+        key = datetime.fromtimestamp(closed_msc / 1000, tz=timezone.utc).date().isoformat()
+        days[key] = days.get(key, 0.0) + profit
     return {"strategy_id": strategy_id, "month": month, "days": days, "net_profit": sum(days.values())}
+
+
+@app.get("/api/strategies/{strategy_id}/monthly-pnl")
+def get_strategy_monthly_pnl(strategy_id: int, year: int = Query(..., ge=2000, le=2100)) -> dict[str, Any]:
+    """Return one strategy's realised P/L per UTC calendar month of ``year``."""
+    start_msc = int(datetime(year, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
+    end_msc = int(datetime(year + 1, 1, 1, tzinfo=timezone.utc).timestamp() * 1000) - 1
+    months: dict[str, float] = {}
+    trades: dict[str, int] = {}
+    for closed_msc, profit in _strategy_closed_pnl_points(strategy_id, start_msc, end_msc):
+        key = datetime.fromtimestamp(closed_msc / 1000, tz=timezone.utc).strftime("%Y-%m")
+        months[key] = months.get(key, 0.0) + profit
+        trades[key] = trades.get(key, 0) + 1
+    return {"strategy_id": strategy_id, "year": year, "months": months, "trades": trades, "net_profit": sum(months.values())}
 
 
 @app.put("/api/strategies/{strategy_id}/note")
@@ -4053,6 +4400,46 @@ def put_strategy_no_mm_acceptance(
         "strategy_id": strategy_id,
         "no_mm_accepted": payload.accepted,
         "no_mm_accepted_at": accepted_at,
+    }
+
+
+class StrategyCloneUpdate(BaseModel):
+    # "auto" removes the override; "manual" pins clone_strategy_id (None = no clone).
+    mode: Literal["auto", "manual"] = "manual"
+    clone_strategy_id: int | None = None
+
+
+@app.put("/api/strategies/{strategy_id}/clone")
+def put_strategy_clone(strategy_id: int, payload: StrategyCloneUpdate) -> dict[str, Any]:
+    with session() as conn:
+        ids = [strategy_id] + ([payload.clone_strategy_id] if payload.mode == "manual" and payload.clone_strategy_id is not None else [])
+        found = {
+            int(row["id"])
+            for row in conn.execute(
+                f"SELECT id FROM strategies WHERE id IN ({','.join('?' * len(ids))})", ids
+            )
+        }
+        if strategy_id not in found:
+            raise HTTPException(404, "Strategy not found")
+        if payload.mode == "manual" and payload.clone_strategy_id is not None:
+            if payload.clone_strategy_id not in found or payload.clone_strategy_id == strategy_id:
+                raise HTTPException(422, "Clone strategy not found")
+        pairs = _clone_pairs(conn)
+        if payload.mode == "auto":
+            pairs.pop(strategy_id, None)
+        else:
+            pairs[strategy_id] = payload.clone_strategy_id
+        conn.execute(
+            """INSERT INTO settings(key,value_json,updated_at) VALUES(?,?,?)
+               ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at""",
+            ("clone_pairs", json.dumps({str(key): value for key, value in sorted(pairs.items())}), utcnow()),
+        )
+    _invalidate_dashboard_lookups_cache()
+    _invalidate_api_snapshot()
+    return {
+        "strategy_id": strategy_id,
+        "mode": payload.mode,
+        "clone_strategy_id": payload.clone_strategy_id if payload.mode == "manual" else None,
     }
 
 

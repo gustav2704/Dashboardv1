@@ -501,6 +501,20 @@ def test_monthly_net_profit_includes_current_and_five_preceding_calendar_months(
     assert [value["net_profit"] for value in values] == [100, -25, 10, -50, 999, 0]
 
 
+def test_week_net_profit_counts_monday_to_monday_in_broker_time() -> None:
+    broker_tz = timezone(timedelta(hours=2))
+    # Sunday 2026-11-15 broker time: the week in progress started Monday 2026-11-09 00:00.
+    week_start = main._current_week_start_msc(datetime(2026, 11, 15, 18, 30, tzinfo=broker_tz))
+    as_msc = lambda value: int(value.replace(tzinfo=broker_tz).timestamp() * 1000)
+    assert week_start == as_msc(datetime(2026, 11, 9))
+    assert main._week_net_profit([
+        {"close_time_msc": as_msc(datetime(2026, 11, 8, 23, 59, 59)), "net_profit": 999},
+        {"close_time_msc": as_msc(datetime(2026, 11, 9)), "net_profit": 40},
+        {"close_time_msc": as_msc(datetime(2026, 11, 13, 21)), "net_profit": -15.5},
+        {"close_time_msc": as_msc(datetime(2026, 11, 16)), "net_profit": 500},
+    ], week_start) == 24.5
+
+
 def test_latest_baselines_includes_completed_backtests_from_identity_members(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "identity-baselines.db")
     monkeypatch.setattr(main, "ACTIVE_BACKTEST_BROKER", "Darwinex")
@@ -1820,3 +1834,59 @@ def test_journal_balance_series_uses_active_sources_and_complete_boundaries(tmp_
     assert coverage["end"]["total_balance"] == 3040
     assert all(point["complete"] for point in daily)
     assert all(point["total_balance"] < 100000 for point in daily)
+
+
+def test_startup_snapshot_publishes_main_view_before_account_scopes(monkeypatch) -> None:
+    monkeypatch.setattr(main, "_api_snapshot_revision", 0)
+    monkeypatch.setattr(main, "_api_snapshot_generated_at", "")
+    monkeypatch.setattr(main, "_api_snapshot_generated_mono", 0.0)
+    main._api_response_cache.clear()
+    main._api_response_inflight.clear()
+    order = []
+
+    def journal(*_args, selected_accounts=None, **_kwargs):
+        order.append(("journal", selected_accounts))
+        return {"trades": []}
+
+    def dashboard(*_args, selected_accounts=None, **_kwargs):
+        order.append(("dashboard", selected_accounts))
+        return {"broker_accounts": ["A"], "strategies": []}
+
+    monkeypatch.setattr(main, "journal_analysis_data", journal)
+    monkeypatch.setattr(main, "dashboard_data", dashboard)
+
+    main._refresh_dashboard_snapshot(
+        sync_alerts=False, defer_scopes=True,
+        on_published=lambda: order.append(("published", None)),
+    )
+
+    assert order.index(("published", None)) == 2
+    assert order[3:] == [("journal", {"A"}), ("dashboard", {"A"})]
+    scoped_key = main._api_scope_key("dashboard", "all", None, None, {"A"}, False, None) + (True,)
+    assert scoped_key in main._api_response_cache
+    main._api_response_cache.clear()
+
+
+def test_cold_request_waits_for_startup_snapshot_instead_of_rebuilding(monkeypatch) -> None:
+    monkeypatch.setattr(main, "_api_snapshot_revision", 3)
+    monkeypatch.setattr(main, "_api_snapshot_generated_at", "2026-01-01T00:00:00Z")
+    monkeypatch.setattr(main, "_api_snapshot_generated_mono", time.monotonic())
+    main._api_response_cache.clear()
+    main._api_response_inflight.clear()
+    key = ("dashboard", "startup-cold")
+    main._initial_snapshot_ready.clear()
+    try:
+        def publish():
+            time.sleep(0.05)
+            with main._api_snapshot_lock:
+                main._store_api_cache_entry(key, {"from": "startup"}, 3, "t", time.monotonic())
+            main._initial_snapshot_ready.set()
+
+        threading.Thread(target=publish).start()
+        result = main._cached_api_payload(
+            key, lambda: (_ for _ in ()).throw(AssertionError("duplicate build")),
+        )
+    finally:
+        main._initial_snapshot_ready.set()
+    assert result["from"] == "startup"
+    main._api_response_cache.clear()

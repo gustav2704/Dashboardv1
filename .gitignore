@@ -15,3 +15,7 @@ backend/tmp_pairs_test/
 __pycache__/
 .pytest_cache/
 ssh_access/
+
+# AlgoTAP credentials and cached copy
+data/algotap.env
+data/algotap_snapshot.json

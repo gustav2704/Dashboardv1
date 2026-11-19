@@ -24,3 +24,15 @@ describe('manual strategy status', () => {
     expect(withStrategyStatuses(optimistic, 2, ['monitor', 'axi_live'])[1].strategy_statuses).toEqual(['monitor', 'axi_live'])
   })
 })
+
+describe('candidate_live_only filter', () => {
+  it('keeps only strategies whose single mark is candidata live', () => {
+    const strategies = [
+      { id: 1, strategy_statuses: ['candidate_live'] as const },
+      { id: 2, strategy_statuses: ['candidate_live', 'favorite'] as const },
+      { id: 3, strategy_statuses: ['live'] as const },
+      { id: 4, strategy_statuses: [] as const },
+    ]
+    expect(strategies.filter(strategy => matchesStrategyStatus(strategy, 'candidate_live_only')).map(item => item.id)).toEqual([1])
+  })
+})
