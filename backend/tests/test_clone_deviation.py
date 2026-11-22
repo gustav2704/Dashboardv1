@@ -3,6 +3,7 @@ from app import main
 from app.clone_deviation import (
     clone_profile,
     compute_clone_deviation,
+    find_size_anomalies,
     pick_clone,
     size_scale,
     version_token,
@@ -14,8 +15,9 @@ DARWINEX_DEMO = "3000097316"
 AXI_DEMO = "10025867"
 
 
-def _trade(net, volume, open_price, close_price, open_msc, account="L", profit=None):
+def _trade(net, volume, open_price, close_price, open_msc, account="L", profit=None, direction="Short"):
     return {
+        "direction": direction,
         "net_profit": net,
         "profit": net if profit is None else profit,
         "volume": volume,
@@ -103,6 +105,96 @@ def test_compute_clone_deviation_scales_clone_and_uses_live_window():
 
     worse = compute_clone_deviation("L", [live[0], _trade(30, 0.1, 100, 120, 3_000, profit=50)], [], clone, [], 1000)
     assert worse["deviation_pp"] == -2.0
+
+
+MIN = 60_000
+
+
+def test_lot_change_is_scaled_per_trade_not_with_one_global_ratio():
+    # Like 608 vs 592: live 0.01 lots while the clone trades 0.10 (ratio 0.10),
+    # then live 0.02 while the clone jumps to 0.60 (ratio 0.033).  Execution is
+    # identical, so the deviation must be 0 — a single median ratio of 0.10
+    # would have charged the live with 10% of the clone's big 0.60-lot win.
+    live = [
+        _trade(-10, 0.01, 100, 110, 0 * MIN, profit=-10),
+        _trade(10, 0.01, 100, 90, 60 * MIN, profit=10),
+        _trade(-10, 0.01, 100, 110, 120 * MIN, profit=-10),
+        _trade(40, 0.02, 100, 80, 180 * MIN, profit=40),
+    ]
+    clone = [
+        _trade(-100, 0.10, 100, 110, 0 * MIN + 5_000, account="C", profit=-100),
+        _trade(100, 0.10, 100, 90, 60 * MIN + 3_000, account="C", profit=100),
+        _trade(-100, 0.10, 100, 110, 120 * MIN + 2_000, account="C", profit=-100),
+        _trade(1200, 0.60, 100, 80, 180 * MIN + 1_000, account="C", profit=1200),
+    ]
+    result = compute_clone_deviation("L", live, [], clone, [], 1000)
+
+    assert result["matched_trades"] == 4
+    assert round(result["deviation_usd"], 6) == 0
+    assert round(result["deviation_pp"], 6) == 0
+    assert round(result["scale_min"], 4) == round(1 / 30, 4)
+    assert round(result["scale_max"], 6) == 0.1
+
+
+def test_deviation_splits_into_execution_live_only_and_clone_only():
+    live = [
+        _trade(-12, 0.1, 100, 110, 0, profit=-10),  # same trade, 2 USD worse costs
+        _trade(5, 0.1, 100, 95, 60 * MIN, profit=5),  # clone did not open it
+    ]
+    clone = [
+        _trade(-40, 0.4, 100, 110, 1_000, account="C", profit=-40),
+        _trade(80, 0.4, 100, 80, 120 * MIN, account="C", profit=80),  # live missed it
+        _trade(999, 0.4, 100, 110, 3_000, account="C", profit=999, direction="Long"),  # other direction
+    ]
+    result = compute_clone_deviation("L", live, [], clone, [], 1000)
+
+    assert result["matched_trades"] == 1
+    assert round(result["execution_usd"], 6) == -2  # -12 - (-40 * 0.25)
+    assert result["live_only_trades"] == 1
+    assert result["live_only_usd"] == 5
+    assert result["clone_only_trades"] == 2
+    # Each missed clone trade is scaled by the nearest live trade's size over
+    # its own: 80 (4 USD/pt vs live 1 USD/pt) and 999 (99.9 USD/pt vs 1).
+    clone_only = 80 * (1 / 4) + 999 * (1 / 99.9)
+    assert round(result["clone_only_usd"], 6) == round(clone_only, 6)
+    assert round(result["deviation_usd"], 6) == round(-2 + 5 - clone_only, 6)
+    assert round(result["deviation_pp"], 6) == round(result["deviation_usd"] / 10, 6)
+
+
+def test_clone_only_trade_uses_its_own_size():
+    # The clone doubled its lot on the trade the live missed: the live would
+    # have earned 1/20 of it (live 1 USD/pt vs clone 20 USD/pt), not 1/10.
+    live = [_trade(10, 0.01, 100, 90, 0, profit=10)]
+    clone = [
+        _trade(100, 0.10, 100, 90, 1_000, account="C", profit=100),
+        _trade(400, 0.20, 100, 80, 600 * MIN, account="C", profit=400),
+    ]
+    result = compute_clone_deviation("L", live, [], clone, [], 1000)
+    assert result["clone_only_trades"] == 1
+    assert round(result["clone_only_usd"], 6) == 20
+
+
+def test_size_spike_is_reported_but_not_added_to_deviation():
+    # Like 685: one live trade opened with 10x the usual lot.
+    live = [
+        _trade(-100, 0.10, 100, 110, MIN, profit=-100),
+        _trade(10, 0.01, 100, 90, 60 * MIN, profit=10),
+        _trade(-10, 0.01, 100, 110, 120 * MIN, profit=-10),
+    ]
+    clone = [
+        _trade(-150, 0.15, 100, 110, MIN, account="C", profit=-150),
+        _trade(150, 0.15, 100, 90, 60 * MIN, account="C", profit=150),
+        _trade(-150, 0.15, 100, 110, 120 * MIN, account="C", profit=-150),
+    ]
+    result = compute_clone_deviation("L", live, [], clone, [], 1000)
+    assert round(result["deviation_usd"], 6) == 0
+    assert result["size_anomaly_msc"] == [MIN]
+
+
+def test_sustained_lot_change_is_not_an_anomaly():
+    # 608: ratio 0.10 for a while, then 0.033 for good.
+    ratios = [(i * MIN, 0.1) for i in range(4)] + [((10 + i) * MIN, 1 / 30) for i in range(3)]
+    assert find_size_anomalies(ratios) == []
 
 
 def test_compute_clone_deviation_without_clone_trades_is_not_comparable():

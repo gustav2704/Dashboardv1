@@ -1838,12 +1838,22 @@ def _attach_clone_deviations(
             ],
             "window_start_msc": None,
             "scale": None,
+            "scale_min": None,
+            "scale_max": None,
             "live_pl": None,
             "clone_pl": None,
             "clone_pl_scaled": None,
             "live_trades": 0,
             "clone_trades": 0,
+            "matched_trades": 0,
+            "execution_usd": None,
+            "live_only_trades": 0,
+            "live_only_usd": None,
+            "clone_only_trades": 0,
+            "clone_only_usd": None,
+            "deviation_usd": None,
             "deviation_pp": None,
+            "size_anomaly_msc": [],
         }
         if clone:
             live_view = live_trade_view(strategies_by_id[live_id])

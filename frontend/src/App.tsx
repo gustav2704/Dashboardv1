@@ -154,13 +154,29 @@ function cloneDeviationTitle(deviation: CloneDeviation | null | undefined) {
   const lines = [
     `Clon: ${deviation.clone_name || '—'} · cuenta ${deviation.clone_account || '—'} · #${deviation.clone_strategy_id} (${deviation.source === 'manual' ? 'manual' : 'auto'})`,
     `Desde: ${deviation.window_start_msc ? new Date(deviation.window_start_msc).toLocaleDateString() : '—'}`,
-    `Trades live / clon: ${deviation.live_trades} / ${deviation.clone_trades}`,
-    `P/L live: ${signedMoney(deviation.live_pl ?? 0)}`,
-    `P/L clon: ${signedMoney(deviation.clone_pl ?? 0)} × ${deviation.scale == null ? '—' : deviation.scale.toFixed(2)} = ${deviation.clone_pl_scaled == null ? '—' : signedMoney(deviation.clone_pl_scaled)}`,
-    'Dev = (P/L live − P/L clon escalado) / balance live, en puntos %',
+    `Trades live / clon: ${deviation.live_trades} / ${deviation.clone_trades} (${deviation.matched_trades} comunes)`,
+    `Tamaño live/clon: ${cloneScaleLabel(deviation)}`,
   ]
-  if (deviation.deviation_pp == null) lines.push(deviation.clone_trades === 0 ? 'Sin trades del clon en ese periodo' : 'Sin datos suficientes')
+  if (deviation.deviation_pp == null) {
+    lines.push(deviation.clone_trades === 0 ? 'Sin trades del clon en ese periodo' : 'Sin datos suficientes')
+    return lines.join('\n')
+  }
+  lines.push(
+    '',
+    `Ejecución (${deviation.matched_trades} comunes): ${signedMoney(deviation.execution_usd ?? 0)}`,
+    `Solo live (${deviation.live_only_trades}): ${signedMoney(deviation.live_only_usd ?? 0)}`,
+    `Solo clon (${deviation.clone_only_trades}, no copiados): ${signedMoney(-(deviation.clone_only_usd ?? 0))}`,
+    `Total: ${signedMoney(deviation.deviation_usd ?? 0)} = ${cloneDeviationLabel(deviation)} del balance live`,
+  )
+  if (deviation.size_anomaly_msc.length) {
+    lines.push('', `⚠ Lote anómalo en ${deviation.size_anomaly_msc.length} trade(s): ${deviation.size_anomaly_msc.map(ms => new Date(ms).toLocaleDateString()).join(', ')} (no suma a Dev)`)
+  }
   return lines.join('\n')
+}
+function cloneScaleLabel(deviation: CloneDeviation) {
+  if (deviation.scale == null) return '—'
+  const { scale_min: min, scale_max: max } = deviation
+  return min != null && max != null && max / min > 1.05 ? `×${min.toFixed(3)} – ×${max.toFixed(3)}` : `×${deviation.scale.toFixed(3)}`
 }
 function performanceMetrics(strategy: Strategy) {
   return strategy.lifetime_metrics || strategy.metrics
@@ -1775,7 +1791,7 @@ function StrategySidePanel({ strategy, allStrategies, query, refreshVersion, onC
       <div className="drawer-stat-grid">
         <DrawerMetric label="Realized P/L" value={signedMoney(m.net_profit)} detail={`${m.trades} combined trades | Exp ${money(m.expectancy)}`} tone={m.net_profit >= 0 ? 'positive' : 'negative'} />
         <DrawerMetric label="Accumulated P/L %" value={signedPercent(active.account_pl_percent)} detail={active.account_balance == null ? 'No active-account balance snapshot' : `Combined P/L + floating / current ${money(active.account_balance)} balance`} tone={(active.account_pl_percent ?? 0) >= 0 ? 'positive' : 'negative'} />
-        {active.clone_deviation && <DrawerMetric label="Dev vs clon" value={cloneDeviationLabel(active.clone_deviation)} detail={active.clone_deviation.clone_strategy_id == null ? 'Sin clon' : `${active.clone_deviation.live_trades}/${active.clone_deviation.clone_trades} trades · clon ${active.clone_deviation.clone_account} #${active.clone_deviation.clone_strategy_id} · ×${active.clone_deviation.scale == null ? '—' : active.clone_deviation.scale.toFixed(2)}`} tone={(active.clone_deviation.deviation_pp ?? 0) >= 0 ? 'positive' : 'negative'} />}
+        {active.clone_deviation && <DrawerMetric label="Dev vs clon" value={cloneDeviationLabel(active.clone_deviation)} detail={active.clone_deviation.clone_strategy_id == null ? 'Sin clon' : active.clone_deviation.deviation_pp == null ? `clon ${active.clone_deviation.clone_account} #${active.clone_deviation.clone_strategy_id} · sin datos suficientes` : `Ejec. ${signedMoney(active.clone_deviation.execution_usd ?? 0)} · solo live ${signedMoney(active.clone_deviation.live_only_usd ?? 0)} · solo clon ${signedMoney(-(active.clone_deviation.clone_only_usd ?? 0))} · clon #${active.clone_deviation.clone_strategy_id}${active.clone_deviation.size_anomaly_msc.length ? ` · ⚠ lote anómalo ×${active.clone_deviation.size_anomaly_msc.length}` : ''}`} tone={(active.clone_deviation.deviation_pp ?? 0) >= 0 ? 'positive' : 'negative'} />}
         <DrawerMetric label="Health" value={healthLabel(active.health.status)} detail={active.health.reasons.join(', ') || 'No active alerts'} tone={`status-${active.health.status}`} dotStatus={active.health.status} />
         <DrawerMetric label="Today" value={signedMoney(m.today_profit)} detail={`${m.today_trades} trades today`} tone={m.today_profit >= 0 ? 'positive' : 'negative'} />
         <DrawerMetric label="Win %" value={`${(m.win_rate * 100).toFixed(1)}%`} detail={`${m.winning_trades}/${m.trades} won`} tone={m.win_rate >= .5 ? 'positive' : 'negative'} />

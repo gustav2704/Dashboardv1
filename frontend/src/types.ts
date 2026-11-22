@@ -368,10 +368,23 @@ export type CloneDeviation = {
   candidates: Array<{ id: number; account: string; name: string }>;
   window_start_msc: number | null;
   scale: number | null;
+  scale_min: number | null;
+  scale_max: number | null;
   live_pl: number | null;
   clone_pl: number | null;
   clone_pl_scaled: number | null;
   live_trades: number;
   clone_trades: number;
+  matched_trades: number;
+  /** Live minus scaled clone on the trades both opened (slippage, spread, exits). */
+  execution_usd: number | null;
+  live_only_trades: number;
+  live_only_usd: number | null;
+  clone_only_trades: number;
+  /** Scaled P/L of clone trades the live missed; subtracted from Dev. */
+  clone_only_usd: number | null;
+  deviation_usd: number | null;
   deviation_pp: number | null;
+  /** Open times of paired trades with a one-off size spike (not in Dev). */
+  size_anomaly_msc: number[];
 };
