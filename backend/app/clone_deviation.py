@@ -190,6 +190,61 @@ def size_scale(
     return live_volume / clone_volume if live_volume and clone_volume else None
 
 
+# Maximum gap between the live and the clone opening the same trade.  Copies
+# and clones on other brokers open within seconds; a few minutes covers
+# server-clock differences without pairing consecutive M5 signals.
+MATCH_TOLERANCE_MSC = 5 * 60 * 1000
+
+
+def _item(raw: dict[str, Any], is_position: bool) -> dict[str, Any]:
+    """Normalise a closed trade or an open position for the comparison."""
+    return {
+        "open_msc": int(raw.get("time_msc") or 0) if is_position else _open_msc(raw),
+        "direction": str(raw.get("direction") or "").strip().casefold(),
+        "net": float(raw.get("profit") or 0) if is_position else float(raw.get("net_profit") or 0),
+        "exposure": _exposure(raw),
+        "volume": abs(float(raw.get("volume") or 0)),
+    }
+
+
+def _pair_ratio(live: dict[str, Any], clone: dict[str, Any]) -> float | None:
+    if live["exposure"] and clone["exposure"]:
+        return live["exposure"] / clone["exposure"]
+    if live["volume"] and clone["volume"]:
+        return live["volume"] / clone["volume"]
+    return None
+
+
+def match_trades(
+    live_items: list[dict[str, Any]], clone_items: list[dict[str, Any]]
+) -> tuple[list[tuple[dict[str, Any], dict[str, Any]]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Pair the same trade on both sides: same direction, closest open time.
+
+    Pairs are formed greedily from the smallest time gap, so two consecutive
+    signals cannot steal each other's partner.
+    """
+    gaps = sorted(
+        (abs(live["open_msc"] - clone["open_msc"]), live_index, clone_index)
+        for live_index, live in enumerate(live_items)
+        for clone_index, clone in enumerate(clone_items)
+        if live["direction"] == clone["direction"]
+        and abs(live["open_msc"] - clone["open_msc"]) <= MATCH_TOLERANCE_MSC
+    )
+    used_live: set[int] = set()
+    used_clone: set[int] = set()
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for _, live_index, clone_index in gaps:
+        if live_index in used_live or clone_index in used_clone:
+            continue
+        used_live.add(live_index)
+        used_clone.add(clone_index)
+        pairs.append((live_items[live_index], clone_items[clone_index]))
+    pairs.sort(key=lambda pair: pair[0]["open_msc"])
+    live_only = [item for index, item in enumerate(live_items) if index not in used_live]
+    clone_only = [item for index, item in enumerate(clone_items) if index not in used_clone]
+    return pairs, live_only, clone_only
+
+
 def compute_clone_deviation(
     live_account: str,
     live_trades: list[dict[str, Any]],
@@ -200,8 +255,17 @@ def compute_clone_deviation(
 ) -> dict[str, Any]:
     """Compare the live bot with its clone since the live bot's first trade.
 
-    Returns the comparison figures; ``deviation_pp`` is None when there is not
-    enough data (no live trades, no clone trades, or no live balance).
+    Trades are compared one by one, so a lot-size change on either side only
+    affects its own trades:
+
+    * execution: for each trade both opened, live P/L minus the clone's P/L
+      scaled by that pair's own size ratio (slippage, spread, exits);
+    * live only: P/L of trades the clone did not open;
+    * clone only: P/L of trades the live missed, scaled by the size ratio of
+      the nearest paired trade in time (negative contribution).
+
+    ``deviation_pp`` is the sum of the three, in percentage points of the live
+    balance; None without clone trades in the window or without a balance.
     """
     account_trades = _live_account_trades(live_account, live_trades)
     window_start = live_window_start(live_account, live_trades, live_positions)
@@ -213,33 +277,111 @@ def compute_clone_deviation(
         position for position in clone_positions
         if window_start is not None and int(position.get("time_msc") or window_start) >= window_start
     ]
-    live_pl = sum(float(trade.get("net_profit") or 0) for trade in account_trades) + sum(
-        float(position.get("profit") or 0) for position in live_positions
-    )
-    clone_pl = sum(float(trade.get("net_profit") or 0) for trade in window_clone) + sum(
-        float(position.get("profit") or 0) for position in window_clone_positions
-    )
-    scale = size_scale(
+    live_items = [_item(trade, False) for trade in account_trades] + [_item(p, True) for p in live_positions]
+    clone_items = [_item(trade, False) for trade in window_clone] + [_item(p, True) for p in window_clone_positions]
+    live_pl = sum(item["net"] for item in live_items)
+    clone_pl = sum(item["net"] for item in clone_items)
+
+    pairs, live_only, clone_only = match_trades(live_items, clone_items)
+    # Fallback size ratio when a pair (or an unpaired clone trade) has no
+    # usable price move: the medians over the whole window.
+    fallback = size_scale(
         account_trades + live_positions,
         window_clone + window_clone_positions,
         clone_trades,
     )
-    clone_pl_scaled = clone_pl * scale if scale is not None else None
+    paired_ratios: list[tuple[int, float]] = []
+    execution_usd = 0.0
+    clone_scaled_total = 0.0
+    scaling_complete = True
+    for live, clone in pairs:
+        ratio = _pair_ratio(live, clone) or fallback
+        if ratio is None:
+            scaling_complete = False
+            continue
+        paired_ratios.append((live["open_msc"], ratio))
+        expected = clone["net"] * ratio
+        execution_usd += live["net"] - expected
+        clone_scaled_total += expected
+
+    live_sized = [item for item in live_items if item["exposure"]]
+
+    def clone_only_ratio(clone: dict[str, Any]) -> float | None:
+        # The live's size at that moment over this clone trade's own size, so a
+        # lot change on that very clone trade is honoured too.
+        if live_sized and clone["exposure"]:
+            nearest_live = min(live_sized, key=lambda item: abs(item["open_msc"] - clone["open_msc"]))
+            return nearest_live["exposure"] / clone["exposure"]
+        if paired_ratios:
+            return min(paired_ratios, key=lambda item: abs(item[0] - clone["open_msc"]))[1]
+        return fallback
+
+    clone_only_scaled = 0.0
+    for clone in clone_only:
+        ratio = clone_only_ratio(clone)
+        if ratio is None:
+            scaling_complete = False
+            continue
+        clone_only_scaled += clone["net"] * ratio
+    clone_scaled_total += clone_only_scaled
+    live_only_usd = sum(item["net"] for item in live_only)
+
     # A clone without any trade in the window is more likely stopped than
     # comparable; show no deviation rather than the live P/L itself.
-    comparable = bool(window_clone or window_clone_positions)
+    comparable = bool(clone_items) and scaling_complete
+    deviation_usd = execution_usd + live_only_usd - clone_only_scaled if comparable else None
     deviation_pp = (
-        (live_pl - clone_pl_scaled) / float(live_balance) * 100
-        if comparable and clone_pl_scaled is not None and live_balance not in (None, 0)
+        deviation_usd / float(live_balance) * 100
+        if deviation_usd is not None and live_balance not in (None, 0)
         else None
     )
+    ratios = [ratio for _, ratio in paired_ratios]
+    size_anomalies = find_size_anomalies(paired_ratios)
     return {
         "window_start_msc": window_start,
-        "scale": scale,
+        "scale": median(ratios) if ratios else fallback,
+        "scale_min": min(ratios) if ratios else None,
+        "scale_max": max(ratios) if ratios else None,
         "live_pl": live_pl,
         "clone_pl": clone_pl,
-        "clone_pl_scaled": clone_pl_scaled,
+        "clone_pl_scaled": clone_scaled_total if comparable else None,
         "live_trades": len(account_trades),
         "clone_trades": len(window_clone),
+        "matched_trades": len(pairs),
+        "execution_usd": execution_usd if comparable else None,
+        "live_only_trades": len(live_only),
+        "live_only_usd": live_only_usd,
+        "clone_only_trades": len(clone_only),
+        "clone_only_usd": clone_only_scaled if comparable else None,
+        "deviation_usd": deviation_usd,
         "deviation_pp": deviation_pp,
+        # Informative only: a mis-sized live trade is scaled like any other
+        # pair, so it does not add deviation; it is reported here instead.
+        "size_anomaly_msc": size_anomalies,
     }
+
+
+# 3x, not 2x: at the broker's minimum lot, rounding alone flips 0.01/0.02 and
+# makes the ratio jump exactly 2x between ordinary trades (bot 522).
+SIZE_ANOMALY_FACTOR = 3.0
+
+
+def find_size_anomalies(paired_ratios: list[tuple[int, float]]) -> list[int]:
+    """Open times of pairs whose size ratio is a one-off spike.
+
+    A pair is flagged when its ratio differs more than 3x from both the pair
+    before and the pair after it (only one neighbour at the edges).  A
+    sustained change, like a live moving to a new lot for good, differs from
+    one side only and is not flagged.
+    """
+    ordered = sorted(paired_ratios)
+
+    def off(a: float, b: float) -> bool:
+        return max(a, b) / min(a, b) > SIZE_ANOMALY_FACTOR
+
+    anomalies = []
+    for index, (open_msc, ratio) in enumerate(ordered):
+        neighbours = [ordered[i][1] for i in (index - 1, index + 1) if 0 <= i < len(ordered)]
+        if neighbours and all(off(ratio, other) for other in neighbours):
+            anomalies.append(open_msc)
+    return anomalies
