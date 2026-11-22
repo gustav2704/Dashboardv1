@@ -13,16 +13,16 @@
 }
 
 .magic-number-entry-header > strong {
-  color: #e2f5ff;
+  color: var(--tt-ink);
   font: 700 15px Consolas, monospace;
 }
 
 .magic-number-entry-header > span {
   flex: 0 0 auto;
   padding: 3px 6px;
-  border: 1px solid #245f79;
-  background: #0d202b;
-  color: #7dd3fc;
+  border: 1px solid var(--tt-info);
+  background: var(--tt-surface-2);
+  color: var(--tt-info);
   font: 11px Consolas, monospace;
   text-transform: uppercase;
 }
@@ -32,23 +32,23 @@
   gap: 5px;
   min-width: 0;
   padding-top: 7px;
-  border-top: 1px solid #1b2d39;
+  border-top: 1px solid var(--tt-raised);
 }
 
 .magic-number-entry-details > small {
   display: block;
   min-width: 0;
-  color: #90a4b8;
+  color: var(--tt-text-2);
   font-size: 13px;
   line-height: 1.45;
   overflow-wrap: break-word;
 }
 
 .magic-number-entry-evidence {
-  color: #afc7d4 !important;
+  color: var(--tt-text-2) !important;
   font-variant-numeric: tabular-nums;
 }
 
 .magic-number-entry-mappings {
-  color: #839aaa !important;
+  color: var(--tt-text-2) !important;
 }

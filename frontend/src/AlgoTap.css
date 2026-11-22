@@ -1,5 +1,5 @@
 .algotap-panel { display: flex; flex-direction: column; gap: 14px; }
-.algotap-section { margin: 10px 0 0; color: #d7e7ef; font-size: 15px; }
+.algotap-section { margin: 10px 0 0; color: var(--tt-ink); font-size: 15px; }
 .algotap-table td small { display: block; color: var(--muted); font-size: 11px; }
 .algotap-table td:not(:first-child):not(:nth-child(2)) { font-family: Consolas, monospace; }
 .algotap-status .ok { color: var(--teal); }
@@ -7,13 +7,13 @@
 .algotap-status .alert { color: var(--red); }
 .algotap-magic-heading { display: flex; align-items: end; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .algotap-grade { display: inline-block; min-width: 28px; padding: 2px 6px; border: 1px solid var(--line); border-radius: 4px; text-align: center; font-weight: 700; }
-.algotap-grade.grade-a { border-color: #285f5a; background: #10332f; color: #8cf5e5; }
-.algotap-grade.grade-b { border-color: #2f5369; background: #102735; color: #8ed8f7; }
-.algotap-grade.grade-c { border-color: #6b5520; background: #2d2510; color: var(--yellow); }
-.algotap-grade.grade-d,.algotap-grade.grade-e,.algotap-grade.grade-f { border-color: #6b2535; background: #2d1018; color: var(--red); }
-.algotap-warnings { padding: 8px 12px; border: 1px solid #6b5520; background: #2d2510; color: var(--yellow); font-size: 12px; }
+.algotap-grade.grade-a { border-color: var(--tt-good-bg); background: var(--tt-raised); color: var(--tt-good); }
+.algotap-grade.grade-b { border-color: var(--tt-info-bg); background: var(--tt-raised); color: var(--tt-info); }
+.algotap-grade.grade-c { border-color: var(--tt-warn-bg); background: var(--tt-surface-2); color: var(--yellow); }
+.algotap-grade.grade-d,.algotap-grade.grade-e,.algotap-grade.grade-f { border-color: var(--tt-bad-bg); background: var(--tt-surface-2); color: var(--red); }
+.algotap-warnings { padding: 8px 12px; border: 1px solid var(--tt-warn-bg); background: var(--tt-surface-2); color: var(--yellow); font-size: 12px; }
 .algotap-setup { text-align: left; }
-.algotap-setup pre { margin: 10px 0 0; padding: 10px; background: #09161f; border: 1px solid var(--line); color: #b6c7d0; font-size: 12px; }
+.algotap-setup pre { margin: 10px 0 0; padding: 10px; background: var(--tt-surface); border: 1px solid var(--line); color: var(--tt-ink); font-size: 12px; }
 .algotap-panel .link-button { padding: 0; border: 0; background: none; color: var(--cyan); cursor: pointer; font: inherit; text-align: left; }
 .algotap-panel .link-button:hover { text-decoration: underline; }
 .algotap-panel .spin { animation: algotap-spin 1s linear infinite; }

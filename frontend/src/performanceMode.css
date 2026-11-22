@@ -4,11 +4,11 @@
   gap: 4px;
   padding: 9px 11px;
   border: 1px solid var(--line);
-  background: #09151e;
+  background: var(--tt-surface);
 }
 .performance-grouping > span {
   margin-right: 5px;
-  color: #60798a;
+  color: var(--tt-muted);
   font: 11px Consolas, monospace;
   letter-spacing: .7px;
   text-transform: uppercase;
@@ -16,27 +16,27 @@
 .performance-grouping button {
   min-width: 56px;
   padding: 6px 10px;
-  border: 1px solid #263f4e;
+  border: 1px solid var(--tt-line);
   border-radius: 4px;
-  background: #0c1b26;
-  color: #8ca1af;
+  background: var(--tt-surface-2);
+  color: var(--tt-text-2);
   cursor: pointer;
 }
-.performance-grouping button:hover { border-color: #4b7188; color: #d7e7ef; }
-.performance-grouping button.active { border-color: #2b8f81; background: #10332f; color: #c9fff6; }
+.performance-grouping button:hover { border-color: var(--tt-info); color: var(--tt-ink); }
+.performance-grouping button.active { border-color: var(--tt-good); background: var(--tt-raised); color: var(--tt-good); }
 
 .ranking-methodology {
   display: grid;
   gap: 3px;
   padding: 8px 14px;
-  border-bottom: 1px solid #14232e;
-  background: #0b1822;
-  color: #8297a5;
+  border-bottom: 1px solid var(--tt-surface-2);
+  background: var(--tt-surface);
+  color: var(--tt-muted);
   font-size: 12px;
   line-height: 1.45;
 }
 .ranking-methodology strong {
-  color: #b7cbd7;
+  color: var(--tt-ink);
   font: 11px Consolas, monospace;
   letter-spacing: .5px;
   text-transform: uppercase;

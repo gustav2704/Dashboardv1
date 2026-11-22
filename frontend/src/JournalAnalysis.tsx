@@ -28,19 +28,19 @@ import { buildAccountPerformance } from "./performanceAccountAnalytics";
 import { Assets, Charts, DurationView, Periods, Statistics, Summary, WinnersLosers } from "./AccountPerformance";
 import "./JournalAnalysis.css";
 
-const GREEN = "#2dd4bf";
-const RED = "#fb7185";
-const YELLOW = "#fbbf24";
-const GRID = "#172633";
+const GREEN = "var(--tt-good)";
+const RED = "var(--tt-bad)";
+const YELLOW = "var(--tt-warn)";
+const GRID = "var(--tt-raised)";
 const BOT_COLORS = [
-  "#38bdf8",
-  "#fbbf24",
-  "#a78bfa",
-  "#fb7185",
-  "#34d399",
-  "#f97316",
-  "#60a5fa",
-  "#e879f9",
+  "var(--tt-info)",
+  "var(--tt-warn)",
+  "var(--tt-violet)",
+  "var(--tt-bad)",
+  "var(--tt-good)",
+  "var(--tt-warn)",
+  "var(--tt-info)",
+  "var(--tt-violet)",
 ];
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MONTHS = [
@@ -450,7 +450,7 @@ function StrategyNameTick({ x = 0, y = 0, payload, rows }: { x?: number; y?: num
   const row = payload?.index == null ? null : rows[payload.index];
   const label = String(payload?.value || "");
   const iconOffset = Math.min(158, label.length * 5) + 16;
-  return <g transform={`translate(${x},${y})`}><title>{row ? strategyIdentifier(row) : payload?.value}</title>{row && <g transform={`translate(${-iconOffset},-7)`}><PositiveStrategyStatusIcon status={row.strategyStatus} size={12}/></g>}<text dy={4} textAnchor="end" fill="#a8bdca" fontSize={9}>{label}</text></g>;
+  return <g transform={`translate(${x},${y})`}><title>{row ? strategyIdentifier(row) : payload?.value}</title>{row && <g transform={`translate(${-iconOffset},-7)`}><PositiveStrategyStatusIcon status={row.strategyStatus} size={12}/></g>}<text dy={4} textAnchor="end" fill="var(--tt-text-2)" fontSize={9}>{label}</text></g>;
 }
 
 function RankingTooltip({ active, payload, suffix = "" }: { active?: boolean; payload?: Array<{ name?: string; value?: number; payload?: BotRanking }>; suffix?: string }) {
@@ -714,7 +714,7 @@ export function TopTenCharts({
                 margin={{ left: 25, right: 22 }}
               >
                 <CartesianGrid stroke={GRID} horizontal={false} />
-                <XAxis type="number" tick={{ fill: "#74899a", fontSize: 9 }} />
+                <XAxis type="number" tick={{ fill: "var(--tt-muted)", fontSize: 9 }} />
                 <YAxis
                   type="category"
                   dataKey="name"
@@ -753,7 +753,7 @@ export function TopTenCharts({
           <ResponsiveContainer>
             <BarChart data={rankingRows.removal} layout="vertical" margin={{ left: 25, right: 22 }}>
               <CartesianGrid stroke={GRID} horizontal={false} />
-              <XAxis type="number" tick={{ fill: "#74899a", fontSize: 9 }} />
+              <XAxis type="number" tick={{ fill: "var(--tt-muted)", fontSize: 9 }} />
               <YAxis type="category" dataKey="name" width={170} tick={<StrategyNameTick rows={rankingRows.removal} />} />
               <Tooltip content={<RankingTooltip />} />
               <Bar dataKey="net" name="P/L neto" radius={[0, 3, 3, 0]}>
@@ -1107,7 +1107,7 @@ function TemporalChart({
               <CartesianGrid stroke={GRID} vertical={false} />
               <YAxis
                 domain={domain}
-                tick={{ fill: "#718895", fontSize: 9 }}
+                tick={{ fill: "var(--tt-muted)", fontSize: 9 }}
                 tickFormatter={(value) => formatAxisTick(value, metric)}
                 width={42}
                 tickCount={5}
@@ -1118,9 +1118,9 @@ function TemporalChart({
                 axisLine={false}
                 tickLine={false}
               />
-              <ReferenceLine y={0} stroke="#587081" />
+              <ReferenceLine y={0} stroke="var(--tt-muted)" />
               <Tooltip
-                cursor={{ fill: "#15303a", opacity: 0.35 }}
+                cursor={{ fill: "var(--tt-raised)", opacity: 0.35 }}
                 content={<TemporalChartTooltip metric={metric} />}
               />
               <Bar
@@ -1723,23 +1723,23 @@ export default function JournalAnalysis({
                 type="number"
                 scale="time"
                 domain={["dataMin", "dataMax"]}
-                tick={{ fill: "#74899a", fontSize: 9 }}
+                tick={{ fill: "var(--tt-muted)", fontSize: 9 }}
                 minTickGap={30}
                 tickFormatter={(value) => new Date(Number(value)).toLocaleDateString("es-ES", { day: "2-digit", month: "short" })}
               />
-              <YAxis domain={equityYAxisDomain} tick={{ fill: "#74899a", fontSize: 9 }} tickFormatter={(value) => equityView === "percent" ? `${Number(value).toFixed(1)}%` : Number(value).toLocaleString("en-US", { maximumFractionDigits: 0 })} />
+              <YAxis domain={equityYAxisDomain} tick={{ fill: "var(--tt-muted)", fontSize: 9 }} tickFormatter={(value) => equityView === "percent" ? `${Number(value).toFixed(1)}%` : Number(value).toLocaleString("en-US", { maximumFractionDigits: 0 })} />
               <Tooltip content={<EquityChartTip view={equityView} />} />
               {equityView === "balance" ? (
                 <Area dataKey="equity" stroke={GREEN} fill="url(#equityFill)" baseValue={equityYAxisDomain[0]} />
               ) : equityView === "pnl" ? (
                 <>
-                  <ReferenceLine y={0} stroke="#8fa4b0" strokeDasharray="4 4" />
+                  <ReferenceLine y={0} stroke="var(--tt-text-2)" strokeDasharray="4 4" />
                   <Area dataKey="positivePnl" name="P/L positivo" stroke={GREEN} fill="url(#equityPositiveFill)" baseValue={0} connectNulls={false} />
                   <Area dataKey="negativePnl" name="P/L negativo" stroke={RED} fill="url(#equityNegativeFill)" baseValue={0} connectNulls={false} />
                 </>
               ) : (
                 <>
-                  <ReferenceLine y={0} stroke="#8fa4b0" strokeDasharray="4 4" />
+                  <ReferenceLine y={0} stroke="var(--tt-text-2)" strokeDasharray="4 4" />
                   <Area dataKey="positivePnlPercent" name="Rendimiento positivo" stroke={GREEN} fill="url(#equityPositiveFill)" baseValue={0} connectNulls={false} />
                   <Area dataKey="negativePnlPercent" name="Rendimiento negativo" stroke={RED} fill="url(#equityNegativeFill)" baseValue={0} connectNulls={false} />
                 </>
@@ -1760,10 +1760,10 @@ export default function JournalAnalysis({
           <ResponsiveContainer>
             <BarChart data={charts.monthly}>
               <CartesianGrid stroke={GRID} />
-              <XAxis dataKey="month" tick={{ fill: "#74899a", fontSize: 9 }} />
-              <YAxis tick={{ fill: "#74899a", fontSize: 9 }} />
+              <XAxis dataKey="month" tick={{ fill: "var(--tt-muted)", fontSize: 9 }} />
+              <YAxis tick={{ fill: "var(--tt-muted)", fontSize: 9 }} />
               <Tooltip content={<ChartTip />} />
-              <Bar dataKey="trades" fill="#38bdf8" />
+              <Bar dataKey="trades" fill="var(--tt-info)" />
             </BarChart>
           </ResponsiveContainer>
         </JournalChart>
@@ -1771,8 +1771,8 @@ export default function JournalAnalysis({
           <ResponsiveContainer>
             <LineChart data={charts.monthly}>
               <CartesianGrid stroke={GRID} />
-              <XAxis dataKey="month" tick={{ fill: "#74899a", fontSize: 9 }} />
-              <YAxis tick={{ fill: "#74899a", fontSize: 9 }} />
+              <XAxis dataKey="month" tick={{ fill: "var(--tt-muted)", fontSize: 9 }} />
+              <YAxis tick={{ fill: "var(--tt-muted)", fontSize: 9 }} />
               <Tooltip content={<ChartTip />} />
               <Line dataKey="drawdown" stroke={RED} strokeWidth={2} />
             </LineChart>
@@ -1793,9 +1793,9 @@ export default function JournalAnalysis({
               <XAxis
                 dataKey="hour"
                 interval={2}
-                tick={{ fill: "#74899a", fontSize: 9 }}
+                tick={{ fill: "var(--tt-muted)", fontSize: 9 }}
               />
-              <YAxis tick={{ fill: "#74899a", fontSize: 9 }} />
+              <YAxis tick={{ fill: "var(--tt-muted)", fontSize: 9 }} />
               <Tooltip content={<ChartTip />} />
               <Bar dataKey="profit">
                 {charts.hourly.map((item, index) => (
@@ -1809,10 +1809,10 @@ export default function JournalAnalysis({
           <ResponsiveContainer>
             <BarChart data={charts.weekday}>
               <CartesianGrid stroke={GRID} />
-              <XAxis dataKey="day" tick={{ fill: "#74899a", fontSize: 9 }} />
+              <XAxis dataKey="day" tick={{ fill: "var(--tt-muted)", fontSize: 9 }} />
               <YAxis
                 domain={[0, 100]}
-                tick={{ fill: "#74899a", fontSize: 9 }}
+                tick={{ fill: "var(--tt-muted)", fontSize: 9 }}
               />
               <Tooltip content={<ChartTip suffix="%" />} />
               <Bar dataKey="winRate" fill={GREEN} />
@@ -1850,10 +1850,10 @@ export default function JournalAnalysis({
                     <CartesianGrid stroke={GRID} />
                     <XAxis
                       dataKey="label"
-                      tick={{ fill: "#74899a", fontSize: 9 }}
+                      tick={{ fill: "var(--tt-muted)", fontSize: 9 }}
                       minTickGap={30}
                     />
-                    <YAxis tick={{ fill: "#74899a", fontSize: 9 }} />
+                    <YAxis tick={{ fill: "var(--tt-muted)", fontSize: 9 }} />
                     <Tooltip content={<ChartTip />} />
                     <Legend wrapperStyle={{ fontSize: 10 }} />
                     {charts.botEquity.series.map((series) => (

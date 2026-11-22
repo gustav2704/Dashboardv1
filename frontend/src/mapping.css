@@ -1,8 +1,8 @@
-.mapping-review{margin-top:20px;border:1px solid #1d2d3a}
+.mapping-review{margin-top:20px;border:1px solid var(--tt-raised)}
 .mapping-review-head,.mapping-review-row{display:grid;grid-template-columns:1.1fr 1.4fr .35fr auto;gap:12px;align-items:center;padding:10px 12px}
-.mapping-review-head{font:11px Consolas,monospace;color:#587284;text-transform:uppercase;letter-spacing:.7px}
-.mapping-review-row{border-top:1px solid #14232e;font-size: 13px}
+.mapping-review-head{font:11px Consolas,monospace;color:var(--tt-muted);text-transform:uppercase;letter-spacing:.7px}
+.mapping-review-row{border-top:1px solid var(--tt-surface-2);font-size: 13px}
 .mapping-review-row strong,.mapping-review-row small{display:block}
-.mapping-review-row small{color:#60798b;margin-top:4px}
+.mapping-review-row small{color:var(--tt-muted);margin-top:4px}
 .mapping-review-row select{min-width:0;width:100%}
 .rules-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:0 14px;margin:10px 0 18px}

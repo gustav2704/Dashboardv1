@@ -13,8 +13,8 @@ import './StrategyPerformance.css'
 
 const MONTHS = ['ENE', 'FEB', 'MAR', 'ABR', 'MAY', 'JUN', 'JUL', 'AGO', 'SEP', 'OCT', 'NOV', 'DIC']
 const WEEKDAYS = ['Lu', 'Ma', 'Mi', 'Ju', 'Vi', 'Sa', 'Do']
-const GREEN = '#34d399'
-const RED = '#fb7185'
+const GREEN = 'var(--tt-good)'
+const RED = 'var(--tt-bad)'
 const PAGE_SIZE = 20
 const LOW_SAMPLE = 30
 
@@ -66,19 +66,19 @@ function KpiTiles({ strategy, maxDdPct }: { strategy: Strategy; maxDdPct: number
   const pf = m.profit_factor
   return <div className="sp-kpi-grid">
     <Kpi label="Profit neto" value={signed(m.net_profit)} valueTone={tone(m.net_profit)} accent={m.net_profit >= 0 ? GREEN : RED} detail={`Hoy ${signed(m.today_profit)} · ${m.today_trades} trades`} />
-    <Kpi label="Win rate" value={`${winPct.toFixed(1)}%`} valueTone={winPct >= 50 ? 'positive' : 'negative'} accent="#38bdf8" detail={`${m.winning_trades} ganadas / ${m.losing_trades} perdidas`}>
+    <Kpi label="Win rate" value={`${winPct.toFixed(1)}%`} valueTone={winPct >= 50 ? 'positive' : 'negative'} accent="var(--tt-info)" detail={`${m.winning_trades} ganadas / ${m.losing_trades} perdidas`}>
       <div className="sp-meter"><i style={{ width: `${Math.min(100, winPct)}%` }} /></div>
     </Kpi>
-    <Kpi label="Profit factor" value={fmt(pf)} valueTone={pf == null ? '' : pf >= 1 ? 'positive' : 'negative'} accent="#a78bfa" detail={`${fmt(m.gross_profit)} / ${fmt(m.gross_loss)}`}>
+    <Kpi label="Profit factor" value={fmt(pf)} valueTone={pf == null ? '' : pf >= 1 ? 'positive' : 'negative'} accent="var(--tt-violet)" detail={`${fmt(m.gross_profit)} / ${fmt(m.gross_loss)}`}>
       <div className="sp-meter pf"><i style={{ width: `${Math.min(100, (pf ?? 0) / 3 * 100)}%` }} /><b style={{ left: `${100 / 3}%` }} /></div>
     </Kpi>
     <Kpi label="Max drawdown" value={`-${fmt(m.max_drawdown)}`} valueTone="negative" accent={RED} detail={maxDdPct == null ? 'Pico a valle' : `${maxDdPct.toFixed(1)}% sobre pico de ganancia`} />
-    <Kpi label="Expectancy" value={signed(m.expectancy)} valueTone={tone(m.expectancy)} accent="#2dd4bf" detail={`SQN ${fmt(m.sqn)} · Ret/DD ${fmt(m.return_dd)}`} />
-    <Kpi label="Avg win / Avg loss" value={`${fmt(m.avg_win)} / ${fmt(m.avg_loss)}`} accent="#fbbf24">
+    <Kpi label="Expectancy" value={signed(m.expectancy)} valueTone={tone(m.expectancy)} accent="var(--tt-good)" detail={`SQN ${fmt(m.sqn)} · Ret/DD ${fmt(m.return_dd)}`} />
+    <Kpi label="Avg win / Avg loss" value={`${fmt(m.avg_win)} / ${fmt(m.avg_loss)}`} accent="var(--tt-warn)">
       <div className="sp-split"><i className="win" style={{ width: `${winShare}%` }} /><i className="loss" style={{ width: `${100 - winShare}%` }} /></div>
     </Kpi>
-    <Kpi label="Rachas máx." value={`${strategy.lifetime_metrics.max_consecutive_wins} W · ${strategy.lifetime_metrics.max_consecutive_losses} L`} accent="#f472b6" detail={`Racha perdedora actual: ${m.current_consecutive_losses}`} />
-    <Kpi label="Trades" value={String(m.trades)} accent="#94a3b8" detail={`${m.open_positions} abiertas · flotante ${signed(m.floating_profit)}`} />
+    <Kpi label="Rachas máx." value={`${strategy.lifetime_metrics.max_consecutive_wins} W · ${strategy.lifetime_metrics.max_consecutive_losses} L`} accent="var(--tt-violet)" detail={`Racha perdedora actual: ${m.current_consecutive_losses}`} />
+    <Kpi label="Trades" value={String(m.trades)} accent="var(--tt-text-2)" detail={`${m.open_positions} abiertas · flotante ${signed(m.floating_profit)}`} />
   </div>
 }
 
@@ -108,15 +108,15 @@ function EquityChart({ detail }: { detail: StrategyDetails }) {
         <defs>
           <linearGradient id="spEquityFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={GREEN} stopOpacity=".32" /><stop offset="100%" stopColor={GREEN} stopOpacity=".02" /></linearGradient>
         </defs>
-        <CartesianGrid stroke="#1c303d" strokeDasharray="3 3" vertical={false} />
-        <XAxis dataKey="time_msc" type="number" domain={['dataMin', 'dataMax']} tickFormatter={shortDate} tick={{ fill: '#78909f', fontSize: 11 }} axisLine={false} tickLine={false} minTickGap={40} />
-        <YAxis tickFormatter={value => fmt(value, 0)} tick={{ fill: '#78909f', fontSize: 11 }} axisLine={false} tickLine={false} width={64} />
-        <ReferenceLine y={0} stroke="#475569" />
+        <CartesianGrid stroke="var(--tt-raised)" strokeDasharray="3 3" vertical={false} />
+        <XAxis dataKey="time_msc" type="number" domain={['dataMin', 'dataMax']} tickFormatter={shortDate} tick={{ fill: 'var(--tt-muted)', fontSize: 11 }} axisLine={false} tickLine={false} minTickGap={40} />
+        <YAxis tickFormatter={value => fmt(value, 0)} tick={{ fill: 'var(--tt-muted)', fontSize: 11 }} axisLine={false} tickLine={false} width={64} />
+        <ReferenceLine y={0} stroke="var(--tt-line-strong)" />
         <Tooltip content={<EquityTooltip />} />
         <Area type="linear" dataKey="equity" stroke="none" fill="url(#spEquityFill)" isAnimationActive={false} />
         <Area type="linear" dataKey="band" stroke="none" fill={RED} fillOpacity={.22} isAnimationActive={false} />
-        <Line type="linear" dataKey="peak" stroke="#94a3b8" strokeDasharray="5 4" strokeWidth={1.2} dot={false} isAnimationActive={false} />
-        <Line type="linear" dataKey="equity" stroke={GREEN} strokeWidth={2.2} dot={data.length <= 60 ? { r: 2.5, fill: '#f59e0b', stroke: 'none' } : false} isAnimationActive={false} />
+        <Line type="linear" dataKey="peak" stroke="var(--tt-text-2)" strokeDasharray="5 4" strokeWidth={1.2} dot={false} isAnimationActive={false} />
+        <Line type="linear" dataKey="equity" stroke={GREEN} strokeWidth={2.2} dot={data.length <= 60 ? { r: 2.5, fill: 'var(--tt-warn)', stroke: 'none' } : false} isAnimationActive={false} />
       </ComposedChart>
     </ResponsiveContainer></div> : <div className="analytics-empty">No hay operaciones cerradas {direction === 'total' ? '' : `${direction.toUpperCase()} `}en el período seleccionado.</div>}
     <div className="sp-legend"><span><i className="line green" />Ganancia acumulada</span><span><i className="line dashed" />Máximo histórico</span><span><i className="box red" />Zona en pérdida vs pico</span>{truncated && <span className="muted">BUY/SELL usan las últimas {detail.trades.length} operaciones.</span>}</div>
@@ -132,14 +132,14 @@ function MonthlyBars({ rows }: { rows: ReturnType<typeof monthlyProfit> }) {
     actions={rows.length > 0 && <div className="sp-year-tabs">{rows.map(item => <button key={item.year} type="button" className={item.year === year ? 'active' : ''} onClick={() => setYear(item.year)}>{item.year}</button>)}</div>}>
     {row ? <div className="sp-bars-canvas"><ResponsiveContainer width="100%" height="100%">
       <BarChart data={data} margin={{ top: 24, right: 8, left: 0, bottom: 0 }}>
-        <CartesianGrid stroke="#1c303d" strokeDasharray="3 3" vertical={false} />
-        <XAxis dataKey="label" tick={{ fill: '#78909f', fontSize: 11 }} axisLine={false} tickLine={false} />
-        <YAxis tickFormatter={value => fmt(value, 0)} tick={{ fill: '#78909f', fontSize: 11 }} axisLine={false} tickLine={false} width={56} />
-        <ReferenceLine y={0} stroke="#475569" />
+        <CartesianGrid stroke="var(--tt-raised)" strokeDasharray="3 3" vertical={false} />
+        <XAxis dataKey="label" tick={{ fill: 'var(--tt-muted)', fontSize: 11 }} axisLine={false} tickLine={false} />
+        <YAxis tickFormatter={value => fmt(value, 0)} tick={{ fill: 'var(--tt-muted)', fontSize: 11 }} axisLine={false} tickLine={false} width={56} />
+        <ReferenceLine y={0} stroke="var(--tt-line-strong)" />
         <Tooltip cursor={{ fill: '#ffffff08' }} content={({ active, payload }) => { const item = active ? payload?.[0]?.payload as typeof data[number] | undefined : undefined; return item ? <div className="analytics-tooltip"><strong>{item.label} {year}</strong><dl><dt>Profit</dt><dd className={tone(item.value)}>{signed(item.value)}</dd><dt>Operaciones</dt><dd>{item.trades}</dd></dl></div> : null }} />
         <Bar dataKey="value" radius={[4, 4, 4, 4]} maxBarSize={46} isAnimationActive={false}>
-          {data.map(item => <Cell key={item.label} fill={item.trades === 0 ? '#1a2c38' : item.value >= 0 ? GREEN : RED} />)}
-          <LabelList dataKey="value" position="top" formatter={(value: unknown) => Number(value) ? signed(Number(value)) : ''} style={{ fill: '#b6c8d2', fontSize: 11 }} />
+          {data.map(item => <Cell key={item.label} fill={item.trades === 0 ? 'var(--tt-raised)' : item.value >= 0 ? GREEN : RED} />)}
+          <LabelList dataKey="value" position="top" formatter={(value: unknown) => Number(value) ? signed(Number(value)) : ''} style={{ fill: 'var(--tt-ink)', fontSize: 11 }} />
         </Bar>
       </BarChart>
     </ResponsiveContainer></div> : <div className="analytics-empty">Sin datos mensuales.</div>}
@@ -216,10 +216,10 @@ function AdvancedStats({ strategy, detail }: { strategy: Strategy; detail: Strat
         <h4>Distribución por hora de apertura (UTC)</h4>
         {hasHours ? <div className="sp-hours-canvas"><ResponsiveContainer width="100%" height="100%">
           <BarChart data={hours} margin={{ top: 8, right: 4, left: 0, bottom: 0 }}>
-            <CartesianGrid stroke="#1c303d" strokeDasharray="3 3" vertical={false} />
-            <XAxis dataKey="label" tick={{ fill: '#78909f', fontSize: 11 }} axisLine={false} tickLine={false} interval={2} />
-            <YAxis tickFormatter={value => fmt(value, 0)} tick={{ fill: '#78909f', fontSize: 11 }} axisLine={false} tickLine={false} width={50} />
-            <ReferenceLine y={0} stroke="#475569" />
+            <CartesianGrid stroke="var(--tt-raised)" strokeDasharray="3 3" vertical={false} />
+            <XAxis dataKey="label" tick={{ fill: 'var(--tt-muted)', fontSize: 11 }} axisLine={false} tickLine={false} interval={2} />
+            <YAxis tickFormatter={value => fmt(value, 0)} tick={{ fill: 'var(--tt-muted)', fontSize: 11 }} axisLine={false} tickLine={false} width={50} />
+            <ReferenceLine y={0} stroke="var(--tt-line-strong)" />
             <Tooltip cursor={{ fill: '#ffffff08' }} content={({ active, payload }) => { const item = active ? payload?.[0]?.payload as typeof hours[number] | undefined : undefined; return item ? <div className="analytics-tooltip"><strong>{item.hour}:00 UTC</strong><dl><dt>Profit</dt><dd className={tone(item.profit)}>{signed(item.profit)}</dd><dt>Operaciones</dt><dd>{item.trades}</dd></dl></div> : null }} />
             <Bar dataKey="profit" radius={[3, 3, 3, 3]} isAnimationActive={false}>{hours.map(item => <Cell key={item.hour} fill={item.profit >= 0 ? GREEN : RED} />)}</Bar>
           </BarChart>

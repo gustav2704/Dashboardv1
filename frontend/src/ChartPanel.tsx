@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { subscribeTheme, themeColor } from './ThemeControls'
 import { createChart, CrosshairMode, type IChartApi, type ISeriesApi, type Time } from 'lightweight-charts'
 import { api } from './api'
 
@@ -66,19 +67,23 @@ export default function ChartPanel({ strategyId, accountQuery }: { strategyId: n
   }, [strategyId, timeframe, accountQuery])
   useEffect(() => {
     if (!host.current) return
-    const instance = createChart(host.current, {
-      height: 470,
-      layout: { background: { color: '#0b151f' }, textColor: '#8da1b3' },
-      grid: { vertLines: { color: '#172633' }, horzLines: { color: '#172633' } },
-      crosshair: { mode: CrosshairMode.Normal },
-      rightPriceScale: { borderColor: '#263847' },
-      timeScale: { borderColor: '#263847', timeVisible: true },
+    const palette = () => ({
+      layout: { background: { color: themeColor('--tt-surface') }, textColor: themeColor('--tt-muted') },
+      grid: { vertLines: { color: themeColor('--tt-raised') }, horzLines: { color: themeColor('--tt-raised') } },
+      rightPriceScale: { borderColor: themeColor('--tt-line') },
+      timeScale: { borderColor: themeColor('--tt-line'), timeVisible: true },
     })
-    candles.current = instance.addCandlestickSeries({ upColor: '#2dd4bf', downColor: '#fb7185', borderVisible: false, wickUpColor: '#2dd4bf', wickDownColor: '#fb7185' })
+    const candleColors = () => {
+      const up = themeColor('--tt-good'), down = themeColor('--tt-bad')
+      return { upColor: up, downColor: down, wickUpColor: up, wickDownColor: down }
+    }
+    const instance = createChart(host.current, { height: 470, crosshair: { mode: CrosshairMode.Normal }, ...palette() })
+    candles.current = instance.addCandlestickSeries({ borderVisible: false, ...candleColors() })
+    const unsubscribeTheme = subscribeTheme(() => { instance.applyOptions(palette()); candles.current?.applyOptions(candleColors()) })
     chart.current = instance
     const observer = new ResizeObserver(() => host.current && instance.applyOptions({ width: host.current.clientWidth }))
     observer.observe(host.current)
-    return () => { observer.disconnect(); instance.remove(); chart.current = null; candles.current = null; fittedSource.current = null }
+    return () => { unsubscribeTheme(); observer.disconnect(); instance.remove(); chart.current = null; candles.current = null; fittedSource.current = null }
   }, [])
 
   useEffect(() => {

@@ -1,0 +1,162 @@
+/* Timetable theme: European rail departure-board discipline.
+   Black, white and warm greys; one red for delay/loss, platform blue for information.
+   The sidebar stays a black board in both themes. Light is the default; dark is the night board.
+   Every literal color in the app maps to one of these --tt-* tokens. */
+:root {
+  --tt-font: "Hanken Grotesk", "Segoe UI", system-ui, sans-serif;
+
+  --tt-bg: #EDEDEA;
+  --tt-surface: #FFFFFF;
+  --tt-surface-2: #F6F6F3;
+  --tt-raised: #E4E4DF;
+  --tt-line: #D2D2CC;
+  --tt-line-strong: #A8A8A1;
+  --tt-muted: #66665F;
+  --tt-text-2: #3A3A36;
+  --tt-ink: #141414;
+  --tt-shadow: #000000;
+
+  --tt-good: #17803A;
+  --tt-good-bg: #E2F1E6;
+  --tt-warn: #B45309;
+  --tt-warn-bg: #FCEFD6;
+  --tt-bad: #D52B1E;
+  --tt-bad-bg: #FBE3E0;
+  --tt-info: #0B57B5;
+  --tt-info-bg: #E2ECF9;
+  --tt-violet: #6A3DBD;
+  --tt-violet-bg: #EEE7FA;
+  --tt-on-info: #FFFFFF;
+
+  --tt-rail: #141414;
+  --tt-rail-2: #222220;
+  --tt-rail-fg: #FFFFFF;
+  --tt-rail-muted: #A3A39D;
+  --tt-band: #141414;
+  --tt-band-fg: #FFFFFF;
+  --tt-band-muted: #B5B5AF;
+  --tt-highlight: #FFF3BF;
+  --tt-clock-face: #FFFFFF;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --tt-bg: #0B0B0A;
+    --tt-surface: #151514;
+    --tt-surface-2: #1B1B1A;
+    --tt-raised: #252523;
+    --tt-line: #30302D;
+    --tt-line-strong: #4C4C48;
+    --tt-muted: #9C9C95;
+    --tt-text-2: #CACAC4;
+    --tt-ink: #FAFAF7;
+    --tt-good: #46C472;
+    --tt-good-bg: #132A1C;
+    --tt-warn: #F2A43C;
+    --tt-warn-bg: #2F2310;
+    --tt-bad: #FF5D50;
+    --tt-bad-bg: #3B1613;
+    --tt-info: #6AA6F0;
+    --tt-info-bg: #12243D;
+    --tt-violet: #AF93F2;
+    --tt-violet-bg: #251C3B;
+    --tt-on-info: #0B0B0A;
+    --tt-rail: #000000;
+    --tt-rail-2: #1A1A19;
+    --tt-band: #000000;
+    --tt-band-fg: #FFFFFF;
+    --tt-band-muted: #D9D9D3;
+    --tt-highlight: #2E2A14;
+    --tt-clock-face: #F4F4F0;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --tt-bg: #0B0B0A;
+  --tt-surface: #151514;
+  --tt-surface-2: #1B1B1A;
+  --tt-raised: #252523;
+  --tt-line: #30302D;
+  --tt-line-strong: #4C4C48;
+  --tt-muted: #9C9C95;
+  --tt-text-2: #CACAC4;
+  --tt-ink: #FAFAF7;
+  --tt-good: #46C472;
+  --tt-good-bg: #132A1C;
+  --tt-warn: #F2A43C;
+  --tt-warn-bg: #2F2310;
+  --tt-bad: #FF5D50;
+  --tt-bad-bg: #3B1613;
+  --tt-info: #6AA6F0;
+  --tt-info-bg: #12243D;
+  --tt-violet: #AF93F2;
+  --tt-violet-bg: #251C3B;
+  --tt-on-info: #0B0B0A;
+  --tt-rail: #000000;
+  --tt-rail-2: #1A1A19;
+  --tt-band: #000000;
+  --tt-band-fg: #FFFFFF;
+  --tt-band-muted: #D9D9D3;
+  --tt-highlight: #2E2A14;
+  --tt-clock-face: #F4F4F0;
+  color-scheme: dark;
+}
+
+/* ---------- Base ---------- */
+:root { font-family: var(--tt-font); }
+body { background: var(--tt-bg); color: var(--tt-ink); }
+body, button, input, select, textarea { font-family: var(--tt-font); }
+table, .num, input[type="number"] { font-variant-numeric: tabular-nums; }
+::selection { background: var(--tt-highlight); color: var(--tt-ink); }
+:focus-visible { outline: 2px solid var(--tt-info); outline-offset: 2px; }
+* { scrollbar-color: var(--tt-line-strong) transparent; }
+input, select, textarea { caret-color: var(--tt-bad); }
+
+/* ---------- Sidebar: the black board ---------- */
+.sidebar { background: var(--tt-rail); border-right: 0; color: var(--tt-rail-fg); }
+.logo strong { color: var(--tt-rail-fg); font-weight: 800; letter-spacing: -0.02em; }
+.logo small { color: var(--tt-rail-muted); letter-spacing: 0.06em; }
+.logo-mark { border-color: var(--tt-rail-fg); }
+.logo-mark span { background: var(--tt-rail-fg); }
+.logo-mark span:nth-child(2) { background: var(--tt-bad); }
+.sidebar nav button { color: var(--tt-rail-muted); border-radius: 0; font-weight: 500; }
+.sidebar nav button:hover { color: var(--tt-rail-fg); background: var(--tt-rail-2); }
+.sidebar nav button.active { color: var(--tt-rail); background: var(--tt-rail-fg); box-shadow: none; font-weight: 700; }
+.sidebar-footer { border-top-color: var(--tt-rail-2); color: var(--tt-rail-fg); }
+.sidebar-footer small { color: var(--tt-rail-muted); }
+.sidebar-toggle { background: var(--tt-rail); color: var(--tt-rail-fg); border-color: var(--tt-rail-2); border-radius: 0; }
+.sidebar-toggle:hover { background: var(--tt-rail-2); border-color: var(--tt-rail-muted); }
+
+.theme-switch { display: flex; gap: 2px; padding: 3px; margin: 0 6px 12px; background: var(--tt-rail-2); }
+.theme-switch button { flex: 1; border: 0; background: transparent; color: var(--tt-rail-muted); font-size: 12px; font-weight: 600; padding: 6px 0; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 5px; }
+.theme-switch button:hover { color: var(--tt-rail-fg); }
+.theme-switch button[aria-pressed="true"] { background: var(--tt-rail-fg); color: var(--tt-rail); }
+
+/* ---------- Page header with station clock ---------- */
+.page-title { display: flex; align-items: center; gap: 14px; }
+.station-clock { width: 44px; height: 44px; flex: none; }
+h1 { font-weight: 800; letter-spacing: -0.025em; }
+h2 { font-weight: 800; letter-spacing: -0.015em; }
+.eyebrow { font: 600 11px/1.2 var(--tt-font); color: var(--tt-muted); letter-spacing: 0.08em; }
+
+/* ---------- Panels: white sheets, black heading band ---------- */
+.panel { background: var(--tt-surface); border-color: var(--tt-line); border-radius: 0; }
+body .panel-heading.panel-heading { background: var(--tt-band); color: var(--tt-band-fg); border-bottom: 0; }
+body .panel-heading.panel-heading :is(h2, h3) { color: var(--tt-band-fg); }
+body .panel-heading.panel-heading :is(.eyebrow, .help, p) { color: var(--tt-band-muted); }
+body .panel-heading.panel-heading p strong:not(.missing) { color: var(--tt-band-fg); }
+
+/* ---------- Buttons: black is the action color ---------- */
+.button.primary { background: var(--tt-ink); color: var(--tt-surface); border-color: var(--tt-ink); font-weight: 700; }
+.button.primary:hover { background: var(--tt-text-2); border-color: var(--tt-text-2); }
+.button:hover { border-color: var(--tt-ink); }
+
+/* ---------- Tables: departure-board rhythm ---------- */
+table th { color: var(--tt-ink); font-weight: 700; border-bottom: 2px solid var(--tt-ink); }
+table tbody tr:nth-child(even) > td { background: color-mix(in srgb, var(--tt-surface-2) 70%, transparent); }
+table tbody tr:hover > td { background: var(--tt-highlight); }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
